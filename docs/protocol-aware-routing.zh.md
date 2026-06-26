@@ -152,10 +152,13 @@ Claude Code 官方 LLM gateway 文档说明，请求会带适合代理识别的 
 | 请求头 | 说明 |
 | --- | --- |
 | `X-Claude-Code-Session-Id` | 当前 Claude Code session ID，最适合做会话 sticky |
+| `X-GHCP-Session-ID` | 手工注入的 GHCP session ID，可用于覆盖或补充 Claude Code 自动 session |
+| `X-GHCP-Workspace` | 工作区标识，建议传 hash，避免暴露本地绝对路径 |
+| `X-GHCP-Team` | 团队或环境标签，适合 route policy、审计和指标分组 |
 | `X-Claude-Code-Agent-Id` | 子 agent / teammate 请求的临时 ID，适合成本归因或细粒度观测 |
 | `X-Claude-Code-Parent-Agent-Id` | 嵌套 agent 场景下的父 agent ID |
 
-推荐配置
+最小配置
 
 ```bash
 export ANTHROPIC_BASE_URL="http://localhost:8000"
@@ -165,12 +168,31 @@ export CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1
 claude
 ```
 
+推荐启动 wrapper
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+export ANTHROPIC_BASE_URL="${ANTHROPIC_BASE_URL:-http://localhost:8000}"
+export ANTHROPIC_AUTH_TOKEN="${ANTHROPIC_AUTH_TOKEN:-ghcp-client-token}"
+export GHCP_SESSION_ID="${GHCP_SESSION_ID:-$(uuidgen 2>/dev/null || date +%s)-$$}"
+export GHCP_WORKSPACE="${GHCP_WORKSPACE:-$(pwd | sha256sum | cut -c1-16)}"
+export GHCP_TEAM="${GHCP_TEAM:-default}"
+export ANTHROPIC_CUSTOM_HEADERS="$(printf 'X-GHCP-Client: claude-code\nX-GHCP-Session-ID: %s\nX-GHCP-Workspace: %s\nX-GHCP-Team: %s' "$GHCP_SESSION_ID" "$GHCP_WORKSPACE" "$GHCP_TEAM")"
+export CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1
+
+exec claude "$@"
+```
+
 说明
 
 - `ANTHROPIC_BASE_URL` 指向 gateway 根地址，Claude Code 会调用 `/v1/messages`。
 - `ANTHROPIC_AUTH_TOKEN` 会作为 `Authorization: Bearer ...` 发送，可对应 GHCP client profile。
-- `ANTHROPIC_CUSTOM_HEADERS` 可附加团队、环境、工作区等低基数路由标签。
-- `X-Claude-Code-Session-Id` 通常由 Claude Code 自动发送，不需要手工配置。
+- `ANTHROPIC_CUSTOM_HEADERS` 可附加 session、团队、环境、工作区等低基数路由标签。
+- `X-Claude-Code-Session-Id` 通常由 Claude Code 自动发送，是默认优先使用的 sticky 信号。
+- `X-GHCP-Session-ID` 适合在 wrapper 中稳定注入。它应在一个 Claude Code 会话生命周期内保持不变，否则会降低 sticky 和 prompt cache 效果。
+- `X-GHCP-Workspace` 建议传 hash，不要传明文绝对路径。
 
 建议 Claude Code policy
 

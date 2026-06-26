@@ -152,10 +152,13 @@ Claude Code's official LLM gateway documentation notes that requests include hea
 | Header | Description |
 | --- | --- |
 | `X-Claude-Code-Session-Id` | Current Claude Code session ID, best for session sticky affinity |
+| `X-GHCP-Session-ID` | Manually injected GHCP session ID, useful for overriding or supplementing Claude Code's automatic session |
+| `X-GHCP-Workspace` | Workspace identifier; pass a hash instead of a plaintext absolute path |
+| `X-GHCP-Team` | Team or environment label, useful for route policy, audit, and metrics grouping |
 | `X-Claude-Code-Agent-Id` | Temporary ID for subagent / teammate requests, useful for cost attribution or fine-grained observability |
 | `X-Claude-Code-Parent-Agent-Id` | Parent agent ID for nested agent scenarios |
 
-Recommended configuration:
+Minimal configuration:
 
 ```bash
 export ANTHROPIC_BASE_URL="http://localhost:8000"
@@ -165,12 +168,31 @@ export CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1
 claude
 ```
 
+Recommended startup wrapper:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+export ANTHROPIC_BASE_URL="${ANTHROPIC_BASE_URL:-http://localhost:8000}"
+export ANTHROPIC_AUTH_TOKEN="${ANTHROPIC_AUTH_TOKEN:-ghcp-client-token}"
+export GHCP_SESSION_ID="${GHCP_SESSION_ID:-$(uuidgen 2>/dev/null || date +%s)-$$}"
+export GHCP_WORKSPACE="${GHCP_WORKSPACE:-$(pwd | sha256sum | cut -c1-16)}"
+export GHCP_TEAM="${GHCP_TEAM:-default}"
+export ANTHROPIC_CUSTOM_HEADERS="$(printf 'X-GHCP-Client: claude-code\nX-GHCP-Session-ID: %s\nX-GHCP-Workspace: %s\nX-GHCP-Team: %s' "$GHCP_SESSION_ID" "$GHCP_WORKSPACE" "$GHCP_TEAM")"
+export CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1
+
+exec claude "$@"
+```
+
 Notes:
 
 - `ANTHROPIC_BASE_URL` points to the gateway root; Claude Code calls `/v1/messages`.
 - `ANTHROPIC_AUTH_TOKEN` is sent as `Authorization: Bearer ...` and can map to a GHCP client profile.
-- `ANTHROPIC_CUSTOM_HEADERS` can attach low-cardinality routing labels such as team, environment, or workspace.
-- `X-Claude-Code-Session-Id` is usually sent automatically by Claude Code and does not need manual configuration.
+- `ANTHROPIC_CUSTOM_HEADERS` can attach low-cardinality routing labels such as session, team, environment, or workspace.
+- `X-Claude-Code-Session-Id` is usually sent automatically by Claude Code and is the default preferred sticky signal.
+- `X-GHCP-Session-ID` is useful when injected stably by a wrapper. It should remain stable for one Claude Code session; changing it every request reduces sticky and prompt-cache effectiveness.
+- `X-GHCP-Workspace` should be a hash instead of a plaintext absolute path.
 
 Recommended Claude Code policy:
 

@@ -1,0 +1,126 @@
+x-default-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "3"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: "${POSTGRES_USER:-ghcp}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}"
+      POSTGRES_DB: "${POSTGRES_DB:-ghcp}"
+    volumes:
+      - "${POSTGRES_DATA_DIR:?POSTGRES_DATA_DIR is required}:/var/lib/postgresql/data"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ghcp} -d ${POSTGRES_DB:-ghcp}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    networks:
+      - ghcp-proxy
+    logging: *default-logging
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
+    volumes:
+      - "${REDIS_DATA_DIR:?REDIS_DATA_DIR is required}:/data"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    networks:
+      - ghcp-proxy
+    logging: *default-logging
+
+  gateway:
+    image: pczhao1210/ghcp-pool-proxy:gateway-latest
+    restart: unless-stopped
+    ports:
+      - "${GATEWAY_PORT:-8000}:8000"
+    environment:
+      GATEWAY_ADDR: ":8000"
+      ADMIN_TOKEN: "${ADMIN_TOKEN:?ADMIN_TOKEN is required}"
+      POSTGRES_DSN: "postgres://${POSTGRES_USER:-ghcp}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-ghcp}?sslmode=disable"
+      REDIS_ADDR: "redis:6379"
+      PROVIDER: "${PROVIDER:-fake}"
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
+      LOG_FORMAT: "${LOG_FORMAT:-json}"
+      CREDENTIAL_KEY_VERSION: "${CREDENTIAL_KEY_VERSION:-vm}"
+      CREDENTIAL_MASTER_KEY: "${CREDENTIAL_MASTER_KEY:?CREDENTIAL_MASTER_KEY is required}"
+      GITHUB_API_BASE_URL: "${GITHUB_API_BASE_URL:-https://api.github.com}"
+      COPILOT_BASE_URL: "${COPILOT_BASE_URL:-}"
+      COPILOT_TIMEOUT: "${COPILOT_TIMEOUT:-120s}"
+      COPILOT_TOKEN_URL: "${COPILOT_TOKEN_URL:-}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - ghcp-proxy
+    logging: *default-logging
+
+  admin:
+    image: pczhao1210/ghcp-pool-proxy:admin-latest
+    restart: unless-stopped
+    ports:
+      - "${ADMIN_PORT:-8001}:8001"
+    environment:
+      ADMIN_ADDR: ":8001"
+      ADMIN_TOKEN: "${ADMIN_TOKEN:?ADMIN_TOKEN is required}"
+      API_KEY: "${API_KEY:?API_KEY is required}"
+      POSTGRES_DSN: "postgres://${POSTGRES_USER:-ghcp}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-ghcp}?sslmode=disable"
+      REDIS_ADDR: "redis:6379"
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
+      LOG_FORMAT: "${LOG_FORMAT:-json}"
+      CREDENTIAL_KEY_VERSION: "${CREDENTIAL_KEY_VERSION:-vm}"
+      CREDENTIAL_MASTER_KEY: "${CREDENTIAL_MASTER_KEY:?CREDENTIAL_MASTER_KEY is required}"
+      GITHUB_OAUTH_CLIENT_ID: "${GITHUB_OAUTH_CLIENT_ID:-Iv1.b507a08c87ecfe98}"
+      GITHUB_OAUTH_SCOPES: "${GITHUB_OAUTH_SCOPES:-read:user}"
+      GITHUB_LOGIN_BASE_URL: "${GITHUB_LOGIN_BASE_URL:-https://github.com}"
+      GITHUB_API_BASE_URL: "${GITHUB_API_BASE_URL:-https://api.github.com}"
+      COPILOT_TOKEN_URL: "${COPILOT_TOKEN_URL:-}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - ghcp-proxy
+    logging: *default-logging
+
+  worker:
+    image: pczhao1210/ghcp-pool-proxy:worker-latest
+    restart: unless-stopped
+    environment:
+      ADMIN_TOKEN: "${ADMIN_TOKEN:?ADMIN_TOKEN is required}"
+      POSTGRES_DSN: "postgres://${POSTGRES_USER:-ghcp}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-ghcp}?sslmode=disable"
+      REDIS_ADDR: "redis:6379"
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
+      LOG_FORMAT: "${LOG_FORMAT:-json}"
+      CREDENTIAL_KEY_VERSION: "${CREDENTIAL_KEY_VERSION:-vm}"
+      CREDENTIAL_MASTER_KEY: "${CREDENTIAL_MASTER_KEY:?CREDENTIAL_MASTER_KEY is required}"
+      GITHUB_OAUTH_CLIENT_ID: "${GITHUB_OAUTH_CLIENT_ID:-Iv1.b507a08c87ecfe98}"
+      GITHUB_OAUTH_SCOPES: "${GITHUB_OAUTH_SCOPES:-read:user}"
+      GITHUB_LOGIN_BASE_URL: "${GITHUB_LOGIN_BASE_URL:-https://github.com}"
+      GITHUB_API_BASE_URL: "${GITHUB_API_BASE_URL:-https://api.github.com}"
+      COPILOT_TOKEN_URL: "${COPILOT_TOKEN_URL:-}"
+      GITHUB_TOKEN: "${GITHUB_TOKEN:-}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - ghcp-proxy
+    logging: *default-logging
+
+networks:
+  ghcp-proxy:
+    name: "${COMPOSE_NETWORK_NAME:-ghcp-proxy-net}"

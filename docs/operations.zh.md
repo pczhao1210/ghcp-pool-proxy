@@ -27,9 +27,9 @@ deploy/deploy.sh --start
 
 启动流程：
 
-- 检查 Linux、Docker、Docker Compose、`curl`、`sha256sum` 等依赖。
-- 创建默认持久化目录 `~/ghcp_proxy`。
-- 首次运行生成 `~/ghcp_proxy/.env`，保存 admin token、client API key、数据库密码和 `CREDENTIAL_MASTER_KEY`。
+- 检查 Linux、Docker、Docker Compose、`curl` 等依赖。
+- 在宿主机创建默认持久化目录 `~/ghcp_proxy`，并把 PostgreSQL/Redis 数据目录作为 bind mount 挂入容器。
+- 首次运行生成宿主机文件 `~/ghcp_proxy/.env`，保存 admin token、`PROVIDER=copilot`、数据库密码和 `CREDENTIAL_MASTER_KEY`。
 - 拉取 `pczhao1210/ghcp-pool-proxy:gateway-latest`、`admin-latest`、`worker-latest` 以及 PostgreSQL/Redis 镜像。
 - 启动 PostgreSQL 和 Redis，等待健康检查通过。
 - 从已发布 admin 镜像内读取数据库迁移 SQL 并执行迁移。
@@ -54,6 +54,7 @@ VM Docker 持久化：
 - Redis AOF 数据默认保存在 `~/ghcp_proxy/data/redis`。
 - 日志默认保存在 `~/ghcp_proxy/logs`，按小时分段，`LOG_RETENTION_DAYS` 默认值为 `30`。
 - 部署密钥和端口配置保存在 `~/ghcp_proxy/.env`。已有凭据数据后不要随意替换 `CREDENTIAL_MASTER_KEY`。
+- 以上路径都是宿主机路径；PostgreSQL 和 Redis 通过 Docker Compose bind mount 使用这些目录，不是在镜像内部创建持久化目录。
 
 ## 主要配置
 
@@ -64,7 +65,7 @@ VM Docker 持久化：
 | `ADMIN_TOKEN` | admin API 鉴权 token |
 | `POSTGRES_DSN` | PostgreSQL 连接串 |
 | `REDIS_ADDR` | Redis 地址 |
-| `PROVIDER` | 上游 provider 类型，默认 `fake` |
+| `PROVIDER` | 上游 provider 类型，VM 部署默认 `copilot` |
 | `CREDENTIAL_MASTER_KEY` | 凭据加密主密钥 |
 | `GITHUB_OAUTH_CLIENT_ID` | Dashboard Device Flow 登录 Copilot 账号的 GitHub OAuth App client ID，可选覆盖项；默认使用内置 GitHub OAuth Client ID。 |
 | `GITHUB_OAUTH_SCOPES` | Device Flow scopes，默认 `read:user` |
@@ -73,7 +74,7 @@ VM Docker 持久化：
 | `COPILOT_TOKEN_URL` | Copilot bearer token 换取端点 |
 | `GITHUB_TOKEN` | worker 同步 GitHub Copilot Metrics 的 fallback token |
 | `DASHBOARD_DIR` | admin 服务 Dashboard 静态资源目录 |
-| `model_catalog_json` | 控制暴露名、上游模型 ID 和启停状态 |
+| `model_catalog_json` | 控制暴露名、上游模型 ID、上游 API 和启停状态 |
 | `LOG_LEVEL` / `LOG_FORMAT` | 日志级别和格式 |
 
 ## 多账号环境隔离
@@ -278,7 +279,12 @@ flowchart TD
 | --- | --- |
 | `exposed` | 客户端看到的模型名 |
 | `upstream` | 实际发往 GitHub Copilot 的上游模型 ID |
+| `upstream_api` | 可选，上游 endpoint：`chat_completions` 或 `responses` |
+| `name` | 可选，从 Copilot `/models` 刷新的显示名称 |
+| `vendor` | 可选，从 Copilot `/models` 刷新的模型供应商；`OpenAI` 会自动推导为 Responses |
 | `enabled` | 是否暴露给 `/v1/models`，以及是否允许请求 |
+
+GitHub Copilot 上游 endpoint 采用混合选择，不是全局默认 Responses。选择顺序是：模型目录中的 `upstream_api` 优先；从 Copilot 刷新的 `vendor=OpenAI` 模型和已知 `gpt-5.5` 走上游 Responses；其他模型按下游请求协议选择，`/v1/responses` 走 Responses，Chat-compatible 请求走 Chat Completions。
 
 ```mermaid
 flowchart LR
@@ -287,7 +293,7 @@ flowchart LR
   C --> D["GET /v1/models"]
   C --> E["请求模型解析"]
   E --> F{"exposed 是否启用?"}
-  F -->|"是"| G["映射到 upstream model"]
+  F -->|"是"| G["映射到 upstream model + upstream_api"]
   F -->|"否"| H["400 invalid_model"]
 ```
 

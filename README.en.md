@@ -16,7 +16,8 @@ GHCP Pool Proxy is a gateway and control-plane system for controlled GitHub Copi
 ## Current Capabilities
 
 - The gateway exposes OpenAI Chat Completions, OpenAI Responses API, and Anthropic Messages endpoints.
-- The model catalog is controlled by `model_catalog_json`, including exposed names, upstream model IDs, and `enabled` status.
+- The model catalog is controlled by `model_catalog_json`, including exposed names, upstream model IDs, Copilot `name/vendor` metadata, `upstream_api`, and `enabled` status.
+- GitHub Copilot upstream endpoint selection is mixed: `upstream_api` can override per model; Copilot-refreshed `vendor=OpenAI` models and known `gpt-5.5` default to upstream Responses; other models fall back to Chat Completions or Responses based on the downstream protocol.
 - The router selects pools by model and route policy, then applies sticky affinity, overflow, pool/account/seat filtering, concurrency constraints, and weighted selection.
 - Route policies support `request_format`, enabling protocol-level routing for `openai_chat`, `openai_responses`, and `anthropic_messages`.
 - The gateway loads routing configuration on startup and refreshes pool, account membership, and route policy snapshots from PostgreSQL every 30 seconds.
@@ -28,7 +29,7 @@ GHCP Pool Proxy is a gateway and control-plane system for controlled GitHub Copi
 ```mermaid
 flowchart TD
   A["deploy/deploy.sh --start"] --> B["pull fixed Docker Hub images"]
-  B --> C["create ~/ghcp_proxy persistent dirs"]
+  B --> C["create host ~/ghcp_proxy bind-mount dirs"]
   C --> D["apply database migrations"]
   D --> E["Gateway :8000"]
   D --> F["Admin :8001"]
@@ -39,7 +40,7 @@ flowchart TD
   G --> K["Probes / Metrics sync / Credential warnings / Recovery tasks"]
 ```
 
-Use the deployment script from the release repository [pczhao1210/ghcp-pool-proxy](https://github.com/pczhao1210/ghcp-pool-proxy) to start the stack on a Linux VM. It checks Docker/Docker Compose dependencies, creates `~/ghcp_proxy` persistent directories, pulls fixed Docker Hub images, starts PostgreSQL/Redis/gateway/admin/worker, and writes hourly logs under `~/ghcp_proxy/logs` with 30-day retention by default.
+Use the deployment script from the release repository [pczhao1210/ghcp-pool-proxy](https://github.com/pczhao1210/ghcp-pool-proxy) to start the stack on a Linux VM. It checks Docker/Docker Compose dependencies, creates host `~/ghcp_proxy` persistent directories and bind-mounts PostgreSQL/Redis data directories into containers, pulls fixed Docker Hub images, starts PostgreSQL/Redis/gateway/admin/worker, and writes hourly logs under `~/ghcp_proxy/logs` with 30-day retention by default. VM deployments use the GitHub Copilot provider by default.
 
 Fetch or update the release package with Git, then start it:
 
@@ -69,7 +70,7 @@ If you are already inside the release package directory, run:
 deploy/deploy.sh --start
 ```
 
-On first run, the script generates `~/ghcp_proxy/.env` containing `ADMIN_TOKEN`, `API_KEY`, `CREDENTIAL_MASTER_KEY`, and the database password. Keep this file private, and do not rotate `CREDENTIAL_MASTER_KEY` casually after storing credentials.
+On first run, the script generates host file `~/ghcp_proxy/.env` containing `ADMIN_TOKEN`, `PROVIDER=copilot`, `CREDENTIAL_MASTER_KEY`, and the database password. Keep this file private, and do not rotate `CREDENTIAL_MASTER_KEY` casually after storing credentials.
 
 Tail hourly file logs:
 

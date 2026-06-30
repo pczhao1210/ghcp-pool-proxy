@@ -16,7 +16,8 @@ GHCP Pool Proxy 是一个面向受控 GitHub Copilot 账号资源的网关与控
 ## 当前能力
 
 - Gateway 已提供 OpenAI Chat Completions、OpenAI Responses API、Anthropic Messages 三类入口。
-- 模型目录由 `model_catalog_json` 控制，支持暴露名、上游模型 ID 和 `enabled` 启停。
+- 模型目录由 `model_catalog_json` 控制，支持暴露名、上游模型 ID、Copilot `name/vendor` 元数据、`upstream_api` 和 `enabled` 启停。
+- GitHub Copilot 上游 endpoint 采用混合选择：`upstream_api` 可按模型显式覆盖；从 Copilot 刷新的 `vendor=OpenAI` 模型和已知 `gpt-5.5` 默认走上游 Responses；其他模型按下游协议回退到 Chat Completions 或 Responses。
 - Router 支持按模型与 route policy 选择池，并执行 sticky 亲和、overflow、pool/account/seat 过滤、并发约束和权重选择。
 - route policy 已支持 `request_format`，可按 `openai_chat`、`openai_responses`、`anthropic_messages` 做协议级分流。
 - Gateway 启动时加载路由配置，并每 30 秒从 PostgreSQL 刷新 pool、账号关系和 route policy 快照。
@@ -28,7 +29,7 @@ GHCP Pool Proxy 是一个面向受控 GitHub Copilot 账号资源的网关与控
 ```mermaid
 flowchart TD
   A["deploy/deploy.sh --start"] --> B["拉取固定 Docker Hub 镜像"]
-  B --> C["创建 ~/ghcp_proxy 持久化目录"]
+  B --> C["创建宿主机 ~/ghcp_proxy bind mount 目录"]
   C --> D["应用数据库迁移"]
   D --> E["Gateway :8000"]
   D --> F["Admin :8001"]
@@ -39,7 +40,7 @@ flowchart TD
   G --> K["探针 / Metrics 同步 / 凭据提醒 / 恢复任务"]
 ```
 
-推荐使用发布仓库 [pczhao1210/ghcp-pool-proxy](https://github.com/pczhao1210/ghcp-pool-proxy) 中的部署脚本在 Linux VM 上启动。脚本会检查 Docker/Docker Compose 等依赖，创建 `~/ghcp_proxy` 持久化目录，拉取固定 Docker Hub 镜像，启动 PostgreSQL/Redis/gateway/admin/worker，并按小时把日志落盘到 `~/ghcp_proxy/logs`，默认保留 30 天。
+推荐使用发布仓库 [pczhao1210/ghcp-pool-proxy](https://github.com/pczhao1210/ghcp-pool-proxy) 中的部署脚本在 Linux VM 上启动。脚本会检查 Docker/Docker Compose 等依赖，在宿主机创建 `~/ghcp_proxy` 持久化目录并把 PostgreSQL/Redis 数据目录 bind mount 到容器，拉取固定 Docker Hub 镜像，启动 PostgreSQL/Redis/gateway/admin/worker，并按小时把日志落盘到 `~/ghcp_proxy/logs`，默认保留 30 天。VM 部署默认使用 GitHub Copilot provider。
 
 通过 Git 获取或更新发布包后启动：
 
@@ -69,7 +70,7 @@ deploy/deploy.sh --start
 deploy/deploy.sh --start
 ```
 
-首次运行会生成 `~/ghcp_proxy/.env`，其中包含 `ADMIN_TOKEN`、`API_KEY`、`CREDENTIAL_MASTER_KEY` 和数据库密码。请妥善保存该文件，尤其不要在已有数据的情况下随意更换 `CREDENTIAL_MASTER_KEY`。
+首次运行会生成宿主机文件 `~/ghcp_proxy/.env`，其中包含 `ADMIN_TOKEN`、`PROVIDER=copilot`、`CREDENTIAL_MASTER_KEY` 和数据库密码。请妥善保存该文件，尤其不要在已有数据的情况下随意更换 `CREDENTIAL_MASTER_KEY`。
 
 查看按小时落盘的服务日志：
 

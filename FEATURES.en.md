@@ -62,7 +62,7 @@ Use **Recover** in the dashboard or call `POST /admin/accounts/{id}/recover` to 
 
 ## Model Catalog Configuration
 
-The model catalog maps exposed model names seen by clients to real upstream model IDs, and controls whether each model is visible.
+The model catalog maps exposed model names seen by clients to real upstream model IDs, controls whether each model is visible, and can select whether a model uses the upstream Chat Completions or Responses API. GitHub Copilot upstream is not globally Responses by default: `upstream_api` wins; Copilot-refreshed `vendor=OpenAI` models and known `gpt-5.5` automatically use Responses; other models follow the downstream request protocol.
 
 ```mermaid
 flowchart LR
@@ -71,7 +71,7 @@ flowchart LR
   C --> D["GET /v1/models"]
   C --> E["request model resolution"]
   E --> F{"enabled and known?"}
-  F -->|"yes"| G["send upstream model"]
+  F -->|"yes"| G["send upstream model + upstream_api"]
   F -->|"no"| H["400 invalid_model"]
 ```
 
@@ -81,12 +81,14 @@ Example configuration:
 [
   {"exposed":"gpt-4o","upstream":"gpt-4o","enabled":true},
   {"exposed":"gpt-4o-mini","upstream":"gpt-4o-mini","enabled":true},
+  {"exposed":"gpt-5.5","upstream":"gpt-5.5","upstream_api":"responses","enabled":true},
   {"exposed":"claude-sonnet","upstream":"claude-sonnet-4-20250514","enabled":true},
   {"exposed":"o3-mini","upstream":"o3-mini","enabled":false}
 ]
 ```
 
 Models with `enabled=false`, or models absent from the catalog, are not returned by `/v1/models` and requests for them return `400 bad_request` with `invalid_model`.
+`upstream_api` is optional and supports `chat_completions` and `responses`; when omitted, the gateway infers from Copilot model metadata, sending `vendor=OpenAI` and known `gpt-5.5` to upstream Responses while other models fall back to Chat Completions.
 
 If `model_catalog_json` is not configured, default models are exposed. If it is configured as an empty array, no models are exposed; this is intentional.
 
@@ -102,7 +104,7 @@ If `model_catalog_json` is not configured, default models are exposed. If it is 
 | Events | View audit log entries for admin operations |
 | GitHub Orgs | View organization seat mappings and Copilot plan status |
 | Settings | Manage system settings and feature flags |
-| Models | View and configure exposed/upstream/enabled model catalog entries |
+| Models | View and configure exposed/upstream/upstream_api/enabled model catalog entries |
 
 ## Admin API Endpoints
 
@@ -204,7 +206,7 @@ The dashboard Metrics tab supports quick windows and custom `from/to` date range
 | `GITHUB_TOKEN` | Optional fallback token for the metrics sync worker |
 | `GITHUB_OAUTH_CLIENT_ID` | Optional override for the GitHub OAuth App client ID used by dashboard Device Flow; defaults to the built-in GitHub OAuth Client ID |
 | `GITHUB_OAUTH_SCOPES` | Device Flow scopes, default `read:user` |
-| `PROVIDER` | Set to `copilot` for the real provider; default `fake` is for local smoke tests |
+| `PROVIDER` | VM deploy defaults to `copilot`; local development compose defaults to `fake` for smoke tests |
 
 Generate a test encryption key:
 

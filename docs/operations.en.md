@@ -27,9 +27,9 @@ deploy/deploy.sh --start
 
 Startup flow:
 
-- Checks Linux, Docker, Docker Compose, `curl`, `sha256sum`, and related dependencies.
-- Creates the default persistent root at `~/ghcp_proxy`.
-- Generates `~/ghcp_proxy/.env` on first run with the admin token, client API key, database password, and `CREDENTIAL_MASTER_KEY`.
+- Checks Linux, Docker, Docker Compose, `curl`, and related dependencies.
+- Creates the default persistent root at host `~/ghcp_proxy` and bind-mounts PostgreSQL/Redis data directories into containers.
+- Generates host file `~/ghcp_proxy/.env` on first run with the admin token, `PROVIDER=copilot`, database password, and `CREDENTIAL_MASTER_KEY`.
 - Pulls `pczhao1210/ghcp-pool-proxy:gateway-latest`, `admin-latest`, `worker-latest`, plus PostgreSQL and Redis images.
 - Starts PostgreSQL and Redis, then waits for health checks.
 - Reads migration SQL from the published admin image and applies database migrations.
@@ -54,6 +54,7 @@ VM Docker persistence:
 - Redis AOF data is stored under `~/ghcp_proxy/data/redis` by default.
 - Logs are stored under `~/ghcp_proxy/logs`, split hourly, with `LOG_RETENTION_DAYS=30` by default.
 - Deployment secrets and ports are stored in `~/ghcp_proxy/.env`. Do not rotate `CREDENTIAL_MASTER_KEY` casually after storing credentials.
+- These are host paths. PostgreSQL and Redis use them through Docker Compose bind mounts; persistent directories are not created inside the images.
 
 ## Main Configuration
 
@@ -64,7 +65,7 @@ VM Docker persistence:
 | `ADMIN_TOKEN` | Admin API authentication token |
 | `POSTGRES_DSN` | PostgreSQL connection string |
 | `REDIS_ADDR` | Redis address |
-| `PROVIDER` | Upstream provider type, default `fake` |
+| `PROVIDER` | Upstream provider type, `copilot` by default for VM deployment |
 | `CREDENTIAL_MASTER_KEY` | Credential encryption master key |
 | `GITHUB_OAUTH_CLIENT_ID` | Optional override for the GitHub OAuth App client ID used by dashboard Device Flow. Defaults to the built-in GitHub OAuth Client ID. |
 | `GITHUB_OAUTH_SCOPES` | Device Flow scopes, default `read:user` |
@@ -73,7 +74,7 @@ VM Docker persistence:
 | `COPILOT_TOKEN_URL` | Copilot bearer token exchange endpoint |
 | `GITHUB_TOKEN` | Fallback token for worker GitHub Copilot Metrics sync |
 | `DASHBOARD_DIR` | Dashboard static asset directory served by admin |
-| `model_catalog_json` | Controls exposed names, upstream model IDs, and enabled status |
+| `model_catalog_json` | Controls exposed names, upstream model IDs, upstream API, and enabled status |
 | `LOG_LEVEL` / `LOG_FORMAT` | Log level and format |
 
 ## Multi-Account Environment Isolation
@@ -278,7 +279,12 @@ flowchart TD
 | --- | --- |
 | `exposed` | Model name visible to clients |
 | `upstream` | Actual upstream model ID sent to GitHub Copilot |
+| `upstream_api` | Optional upstream endpoint: `chat_completions` or `responses` |
+| `name` | Optional display name refreshed from Copilot `/models` |
+| `vendor` | Optional model vendor refreshed from Copilot `/models`; `OpenAI` infers Responses |
 | `enabled` | Whether the model is returned by `/v1/models` and allowed in requests |
+
+GitHub Copilot upstream endpoint selection is mixed, not globally Responses by default. Selection order is: model catalog `upstream_api` wins; Copilot-refreshed `vendor=OpenAI` models and known `gpt-5.5` use upstream Responses; other models follow the downstream request protocol, where `/v1/responses` uses Responses and Chat-compatible requests use Chat Completions.
 
 ```mermaid
 flowchart LR
@@ -287,7 +293,7 @@ flowchart LR
   C --> D["GET /v1/models"]
   C --> E["request model resolution"]
   E --> F{"exposed enabled?"}
-  F -->|"yes"| G["map to upstream model"]
+  F -->|"yes"| G["map to upstream model + upstream_api"]
   F -->|"no"| H["400 invalid_model"]
 ```
 

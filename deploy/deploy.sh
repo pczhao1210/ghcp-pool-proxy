@@ -7,7 +7,8 @@ SCRIPT_PATH="$SCRIPT_DIR/deploy.sh"
 ACTION="start"
 ACTION_SET=0
 
-DATA_DIR="${GHCP_PROXY_HOME:-${DATA_DIR:-$HOME/ghcp_proxy}}"
+DEFAULT_DATA_DIR="$HOME/ghcp_proxy"
+DATA_DIR="${GHCP_PROXY_HOME:-${DATA_DIR:-}}"
 ENV_FILE="${ENV_FILE:-}"
 COMPOSE_FILE="${COMPOSE_FILE:-$SCRIPT_DIR/docker-compose.vm.yml}"
 LOCAL_MIGRATIONS_DIR="${LOCAL_MIGRATIONS_DIR:-$SCRIPT_DIR/../migrations}"
@@ -40,10 +41,11 @@ Environment:
   LOG_RETENTION_DAYS   Hourly file log retention days. Default: 30
   WAIT_TIMEOUT         Seconds to wait for containers and HTTP endpoints. Default: 120
 
-Generated files:
-  ~/ghcp_proxy/.env       Private deployment settings and generated secrets.
-  ~/ghcp_proxy/data/*     PostgreSQL and Redis persistent data.
-  ~/ghcp_proxy/logs/*     Hourly service logs and log collector diagnostics.
+Generated host files and bind-mount directories:
+  ~/ghcp_proxy/.env             Private deployment settings and generated secrets.
+  ~/ghcp_proxy/data/postgres    Host bind mount for PostgreSQL data.
+  ~/ghcp_proxy/data/redis       Host bind mount for Redis data.
+  ~/ghcp_proxy/logs             Host directory for hourly service logs.
 EOF
 }
 
@@ -134,6 +136,9 @@ parse_args() {
 }
 
 refresh_paths() {
+  if [[ -z "$DATA_DIR" ]]; then
+    DATA_DIR="$DEFAULT_DATA_DIR"
+  fi
   DATA_DIR="$(expand_path "$DATA_DIR")"
   [[ -n "$ENV_FILE" ]] || ENV_FILE="$DATA_DIR/.env"
   ENV_FILE="$(expand_path "$ENV_FILE")"
@@ -171,7 +176,6 @@ require_start_cmds() {
   require_common_cmds
   require_cmd curl
   require_cmd nohup
-  require_cmd sha256sum
 }
 
 random_hex() {
@@ -204,7 +208,7 @@ write_env_file_if_missing() {
     add_env_if_missing GATEWAY_PORT "8000"
     add_env_if_missing ADMIN_PORT "8001"
     add_env_if_missing ADMIN_TOKEN "$(random_hex 32)"
-    add_env_if_missing API_KEY "$(random_hex 32)"
+    add_env_if_missing PROVIDER "copilot"
     add_env_if_missing CREDENTIAL_KEY_VERSION "vm"
     add_env_if_missing CREDENTIAL_MASTER_KEY "$(random_hex 32)"
     add_env_if_missing LOG_RETENTION_DAYS "$LOG_RETENTION_DAYS"
@@ -226,14 +230,14 @@ ADMIN_PORT=8001
 COMPOSE_NETWORK_NAME=ghcp-proxy-net
 
 ADMIN_TOKEN=$(random_hex 32)
-API_KEY=$(random_hex 32)
+PROVIDER=copilot
 CREDENTIAL_KEY_VERSION=vm
 CREDENTIAL_MASTER_KEY=$(random_hex 32)
 
 LOG_RETENTION_DAYS=$LOG_RETENTION_DAYS
 
 # Optional runtime settings. Saved Dashboard settings are used when these are unset.
-# PROVIDER=copilot
+# Set PROVIDER=fake only for explicit non-production troubleshooting.
 # LOG_LEVEL=info
 # LOG_FORMAT=json
 # GITHUB_TOKEN=
@@ -480,40 +484,7 @@ load_runtime_environment() {
   export_runtime_setting LOG_LEVEL log_level
   export_runtime_setting LOG_FORMAT log_format
 
-  log "Using gateway provider: ${PROVIDER:-fake}"
-}
-
-seed_default_data() {
-  local api_key_hash
-  local pool_status="active"
-  local account_status="active"
-  local membership_status="active"
-  api_key_hash="$(printf '%s' "$API_KEY" | sha256sum | awk '{print $1}')"
-
-  if [[ "${PROVIDER:-fake}" != "fake" ]]; then
-    pool_status="inactive"
-    account_status="quarantined"
-    membership_status="inactive"
-  fi
-
-  log "Ensuring default pool, account, and client profile"
-  db_psql -v ON_ERROR_STOP=1 <<SQL
-INSERT INTO backend_pools (id, name, status, priority, created_at, updated_at)
-VALUES ('00000000-0000-0000-0000-000000000201', 'default-pool', '$pool_status', 1, now(), now())
-ON CONFLICT (id) DO UPDATE SET status = '$pool_status', priority = 1, updated_at = now();
-
-INSERT INTO accounts (id, name, provider, account_source, github_login, status, risk_score, priority, max_concurrency, current_failure_count, created_at, updated_at)
-VALUES ('00000000-0000-0000-0000-000000000202', 'default-fake-account', 'fake', 'personal', 'default-fake', '$account_status', 0, 1, 10, 0, now(), now())
-ON CONFLICT (id) DO UPDATE SET status = '$account_status', risk_score = 0, priority = 1, max_concurrency = 10, current_failure_count = 0, updated_at = now();
-
-INSERT INTO pool_accounts (pool_id, account_id, weight, status, created_at)
-VALUES ('00000000-0000-0000-0000-000000000201', '00000000-0000-0000-0000-000000000202', 100, '$membership_status', now())
-ON CONFLICT (pool_id, account_id) DO UPDATE SET weight = 100, status = '$membership_status';
-
-INSERT INTO client_profiles (id, name, api_key_hash, default_request_format, default_response_format, default_model, model_aliases, sticky_mode, sticky_ttl_seconds, cache_affinity_enabled, max_sticky_load_ratio, enabled, created_at, updated_at)
-VALUES ('00000000-0000-0000-0000-000000000203', 'default-client', '$api_key_hash', 'openai_chat', 'openai_chat', 'gpt-4o', '{}', 'soft', 1800, true, 0.85, true, now(), now())
-ON CONFLICT (id) DO UPDATE SET api_key_hash = EXCLUDED.api_key_hash, enabled = true, default_model = 'gpt-4o', updated_at = now();
-SQL
+  log "Using gateway provider: ${PROVIDER:-copilot}"
 }
 
 run_start_checks() {
@@ -630,6 +601,7 @@ start_app_services() {
 
 start_stack() {
   require_start_cmds
+  log "Preparing host bind-mount directories under $DATA_DIR"
   prepare_directories
   write_env_file_if_missing
   load_environment
@@ -638,7 +610,6 @@ start_stack() {
   start_data_services
   apply_migrations_if_needed
   load_runtime_environment
-  seed_default_data
   start_app_services
   run_start_checks
   start_log_collector
@@ -648,7 +619,10 @@ start_stack() {
 VM stack is ready.
   Gateway:       $GATEWAY_URL
   Admin UI:      $ADMIN_URL/
-  Data dir:      $DATA_DIR
+  Provider:      ${PROVIDER:-copilot}
+  Host data dir: $DATA_DIR
+  PostgreSQL:    $POSTGRES_DATA_DIR -> postgres:/var/lib/postgresql/data
+  Redis:         $REDIS_DATA_DIR -> redis:/data
   Log dir:       $LOG_DIR
   Log retention: ${LOG_RETENTION_DAYS} days
   Env file:      $ENV_FILE

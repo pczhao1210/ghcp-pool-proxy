@@ -48,7 +48,7 @@ services:
       ADMIN_TOKEN: "${ADMIN_TOKEN:?ADMIN_TOKEN is required}"
       POSTGRES_DSN: "postgres://${POSTGRES_USER:-ghcp}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-ghcp}?sslmode=disable"
       REDIS_ADDR: "redis:6379"
-      PROVIDER: "${PROVIDER:-fake}"
+      PROVIDER: "${PROVIDER:-copilot}"
       LOG_LEVEL: "${LOG_LEVEL:-info}"
       LOG_FORMAT: "${LOG_FORMAT:-json}"
       CREDENTIAL_KEY_VERSION: "${CREDENTIAL_KEY_VERSION:-vm}"
@@ -74,7 +74,6 @@ services:
     environment:
       ADMIN_ADDR: ":8001"
       ADMIN_TOKEN: "${ADMIN_TOKEN:?ADMIN_TOKEN is required}"
-      API_KEY: "${API_KEY:?API_KEY is required}"
       POSTGRES_DSN: "postgres://${POSTGRES_USER:-ghcp}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-ghcp}?sslmode=disable"
       REDIS_ADDR: "redis:6379"
       LOG_LEVEL: "${LOG_LEVEL:-info}"

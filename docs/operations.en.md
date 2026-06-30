@@ -284,7 +284,7 @@ flowchart TD
 | `vendor` | Optional model vendor refreshed from Copilot `/models`; `OpenAI` infers Responses |
 | `enabled` | Whether the model is returned by `/v1/models` and allowed in requests |
 
-GitHub Copilot upstream endpoint selection is mixed, not globally Responses by default. Selection order is: model catalog `upstream_api` wins; Copilot-refreshed `vendor=OpenAI` models and known `gpt-5.5` use upstream Responses; other models follow the downstream request protocol, where `/v1/responses` uses Responses and Chat-compatible requests use Chat Completions.
+GitHub Copilot upstream endpoint selection is mixed, not globally Responses by default. Selection order is: model catalog `upstream_api` wins; Copilot-refreshed `vendor=OpenAI` models and known `gpt-5.5` use upstream Responses; known chat-only vendors/model families such as Gemini, Anthropic, and Grok use upstream Chat Completions even when clients call `/v1/responses`; other models follow the downstream request protocol.
 
 ```mermaid
 flowchart LR

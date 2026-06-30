@@ -188,6 +188,7 @@ exec claude "$@"
 Notes:
 
 - `ANTHROPIC_BASE_URL` points to the gateway root; Claude Code calls `/v1/messages`.
+- `GET /v1/models` returns an Anthropic-compatible model list when the request includes `Anthropic-Version`, a Claude/Anthropic user agent, or `?format=anthropic`; OpenAI-compatible clients still receive the OpenAI list shape by default.
 - `ANTHROPIC_AUTH_TOKEN` is sent as `Authorization: Bearer ...` and can map to a GHCP client profile.
 - `ANTHROPIC_CUSTOM_HEADERS` can attach low-cardinality routing labels such as session, team, environment, or workspace.
 - `X-Claude-Code-Session-Id` is usually sent automatically by Claude Code and is the default preferred sticky signal.

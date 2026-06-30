@@ -25,7 +25,7 @@ flowchart LR
   Select --> Request["request routing"]
 ```
 
-The model catalog is not part of the router snapshot. The gateway reads `model_catalog_json` when handling `/v1/models` and request model resolution, mapping exposed names to upstream models and optionally selecting the upstream Copilot endpoint with `upstream_api` (`chat_completions` or `responses`). Upstream endpoint selection is not globally Responses by default; it is mixed: `upstream_api` wins; Copilot-refreshed `vendor=OpenAI` models and known `gpt-5.5` use upstream Responses; other models follow the downstream request protocol, where `/v1/responses` uses Responses and Chat-compatible requests use Chat Completions.
+The model catalog is not part of the router snapshot. The gateway reads `model_catalog_json` when handling `/v1/models` and request model resolution, mapping exposed names to upstream models and optionally selecting the upstream Copilot endpoint with `upstream_api` (`chat_completions` or `responses`). Upstream endpoint selection is not globally Responses by default; it is mixed: `upstream_api` wins; Copilot-refreshed `vendor=OpenAI` models and known `gpt-5.5` use upstream Responses; known chat-only vendors/model families such as Gemini, Anthropic, and Grok use upstream Chat Completions even for downstream `/v1/responses`; other models follow the downstream request protocol.
 
 ## Routing Flow
 

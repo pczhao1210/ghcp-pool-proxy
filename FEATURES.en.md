@@ -62,7 +62,7 @@ Use **Recover** in the dashboard or call `POST /admin/accounts/{id}/recover` to 
 
 ## Model Catalog Configuration
 
-The model catalog maps exposed model names seen by clients to real upstream model IDs, controls whether each model is visible, and can select whether a model uses the upstream Chat Completions or Responses API. GitHub Copilot upstream is not globally Responses by default: `upstream_api` wins; Copilot-refreshed `vendor=OpenAI` models and known `gpt-5.5` automatically use Responses; other models follow the downstream request protocol.
+The model catalog maps exposed model names seen by clients to real upstream model IDs, controls whether each model is visible, and can select whether a model uses the upstream Chat Completions or Responses API. GitHub Copilot upstream is not globally Responses by default: `upstream_api` wins; Copilot-refreshed `vendor=OpenAI` models and known `gpt-5.5` automatically use Responses; known chat-only vendors/model families such as Gemini, Anthropic, and Grok automatically use Chat Completions; other models follow the downstream request protocol.
 
 ```mermaid
 flowchart LR
@@ -88,7 +88,7 @@ Example configuration:
 ```
 
 Models with `enabled=false`, or models absent from the catalog, are not returned by `/v1/models` and requests for them return `400 bad_request` with `invalid_model`.
-`upstream_api` is optional and supports `chat_completions` and `responses`; when omitted, the gateway infers from Copilot model metadata, sending `vendor=OpenAI` and known `gpt-5.5` to upstream Responses while other models fall back to Chat Completions.
+`upstream_api` is optional and supports `chat_completions` and `responses`; when omitted, the gateway infers from Copilot model metadata, sending `vendor=OpenAI` and known `gpt-5.5` to upstream Responses, known chat-only vendors/model families such as Gemini to Chat Completions, and all remaining models by downstream request protocol.
 
 If `model_catalog_json` is not configured, default models are exposed. If it is configured as an empty array, no models are exposed; this is intentional.
 

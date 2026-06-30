@@ -284,7 +284,7 @@ flowchart TD
 | `vendor` | 可选，从 Copilot `/models` 刷新的模型供应商；`OpenAI` 会自动推导为 Responses |
 | `enabled` | 是否暴露给 `/v1/models`，以及是否允许请求 |
 
-GitHub Copilot 上游 endpoint 采用混合选择，不是全局默认 Responses。选择顺序是：模型目录中的 `upstream_api` 优先；从 Copilot 刷新的 `vendor=OpenAI` 模型和已知 `gpt-5.5` 走上游 Responses；其他模型按下游请求协议选择，`/v1/responses` 走 Responses，Chat-compatible 请求走 Chat Completions。
+GitHub Copilot 上游 endpoint 采用混合选择，不是全局默认 Responses。选择顺序是：模型目录中的 `upstream_api` 优先；从 Copilot 刷新的 `vendor=OpenAI` 模型和已知 `gpt-5.5` 走上游 Responses；Gemini、Anthropic、Grok 等已知 chat-only vendor/model family 即使客户端调用 `/v1/responses` 也走上游 Chat Completions；其他模型按下游请求协议选择。
 
 ```mermaid
 flowchart LR

@@ -25,7 +25,7 @@ flowchart LR
   Select --> Request["请求路由"]
 ```
 
-模型目录不属于 router 快照；gateway 解析 `/v1/models` 和请求模型时读取 `model_catalog_json`，从 exposed name 映射到 upstream model，并可通过 `upstream_api` 指定上游 Copilot endpoint（`chat_completions` 或 `responses`）。上游 endpoint 不是全局默认 Responses，而是混合选择：`upstream_api` 优先；从 Copilot 刷新的 `vendor=OpenAI` 模型和已知 `gpt-5.5` 走上游 Responses；其他模型跟随下游请求协议，`/v1/responses` 走 Responses，Chat-compatible 请求走 Chat Completions。
+模型目录不属于 router 快照；gateway 解析 `/v1/models` 和请求模型时读取 `model_catalog_json`，从 exposed name 映射到 upstream model，并可通过 `upstream_api` 指定上游 Copilot endpoint（`chat_completions` 或 `responses`）。上游 endpoint 不是全局默认 Responses，而是混合选择：`upstream_api` 优先；从 Copilot 刷新的 `vendor=OpenAI` 模型和已知 `gpt-5.5` 走上游 Responses；Gemini、Anthropic、Grok 等已知 chat-only vendor/model family 即使下游是 `/v1/responses` 也走上游 Chat Completions；其他模型跟随下游请求协议。
 
 ## 路由总流程
 

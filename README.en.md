@@ -17,7 +17,7 @@ GHCP Pool Proxy is a gateway and control-plane system for controlled GitHub Copi
 
 - The gateway exposes OpenAI Chat Completions, OpenAI Responses API, and Anthropic Messages endpoints.
 - The model catalog is controlled by `model_catalog_json`, including exposed names, upstream model IDs, Copilot `name/vendor` metadata, `upstream_api`, and `enabled` status.
-- GitHub Copilot upstream endpoint selection is mixed: `upstream_api` can override per model; Copilot-refreshed `vendor=OpenAI` models and known `gpt-5.5` default to upstream Responses; other models fall back to Chat Completions or Responses based on the downstream protocol.
+- GitHub Copilot upstream endpoint selection is mixed: `upstream_api` can override per model; Copilot-refreshed `vendor=OpenAI` models and known `gpt-5.5` default to upstream Responses; known chat-only vendors/model families such as Gemini, Anthropic, and Grok default to upstream Chat Completions even when clients call `/v1/responses`; other models follow the downstream protocol.
 - The router selects pools by model and route policy, then applies sticky affinity, overflow, pool/account/seat filtering, concurrency constraints, and weighted selection.
 - Route policies support `request_format`, enabling protocol-level routing for `openai_chat`, `openai_responses`, and `anthropic_messages`.
 - The gateway loads routing configuration on startup and refreshes pool, account membership, and route policy snapshots from PostgreSQL every 30 seconds.

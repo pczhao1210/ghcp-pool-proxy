@@ -62,7 +62,7 @@ Device Flow 步骤
 
 ## 2. 模型目录配置
 
-模型目录把客户端看到的 exposed model 映射到真实上游模型 ID，控制模型是否对外暴露，并可指定该模型走上游 Chat Completions 还是 Responses API。GitHub Copilot 上游不是全局默认 Responses：`upstream_api` 优先；从 Copilot 刷新的 `vendor=OpenAI` 模型和已知 `gpt-5.5` 自动走 Responses；其他模型按下游请求协议选择。
+模型目录把客户端看到的 exposed model 映射到真实上游模型 ID，控制模型是否对外暴露，并可指定该模型走上游 Chat Completions 还是 Responses API。GitHub Copilot 上游不是全局默认 Responses：`upstream_api` 优先；从 Copilot 刷新的 `vendor=OpenAI` 模型和已知 `gpt-5.5` 自动走 Responses；Gemini、Anthropic、Grok 等已知 chat-only vendor/model family 自动走 Chat Completions；其他模型按下游请求协议选择。
 
 ```mermaid
 flowchart LR
@@ -88,7 +88,7 @@ flowchart LR
 ```
 
 `enabled=false` 或未出现在目录中的模型不会出现在 `/v1/models`，请求时返回 `400 bad_request` 和 `invalid_model`。
-`upstream_api` 可选，支持 `chat_completions` 和 `responses`；未填写时会按 Copilot 模型元数据推导，`vendor=OpenAI` 和已知 `gpt-5.5` 走上游 Responses，其他模型回退 Chat Completions。
+`upstream_api` 可选，支持 `chat_completions` 和 `responses`；未填写时会按 Copilot 模型元数据推导，`vendor=OpenAI` 和已知 `gpt-5.5` 走上游 Responses，Gemini 等已知 chat-only vendor/model family 走 Chat Completions，其余模型按下游请求协议选择。
 
 如果没有配置 `model_catalog_json`，系统会暴露默认模型；如果配置为空数组，则不暴露任何模型，这是有意行为。
 

@@ -17,7 +17,7 @@ GHCP Pool Proxy 是一个面向受控 GitHub Copilot 账号资源的网关与控
 
 - Gateway 已提供 OpenAI Chat Completions、OpenAI Responses API、Anthropic Messages 三类入口。
 - 模型目录由 `model_catalog_json` 控制，支持暴露名、上游模型 ID、Copilot `name/vendor` 元数据、`upstream_api` 和 `enabled` 启停。
-- GitHub Copilot 上游 endpoint 采用混合选择：`upstream_api` 可按模型显式覆盖；从 Copilot 刷新的 `vendor=OpenAI` 模型和已知 `gpt-5.5` 默认走上游 Responses；其他模型按下游协议回退到 Chat Completions 或 Responses。
+- GitHub Copilot 上游 endpoint 采用混合选择：`upstream_api` 可按模型显式覆盖；从 Copilot 刷新的 `vendor=OpenAI` 模型和已知 `gpt-5.5` 默认走上游 Responses；Gemini、Anthropic、Grok 等已知 chat-only vendor/model family 即使客户端调用 `/v1/responses` 也默认走上游 Chat Completions；其他模型按下游协议选择。
 - Router 支持按模型与 route policy 选择池，并执行 sticky 亲和、overflow、pool/account/seat 过滤、并发约束和权重选择。
 - route policy 已支持 `request_format`，可按 `openai_chat`、`openai_responses`、`anthropic_messages` 做协议级分流。
 - Gateway 启动时加载路由配置，并每 30 秒从 PostgreSQL 刷新 pool、账号关系和 route policy 快照。

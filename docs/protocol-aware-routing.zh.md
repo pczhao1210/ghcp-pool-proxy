@@ -188,6 +188,7 @@ exec claude "$@"
 说明
 
 - `ANTHROPIC_BASE_URL` 指向 gateway 根地址，Claude Code 会调用 `/v1/messages`。
+- `GET /v1/models` 在请求带 `Anthropic-Version`、Claude/Anthropic user agent，或 `?format=anthropic` 时返回 Anthropic 兼容模型列表；OpenAI 兼容客户端默认仍得到 OpenAI 形状。
 - `ANTHROPIC_AUTH_TOKEN` 会作为 `Authorization: Bearer ...` 发送，可对应 GHCP client profile。
 - `ANTHROPIC_CUSTOM_HEADERS` 可附加 session、团队、环境、工作区等低基数路由标签。
 - `X-Claude-Code-Session-Id` 通常由 Claude Code 自动发送，是默认优先使用的 sticky 信号。

@@ -9,6 +9,7 @@ GHCP Pool Proxy 是一个面向受控 GitHub Copilot 账号资源的网关与控
 | 架构设计 | [docs/architecture.zh.md](docs/architecture.zh.md) |
 | 运维说明 | [docs/operations.zh.md](docs/operations.zh.md) |
 | 路由规则 | [docs/routing.zh.md](docs/routing.zh.md) |
+| 路由、Sticky 与 Risk Score | [docs/routing-sticky-risk.zh.md](docs/routing-sticky-risk.zh.md) |
 | 协议感知路由与 Coding 客户端配置 | [docs/protocol-aware-routing.zh.md](docs/protocol-aware-routing.zh.md) |
 | 路由粘性指标 | [docs/routing-sticky-metrics.zh.md](docs/routing-sticky-metrics.zh.md) |
 

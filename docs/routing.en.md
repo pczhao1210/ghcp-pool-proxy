@@ -2,7 +2,7 @@
 
 This document describes routing from model to pool, pool to account, and sticky affinity with overflow. The MVP principle is: health and availability first, sticky affinity as a soft preference.
 
-For protocol-aware policies and Claude Code / Codex client setup, see [protocol-aware-routing.en.md](protocol-aware-routing.en.md).
+For protocol-aware policies and Claude Code / Codex client setup, see [protocol-aware-routing.en.md](protocol-aware-routing.en.md). For the combined routing, sticky affinity, concurrency, and risk score model, see [routing-sticky-risk.en.md](routing-sticky-risk.en.md).
 
 ## Routing Inputs
 

@@ -10,6 +10,7 @@ ACTION_SET=0
 DATA_DIR="${GHCP_PROXY_HOME:-${DATA_DIR:-$HOME/ghcp_proxy}}"
 ENV_FILE="${ENV_FILE:-}"
 COMPOSE_FILE="${COMPOSE_FILE:-$SCRIPT_DIR/docker-compose.vm.yml}"
+LOCAL_MIGRATIONS_DIR="${LOCAL_MIGRATIONS_DIR:-$SCRIPT_DIR/../migrations}"
 PROJECT_NAME="${COMPOSE_PROJECT_NAME:-ghcp-proxy}"
 WAIT_TIMEOUT="${WAIT_TIMEOUT:-120}"
 LOG_RETENTION_DAYS="${LOG_RETENTION_DAYS:-30}"
@@ -405,12 +406,25 @@ apply_incremental_migrations() {
 }
 
 list_migration_files() {
-  docker run --rm --entrypoint sh "$MIGRATION_IMAGE" -c 'for file in /srv/ghcp/migrations/*.sql; do basename "$file"; done | sort'
+  if [[ -d "$LOCAL_MIGRATIONS_DIR" ]] && compgen -G "$LOCAL_MIGRATIONS_DIR/*.sql" >/dev/null; then
+    local file
+    for file in "$LOCAL_MIGRATIONS_DIR"/*.sql; do
+      basename "$file"
+    done | sort
+    return 0
+  fi
+
+  docker run --rm --entrypoint sh "$MIGRATION_IMAGE" -c 'for file in /srv/ghcp/migrations/*.sql; do [ -f "$file" ] || continue; basename "$file"; done | sort'
 }
 
 apply_migration_file() {
   local migration_name="$1"
-  docker run --rm --entrypoint cat "$MIGRATION_IMAGE" "/srv/ghcp/migrations/$migration_name" | db_psql -v ON_ERROR_STOP=1 -f -
+  if [[ -f "$LOCAL_MIGRATIONS_DIR/$migration_name" ]]; then
+    db_psql -v ON_ERROR_STOP=1 -f - < "$LOCAL_MIGRATIONS_DIR/$migration_name"
+    return 0
+  fi
+
+  docker run --rm --entrypoint sh "$MIGRATION_IMAGE" -c 'cat "/srv/ghcp/migrations/$1"' sh "$migration_name" | db_psql -v ON_ERROR_STOP=1 -f -
 }
 
 apply_migrations_if_needed() {
@@ -421,12 +435,18 @@ apply_migrations_if_needed() {
   fi
 
   log "Applying database migrations"
+  local migrations=()
   local migration
   while IFS= read -r migration; do
     [[ -n "$migration" ]] || continue
+    migrations+=("$migration")
+  done < <(list_migration_files)
+  [[ "${#migrations[@]}" -gt 0 ]] || die "no migration SQL files found in $LOCAL_MIGRATIONS_DIR or $MIGRATION_IMAGE:/srv/ghcp/migrations"
+
+  for migration in "${migrations[@]}"; do
     printf 'Applying %s\n' "$migration"
     apply_migration_file "$migration"
-  done < <(list_migration_files)
+  done
 }
 
 export_runtime_setting() {

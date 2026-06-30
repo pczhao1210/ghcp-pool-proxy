@@ -9,6 +9,7 @@ GHCP Pool Proxy is a gateway and control-plane system for controlled GitHub Copi
 | Architecture | [docs/architecture.en.md](docs/architecture.en.md) |
 | Operations | [docs/operations.en.md](docs/operations.en.md) |
 | Routing Rules | [docs/routing.en.md](docs/routing.en.md) |
+| Routing, Sticky Affinity, and Risk Score | [docs/routing-sticky-risk.en.md](docs/routing-sticky-risk.en.md) |
 | Protocol-Aware Routing and Coding Client Setup | [docs/protocol-aware-routing.en.md](docs/protocol-aware-routing.en.md) |
 | Routing Sticky Metrics | [docs/routing-sticky-metrics.en.md](docs/routing-sticky-metrics.en.md) |
 

@@ -2,7 +2,7 @@
 
 本文档描述模型到池、池到账户，以及 sticky 亲和与 overflow 的路由规则。MVP 的原则是“健康和可用性优先，sticky 亲和只做软偏好”。
 
-协议维度的策略设计、Claude Code / Codex 客户端配置示例见 [protocol-aware-routing.zh.md](protocol-aware-routing.zh.md)。
+协议维度的策略设计、Claude Code / Codex 客户端配置示例见 [protocol-aware-routing.zh.md](protocol-aware-routing.zh.md)。路由、sticky、并发与 risk score 的综合说明见 [routing-sticky-risk.zh.md](routing-sticky-risk.zh.md)。
 
 ## 路由输入
 

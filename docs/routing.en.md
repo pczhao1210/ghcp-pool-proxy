@@ -1,155 +1,197 @@
 # Routing Rules
 
-This document describes routing from model to pool, pool to account, and sticky affinity with overflow. The MVP principle is: health and availability first, sticky affinity as a soft preference.
+This is the primary gateway routing document. It covers route policies, pool allocation modes, sticky affinity, load balancing, concurrency, risk score, and sticky metrics. Protocol parsing, conversion, discarded fields, and upstream passthrough parameters are documented in [protocol.en.md](protocol.en.md).
 
-For protocol-aware policies and Claude Code / Codex client setup, see [protocol-aware-routing.en.md](protocol-aware-routing.en.md). For the combined routing, sticky affinity, concurrency, and risk score model, see [routing-sticky-risk.en.md](routing-sticky-risk.en.md).
-
-## Routing Inputs
-
-- Requested model and protocol type, such as `openai_chat`, `openai_responses`, or `anthropic_messages`.
-- Default model, sticky configuration, and tool-call compatibility options from client profiles.
-- Route policy fields such as `request_format`, `model_pattern`, `load_balance_strategy`, pool priority, and sticky mode.
-- Pool active state, account active state, concurrency, risk, priority, pool membership weight, and seat status.
-- Budget checks are performed by the gateway at global and account scope; the router does not read budget ledgers directly.
-
-## Configuration Hot Refresh
-
-The gateway router uses in-memory snapshots for the hot path. Snapshots are loaded from PostgreSQL at startup and refreshed every 30 seconds for pools, pool account memberships, and route policies.
-
-```mermaid
-flowchart LR
-  Admin["Admin API / Dashboard"] -->|"pool / route policy"| PG[(PostgreSQL)]
-  PG -->|"startup load"| Snapshot["Router Snapshot"]
-  PG -->|"reload every 30s"| Snapshot
-  Snapshot --> Select["Select / SelectWithPreference"]
-  Select --> Request["request routing"]
-```
-
-The model catalog is not part of the router snapshot. The gateway reads `model_catalog_json` when handling `/v1/models` and request model resolution, mapping exposed names to upstream models and optionally selecting the upstream Copilot endpoint with `upstream_api` (`chat_completions` or `responses`). Upstream endpoint selection is not globally Responses by default; it is mixed: `upstream_api` wins; Copilot-refreshed `vendor=OpenAI` models and known `gpt-5.5` use upstream Responses; known chat-only vendors/model families such as Gemini, Anthropic, and Grok use upstream Chat Completions even for downstream `/v1/responses`; other models follow the downstream request protocol.
-
-## Routing Flow
+## Execution Order
 
 ```mermaid
 flowchart TD
-  A["receive request"] --> B["normalize protocol"]
-  B --> C["resolve exposed model to upstream"]
-  C --> D["global budget and RPM check"]
-  D --> E["affinity key"]
-  E --> F["match route policy"]
-  F --> G{"sticky enabled?"}
-  G -->|"no"| H["select available account"]
-  G -->|"yes"| I["query Redis affinity map"]
-  I --> J{"target still usable?"}
-  J -->|"yes"| K["reuse target"]
-  J -->|"no"| L["perform rebind"]
-  L --> M{"overflow?"}
-  M -->|"yes"| N["record overflow and select replacement"]
-  M -->|"no"| O["record rebind and update affinity"]
-  K --> P["account budget and RPM check"]
-  H --> P
-  N --> P
-  O --> P
-  P --> Q["execute upstream request"]
+  A["Gateway receives request"] --> B["Authenticate API key / client profile"]
+  B --> C["Protocol parser -> CanonicalRequest"]
+  C --> D["Model catalog exposed -> upstream"]
+  D --> E["Global RPM / token / AI credit checks"]
+  E --> F["Match route policy"]
+  F --> G{"pool allocation_mode"}
+  G -->|"user_binding"| H["standard user identifier -> DB/Redis binding"]
+  G -->|"shared"| I["Compute affinity key / read sticky target"]
+  H --> J["Select bound account"]
+  I --> K["Preferred sticky or load-balanced selection"]
+  J --> L["Redis concurrency lease"]
+  K --> L
+  L --> M["Account RPM / token / AI credit checks"]
+  M --> N["Call Copilot provider"]
+  N --> O["Record usage / risk / sticky metrics"]
 ```
 
-## Rule Priority
+The routing hot path uses an in-memory snapshot sourced from PostgreSQL. The gateway loads pools, pool accounts, route policies, and active user bindings at startup, then refreshes every 30 seconds. Redis stores sticky maps, user-binding hot cache, concurrency leases, and other hot distributed state.
 
-1. Explicit route policies take priority over the default pool.
-2. Policies matching both `request_format` and `model_pattern` take priority; `*` means any protocol or model.
-3. Active accounts under their concurrency limit take priority over other account states.
-4. Pool state, account state, seat state, concurrency, and risk take priority over sticky affinity.
-5. Reuse the sticky target when it remains eligible; otherwise rebind.
-6. When the sticky target is overloaded, overflow to another healthy account is allowed.
-7. Account-level budget is checked after account selection; failures return rate-limit or budget errors.
+## Route Policy Matching
 
-## Load Balance Strategies
+`RouteContext` contains only the fields needed by routing.
 
-When sticky affinity does not provide an eligible target, the selected route policy chooses an account within its matched pool using `load_balance_strategy`.
+| Field | Source | Purpose |
+| --- | --- | --- |
+| `request_format` | Request endpoint | `openai_chat`, `openai_responses`, or `anthropic_messages` |
+| `model` | Upstream model after catalog resolution | Exact or glob match against `model_pattern` |
+| `client_profile_id` | API key client profile | Optional client-specific routing |
 
-| Strategy | Description |
+Matching rules:
+
+1. Ignore `enabled=false` policies.
+2. `request_format` must match; empty or `*` means any protocol.
+3. `model_pattern` must match; exact values and `filepath.Match`-style globs are supported.
+4. If `client_profile_id` is set, it must match the current profile.
+5. Sort by ascending `priority`; within equal priority, client-profile-specific policies are more specific, then `name` and `id` break ties.
+6. If a matching policy points at an inactive pool, continue to the next policy.
+7. If no policy matches, fallback to all active pools ordered by pool `priority`, `name`, and `id`.
+
+## Pool Allocation Modes
+
+| `allocation_mode` | Behavior |
 | --- | --- |
-| `risk_weighted` | Default behavior; prefer lower risk, lower current concurrency, higher pool weight, then lower account priority |
-| `round_robin` | Rotate across eligible accounts for the same route policy, ordered by account priority then account id |
-| `least_concurrency` | Prefer the eligible account with the lowest current concurrency, then higher pool weight, lower risk, and lower account priority |
+| `shared` | Users share pool accounts; sticky affinity is a preference and may rebind under load or health changes |
+| `user_binding` | A standard request user identifier is bound to one account; while active, the account is exclusive to that binding |
 
-## Sticky Modes
+For user-binding pools:
 
-| Mode | Description |
+- The gateway prefers standard request user identifiers: OpenAI Chat/Responses `user`, Anthropic `metadata.user_id`, or Anthropic `metadata.user`; `X-GHCP-User` is only a backwards-compatible fallback.
+- The binding key is `client_profile_id + pool_id + lower(trim(user_identifier))`.
+- One user can have only one active binding per client profile and pool.
+- One account can be occupied by only one active binding at a time.
+- First binding selects an unbound account ordered by low account `priority`, low `risk_score`, high pool membership `weight`, and low account `id`.
+- Each hit refreshes `last_used_at` and `expires_at`; the default idle expiration is 7 days.
+- Release happens only by expiration or manual Dashboard `Release` from the expanded pool detail.
+- If the bound account is unavailable or at concurrency limit, the request fails instead of rebinding.
+- Shared pools avoid accounts occupied by active bindings.
+
+## Candidate Filtering
+
+All ordinary and required-account selections must pass these filters.
+
+| Check | Current behavior |
 | --- | --- |
-| `none` | Sticky affinity disabled |
-| `soft` | Default mode; prefer sticky target but allow automatic rebind |
-| `strict` | Keep the same account when possible; rebind only when unavailable |
-| `prefix` | Affinity by prefix hash, useful for batches with similar system prompts and tool schemas |
+| Pool status | Pool must exist and have empty or `active` status |
+| Account status | Only `active` accounts are eligible |
+| Seat status | Org/business/enterprise seats must be empty, `active`, or `assigned` |
+| Reserved account | Active binding accounts are unavailable to shared pools; binding requests may use only their own required account |
+| Process concurrency | `current_concurrency < max_concurrency`; `max_concurrency <= 0` is treated as 1 |
+| Exclusion set | Sticky overflow and concurrency rebinding may temporarily exclude the old account |
 
-## Overflow Triggers
+An empty candidate set enters gateway error mapping; see [operations.en.md](operations.en.md) for the client-facing status and internal routing reason mapping.
 
-```mermaid
-flowchart TD
-  A["select sticky target"] --> B{"concurrency above threshold?"}
-  B -->|"yes"| C["trigger overflow"]
-  B -->|"no"| D{"account healthy and seat valid?"}
-  D -->|"no"| C
-  D -->|"yes"| E["keep sticky target"]
+## Load Balancing
+
+`load_balance_strategy` applies to shared-pool and fallback selection. User-binding first assignment uses its own deterministic ordering.
+
+| Strategy | Ordering | Use case |
+| --- | --- | --- |
+| `risk_weighted` | Lower `risk_score`, lower current concurrency, higher membership `weight`, lower account `priority` | Default health-first routing |
+| `least_concurrency` | Lower current concurrency, higher `weight`, lower `risk_score`, lower account `priority` | Similar account quality with immediate load spreading |
+| `round_robin` | Rotate after sorting by account `priority` and `id` | Tests, probing, or low risk variance pools |
+
+If a sticky target remains in the candidate set, the router selects it before strategy ordering. Sticky is therefore an eligible-account preference, not a bypass.
+
+## Sticky Affinity
+
+Sticky mappings are stored in Redis as:
+
+```text
+sticky:{pool_id}:{model}:{affinity_key_hash} -> account_id
 ```
 
-- Account current concurrency reaches or exceeds `max_concurrency`.
-- Sticky target load ratio exceeds `max_sticky_load_ratio`.
-- The account is no longer active, its seat is invalid, or its risk is too high.
+Successful requests write or refresh the target. Redis also keeps a `sticky_account:{account_id}` reverse index so disabling an account can delete its sticky keys.
 
-## Account Selection
+| Mode | Behavior |
+| --- | --- |
+| `none` | Do not build an affinity key and do not use sticky routing |
+| `soft` | Default; prefer sticky target but allow load-ratio overflow |
+| `strict` | Prefer the same account; still cannot bypass account state, seat validity, or hard concurrency |
+| `prefix` | Use a hash of system prompt, first user context, and tool schema for prompt-cache affinity |
 
-1. First filter inactive pools, inactive accounts, over-concurrency accounts, and unavailable org/enterprise seats.
-2. Select the best account from candidates by risk score, current concurrency, pool membership weight, and account priority.
-3. If the preferred sticky account remains in the candidate set, it is selected first; otherwise rebind begins.
-4. The current implementation absorbs pool/account/policy changes through 30-second snapshot refreshes. Later phases can add event-driven refresh or rendezvous hashing to reduce migration.
+Session key order:
 
-```mermaid
-flowchart TD
-  A["Pool entries"] --> B{"pool active?"}
-  B -->|"no"| X["reject"]
-  B -->|"yes"| C{"account active?"}
-  C -->|"no"| X
-  C -->|"yes"| D{"seat usable?"}
-  D -->|"no"| X
-  D -->|"yes"| E{"current concurrency < max?"}
-  E -->|"no"| X
-  E -->|"yes"| F["candidate account"]
-  F --> G["concurrency / weight"]
-  G --> H["selected account"]
+1. Client profile `sticky_session_header`
+2. `X-Claude-Code-Session-Id`
+3. `X-GHCP-Session-ID`
+4. `X-Session-ID`
+5. `X-Conversation-ID`
+6. `X-Claude-Code-Agent-Id`
+7. `X-Claude-Code-Parent-Agent-Id`
+8. `X-GHCP-Workspace`
+9. `X-GHCP-Project`
+10. Body metadata keys `session_id`, `conversation_id`, and `user`
+
+When no session key exists, non-`none` modes fallback to a prefix hash. `prefix` mode always uses the prefix hash and ignores session headers. The affinity key includes client profile, protocol, model, and session/prefix material; only hashes are stored.
+
+## Sticky Overflow And Concurrency
+
+Concurrency has two layers: the router's process-local counter is a fast filter and ordering signal; the Redis lease is the hard gate across gateway instances. After selecting an account, the gateway reserves a lease in `concurrency_leases:{account_id}`. A failed reservation means the account is full across instances.
+
+In soft sticky mode, if the sticky target is eligible, the gateway checks load that existed before the current request:
+
+```text
+load_ratio = existing_concurrency_before_this_request / max_concurrency
 ```
 
-## Affinity Key
+When `load_ratio > max_sticky_load_ratio` and another candidate exists, the gateway releases the old account and overflows to another account. The default `max_sticky_load_ratio` is `0.85`. `strict` skips this ratio-based overflow only; it never exceeds `max_concurrency`.
 
-- The affinity key is composed from tenant or client profile identifier, protocol, canonical model, session key, or prefix hash.
-- Only hashes are stored; prompt plaintext is not stored.
-- Different accounts, models, and protocol formats do not share affinity by default.
-- Recommended Claude Code / Codex session headers are described in [protocol-aware-routing.en.md](protocol-aware-routing.en.md).
+If a required user-binding account reaches its concurrency limit, the request fails and does not rebind.
 
-## Routing Failure Handling
+## Risk Score And Account State
 
-```mermaid
-sequenceDiagram
-  participant G as Gateway
-  participant R as Router
-  participant A as Account State
+Risk score is account health. Higher means riskier. Candidate filtering accepts only `active` accounts, so `degraded`, `quarantined`, and `revoked` accounts do not receive requests.
 
-  G->>R: request routing
-  R-->>G: selected account
-  G->>G: upstream returns 401 / 403 / 429 / 5xx
-  G->>A: update health, risk, and state
-  G->>R: delete affinity or trigger rebind when needed
-```
+Default deltas:
 
-- 401, 403, and seat invalidation should first trigger degradation or quarantine.
-- Repeated 429 responses trigger short cooldown and lower effective weight.
-- 5xx responses and timeouts primarily feed health and risk scoring.
+| Event | Delta |
+| --- | --- |
+| `auth_expired` / upstream 401 | `+20` |
+| `permission_denied` / upstream 403 | `+20` |
+| `rate_limited` / upstream 429 | `+10` |
+| `upstream_5xx` | `+5` |
+| `network_error` / `network_timeout` | `+3` |
+| Other failures | `+5` |
+| Successful request or probe | `-1`, floored at 0 |
+
+Thresholds:
+
+| Condition | Target state | Routing effect |
+| --- | --- | --- |
+| `risk_score >= 70` | `degraded` | Removed from candidates |
+| `risk_score >= 90` | `quarantined` | Removed from candidates until recovery or manual handling |
+| Recovery succeeds | `active` with reset risk | Re-enters candidates |
+
+The current state machine supports `active -> degraded` and `degraded -> quarantined`, but not direct `active -> quarantined` jumps.
+
+## Budgets And Limits
+
+Before routing, the gateway checks global RPM, daily tokens, and daily AI credits. After selecting an account, it checks account-level RPM, tokens, and AI credits. Budget failures return rate-limit or budget errors and do not try another account.
+
+The router itself does not read budget ledgers; it handles pools, policies, account status, seats, reservations, and concurrency.
 
 ## Metrics
 
-The repository reserves the following sticky-related metric semantics.
+Basic request, token, and account metrics are always available. Detailed sticky metrics require `advanced_metrics_enabled=true`.
 
-- `ghcp_sticky_hits_total`
-- `ghcp_sticky_rebinds_total`
-- `ghcp_sticky_overflows_total`
+| Metric | Meaning | Key labels |
+| --- | --- | --- |
+| `ghcp_sticky_hits_total` | Sticky target reused | `model`, `pool` |
+| `ghcp_sticky_rebinds_total` | Sticky target missing, unavailable, or moved | `model`, `pool`, `reason`, `policy_id`, `policy_name`, `model_pattern`, `sticky_mode`, `affinity_scope`, `priority` |
+| `ghcp_sticky_overflows_total` | Sticky target moved due to high load ratio | Same labels, with `reason=load_ratio_exceeded` |
 
-Detailed label definitions are in [routing-sticky-metrics.en.md](routing-sticky-metrics.en.md).
+Common reasons:
+
+| Reason | Meaning |
+| --- | --- |
+| `target_unavailable` | Sticky target is missing, inactive, seat-invalid, over concurrency, or outside current policy constraints |
+| `concurrency_limit` | Redis concurrency lease is full and rebind is attempted |
+| `overflow` | Sticky target was initially selected but moved due to load ratio |
+| `load_ratio_exceeded` | Concrete overflow reason |
+
+## Tuning Guidance
+
+- Long-lived coding-client sessions should use `soft` sticky with a stable session ID; use `strict` only when stronger affinity is worth lower flexibility.
+- Batch and short requests usually work well with `soft + risk_weighted`.
+- Use `user_binding` pools when accounts must be exclusive per user, and keep the standard request user identifier stable and low-cardinality; older clients may continue using `X-GHCP-User`.
+- Avoid very low risk thresholds for small pools, or transient errors can exhaust capacity.
+- Tune after observing `no_available_accounts`, sticky hit/rebind/overflow, 429, 401/403, account state changes, and success rate.

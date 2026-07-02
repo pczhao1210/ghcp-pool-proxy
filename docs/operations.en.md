@@ -143,6 +143,24 @@ flowchart TD
 | `GET /metrics` | Gateway metrics check |
 | Dashboard | Inspect account status, pool status, error events, usage, cost, cache hit rate, and sync status |
 
+## Gateway Error Mapping
+
+Clients receive standard AI gateway semantics through `external_status`, `external_code`, and a neutral `external_message`. The gateway log event `gateway error mapped` preserves operational fields: `internal_status`, `internal_code`, `internal_message`, `external_status`, `external_code`, `external_message`, and, when available, context such as `model`, `account_id`, `pool_id`, and `redis_rebind_reason`.
+
+| Internal status / code | Internal condition | External status / code | External message | Operations note |
+| --- | --- | --- | --- | --- |
+| `503 no_available_accounts` / `503 user_binding_exhausted` | Empty routing candidates, exhausted internal concurrency, or no user-binding capacity | `429 rate_limited` | `rate limit exceeded; please retry later` | Use `internal_message`, `account_id`, and `pool_id` to distinguish capacity, binding, and concurrency causes |
+| `503 route_unavailable` | No usable route or model route configuration unavailable | `503 service_unavailable` | `model route unavailable` | Check route policies, pool status, and model catalog configuration |
+| `400 missing_user_binding_owner` | User-binding pool request lacks a stable user identifier | `400 invalid_request_error` | `user identifier is required` | New clients should prefer OpenAI `user` or Anthropic `metadata.user_id` / `metadata.user` |
+| `400 invalid_user_binding_owner` | User identifier is invalid, such as exceeding length limits | `400 invalid_request_error` | `user identifier is invalid` | Check the normalized user identifier sent by the client |
+| `503 user_binding_unavailable` | User-binding dependency failure, such as PostgreSQL or cache access | `503 service_unavailable` | `service temporarily unavailable` | Check PostgreSQL, Redis, and binding table state |
+| `503 budget_unavailable` | Rate-limit or budget state is unreadable | `503 service_unavailable` | `gateway limit state unavailable` | Check budget checker, Redis/PostgreSQL, and configuration sync |
+| `429 global_rate_limited` / `429 account_rate_limited` | Global or internal resource-level RPM limit hit | `429 rate_limited` | `rate limit exceeded; please retry later` | Resource scope is hidden from clients; logs retain global/account granularity |
+| `429 global_budget_exhausted` / `429 account_budget_exhausted` | Global or internal resource-level token / AI Credits daily budget exhausted | `429 budget_exhausted` | `quota exceeded` | Clients see standard quota exhaustion; logs retain budget scope |
+| `502 upstream_error` | Upstream model provider failure | `502 upstream_error` | `model provider error` | Internal logs and usage ledger keep the original failure classification |
+| `500 stream_error` | SSE writer or streaming response initialization failed | `500 stream_error` | `stream response unavailable` | Check response writing, proxying, and client connection state |
+| Unmapped internal code | Other errors passed through the mapping function | Same as internal | Same as internal | Default passthrough; review new error types for neutralization needs |
+
 ## Usage, Cost, and Cache Observability
 
 After successful requests, the gateway writes a proxy-side `usage_ledger` row. With the real Copilot provider, it parses upstream `usage` and `copilot_usage` fields and records input tokens, cached input tokens, cache write tokens, output tokens, reasoning tokens, `nano_aiu`, estimated AI Credits, and estimated USD.
@@ -284,7 +302,7 @@ flowchart TD
 | `vendor` | Optional model vendor refreshed from Copilot `/models`; `OpenAI` infers Responses |
 | `enabled` | Whether the model is returned by `/v1/models` and allowed in requests |
 
-GitHub Copilot upstream endpoint selection is mixed, not globally Responses by default. Selection order is: model catalog `upstream_api` wins; Copilot-refreshed `vendor=OpenAI` models and known `gpt-5.5` use upstream Responses; known chat-only vendors/model families such as Gemini, Anthropic, and Grok use upstream Chat Completions even when clients call `/v1/responses`; other models follow the downstream request protocol.
+GitHub Copilot upstream endpoint selection is mixed, not globally Responses by default. Selection order is: model catalog `upstream_api` wins; then Copilot `/models` `vendor` is normalized, where `OpenAI` / `Azure OpenAI` use upstream Responses and Google, Anthropic, Microsoft, and xAI use upstream Chat Completions; if vendor is empty, the gateway infers from `upstream`, `name`, and `exposed`: `gpt*`/o-series infer OpenAI, `gemini*` infers Google, `claude*`/`opus*`/`haiku*`/`sonnet*` infer Anthropic, `MAI*` infers Microsoft, and `grok*`/`xai*` infer xAI; other models follow the downstream request protocol.
 
 ```mermaid
 flowchart LR

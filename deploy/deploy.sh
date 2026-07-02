@@ -729,77 +729,244 @@ database_migrated() {
   [[ "$migrated" == "t" ]]
 }
 
-route_policy_request_format_migrated() {
-  local migrated
-  migrated="$(db_scalar "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'route_policies' AND column_name = 'request_format');")"
-  [[ "$migrated" == "t" ]]
+schema_conflict() {
+  cat >&2 <<EOF
+ERROR: Database schema conflict detected: $*
+
+The database contains a GHCP schema that does not match this version and cannot be updated automatically.
+Back up any data you need, then initialize a fresh VM database with a new --data-dir, or stop the stack and move aside the PostgreSQL data directory before starting again.
+
+Current PostgreSQL data directory:
+  $POSTGRES_DATA_DIR
+EOF
+  exit 1
 }
 
-runtime_config_migrated() {
-  local migrated
-  migrated="$(db_scalar "SELECT to_regclass('public.secure_settings') IS NOT NULL;")"
-  [[ "$migrated" == "t" ]]
+schema_table_exists() {
+  local table="$1"
+  local exists
+  exists="$(db_scalar "SELECT to_regclass('public.$table') IS NOT NULL;")"
+  [[ "$exists" == "t" ]]
 }
 
-route_policy_client_profile_migrated() {
-  local migrated
-  migrated="$(db_scalar "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'route_policies' AND column_name = 'client_profile_id');")"
-  [[ "$migrated" == "t" ]]
+schema_require_table() {
+  local table="$1"
+  schema_table_exists "$table" || schema_conflict "required table public.$table is missing"
 }
 
-schema_cleanup_migrated() {
-  local migrated
-  migrated="$(db_scalar "SELECT to_regclass('public.routing_affinities') IS NULL AND to_regclass('public.budget_snapshots') IS NULL AND NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'backend_pools' AND column_name = 'default_model') AND NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'usage_ledger' AND column_name = 'prefix_hash');")"
-  [[ "$migrated" == "t" ]]
+schema_column_exists_with_type() {
+  local table="$1"
+  local column="$2"
+  local expected_udt="$3"
+  local column_count
+  local type_ok
+
+  column_count="$(db_scalar "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = 'public' AND table_name = '$table' AND column_name = '$column';")"
+  [[ "$column_count" != "0" ]] || return 1
+
+  type_ok="$(db_scalar "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = '$table' AND column_name = '$column' AND udt_name = '$expected_udt');")"
+  [[ "$type_ok" == "t" ]] || schema_conflict "column public.$table.$column has an incompatible type; expected $expected_udt"
+  return 0
 }
 
-route_policy_load_balance_migrated() {
-  local migrated
-  migrated="$(db_scalar "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'route_policies' AND column_name = 'load_balance_strategy');")"
-  [[ "$migrated" == "t" ]]
+schema_require_column() {
+  local table="$1"
+  local column="$2"
+  local expected_udt="$3"
+  schema_column_exists_with_type "$table" "$column" "$expected_udt" || schema_conflict "table public.$table exists but required column $column is missing"
 }
 
-usage_ai_credits_migrated() {
-  local migrated
-  migrated="$(db_scalar "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'usage_ledger' AND column_name = 'nano_aiu');")"
-  [[ "$migrated" == "t" ]]
+schema_project_objects_exist() {
+  local object_count
+  object_count="$(db_scalar "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name IN ('accounts', 'system_settings', 'backend_pools', 'client_profiles', 'route_policies', 'usage_ledger', 'secure_settings', 'account_user_bindings');")"
+  [[ "$object_count" != "0" ]]
 }
 
-usage_rollups_migrated() {
-  local migrated
-  migrated="$(db_scalar "SELECT to_regclass('public.usage_rollup_hourly') IS NOT NULL AND to_regclass('public.usage_rollup_daily') IS NOT NULL;")"
-  [[ "$migrated" == "t" ]]
+route_policy_request_format_schema_current() {
+  schema_require_table route_policies
+  schema_column_exists_with_type route_policies request_format text
+}
+
+runtime_config_schema_current() {
+  if ! schema_table_exists secure_settings; then
+    return 1
+  fi
+
+  schema_require_column secure_settings key text
+  schema_require_column secure_settings encrypted_value bytea
+  schema_require_column secure_settings key_version text
+  schema_require_column secure_settings description text
+  schema_require_column secure_settings updated_by text
+  schema_require_column secure_settings updated_at timestamptz
+  return 0
+}
+
+route_policy_client_profile_schema_current() {
+  schema_require_table route_policies
+  schema_column_exists_with_type route_policies client_profile_id uuid
+}
+
+schema_cleanup_schema_current() {
+  local cleanup_needed
+  schema_require_table backend_pools
+  schema_require_table usage_ledger
+  cleanup_needed="$(db_scalar "SELECT to_regclass('public.routing_affinities') IS NOT NULL OR to_regclass('public.budget_snapshots') IS NOT NULL OR EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'backend_pools' AND column_name = 'default_model') OR EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'usage_ledger' AND column_name = 'prefix_hash');")"
+  [[ "$cleanup_needed" != "t" ]]
+}
+
+route_policy_load_balance_schema_current() {
+  schema_require_table route_policies
+  schema_column_exists_with_type route_policies load_balance_strategy text
+}
+
+usage_ai_credits_schema_current() {
+  local missing=0
+  schema_require_table usage_ledger
+  schema_column_exists_with_type usage_ledger reasoning_tokens int4 || missing=1
+  schema_column_exists_with_type usage_ledger nano_aiu int8 || missing=1
+  schema_column_exists_with_type usage_ledger estimated_ai_credits numeric || missing=1
+  schema_column_exists_with_type usage_ledger token_details jsonb || missing=1
+  [[ "$missing" -eq 0 ]]
+}
+
+usage_rollups_schema_current() {
+  local missing=0
+  if schema_table_exists usage_rollup_state; then
+    schema_require_column usage_rollup_state name text
+    schema_require_column usage_rollup_state last_processed_at timestamptz
+    schema_require_column usage_rollup_state updated_at timestamptz
+  else
+    missing=1
+  fi
+
+  if schema_table_exists usage_rollup_hourly; then
+    schema_require_column usage_rollup_hourly bucket_start timestamptz
+    schema_require_column usage_rollup_hourly client_profile_id text
+    schema_require_column usage_rollup_hourly client_name text
+    schema_require_column usage_rollup_hourly account_id text
+    schema_require_column usage_rollup_hourly pool_id text
+    schema_require_column usage_rollup_hourly model text
+    schema_require_column usage_rollup_hourly request_format text
+    schema_require_column usage_rollup_hourly status text
+    schema_require_column usage_rollup_hourly requests int8
+    schema_require_column usage_rollup_hourly input_tokens int8
+    schema_require_column usage_rollup_hourly cached_input_tokens int8
+    schema_require_column usage_rollup_hourly cache_write_tokens int8
+    schema_require_column usage_rollup_hourly output_tokens int8
+    schema_require_column usage_rollup_hourly reasoning_tokens int8
+    schema_require_column usage_rollup_hourly nano_aiu int8
+    schema_require_column usage_rollup_hourly estimated_ai_credits numeric
+    schema_require_column usage_rollup_hourly estimated_cost numeric
+    schema_require_column usage_rollup_hourly latency_ms_sum int8
+    schema_require_column usage_rollup_hourly latency_ms_count int8
+    schema_require_column usage_rollup_hourly latency_ms_max int4
+    schema_require_column usage_rollup_hourly sticky_hits int8
+    schema_require_column usage_rollup_hourly errors int8
+    schema_require_column usage_rollup_hourly updated_at timestamptz
+  else
+    missing=1
+  fi
+
+  if schema_table_exists usage_rollup_daily; then
+    schema_require_column usage_rollup_daily bucket_date date
+    schema_require_column usage_rollup_daily client_profile_id text
+    schema_require_column usage_rollup_daily client_name text
+    schema_require_column usage_rollup_daily account_id text
+    schema_require_column usage_rollup_daily pool_id text
+    schema_require_column usage_rollup_daily model text
+    schema_require_column usage_rollup_daily request_format text
+    schema_require_column usage_rollup_daily status text
+    schema_require_column usage_rollup_daily requests int8
+    schema_require_column usage_rollup_daily input_tokens int8
+    schema_require_column usage_rollup_daily cached_input_tokens int8
+    schema_require_column usage_rollup_daily cache_write_tokens int8
+    schema_require_column usage_rollup_daily output_tokens int8
+    schema_require_column usage_rollup_daily reasoning_tokens int8
+    schema_require_column usage_rollup_daily nano_aiu int8
+    schema_require_column usage_rollup_daily estimated_ai_credits numeric
+    schema_require_column usage_rollup_daily estimated_cost numeric
+    schema_require_column usage_rollup_daily latency_ms_sum int8
+    schema_require_column usage_rollup_daily latency_ms_count int8
+    schema_require_column usage_rollup_daily latency_ms_max int4
+    schema_require_column usage_rollup_daily sticky_hits int8
+    schema_require_column usage_rollup_daily errors int8
+    schema_require_column usage_rollup_daily updated_at timestamptz
+  else
+    missing=1
+  fi
+
+  [[ "$missing" -eq 0 ]]
+}
+
+pool_user_binding_schema_current() {
+  local missing=0
+  schema_require_table accounts
+  schema_require_table backend_pools
+  schema_require_table client_profiles
+  schema_column_exists_with_type backend_pools allocation_mode text || missing=1
+
+  if schema_table_exists account_user_bindings; then
+    schema_require_column account_user_bindings id uuid
+    schema_require_column account_user_bindings client_profile_id uuid
+    schema_require_column account_user_bindings pool_id uuid
+    schema_require_column account_user_bindings account_id uuid
+    schema_require_column account_user_bindings owner_key_hash text
+    schema_require_column account_user_bindings owner_display text
+    schema_require_column account_user_bindings source_header text
+    schema_require_column account_user_bindings status text
+    schema_require_column account_user_bindings last_used_at timestamptz
+    schema_require_column account_user_bindings expires_at timestamptz
+    schema_require_column account_user_bindings released_at timestamptz
+    schema_require_column account_user_bindings release_reason text
+    schema_require_column account_user_bindings created_at timestamptz
+    schema_require_column account_user_bindings updated_at timestamptz
+  else
+    missing=1
+  fi
+
+  [[ "$missing" -eq 0 ]]
+}
+
+PENDING_SCHEMA_MIGRATIONS=()
+
+add_pending_schema_migration() {
+  local migration_name="$1"
+  local check_fn="$2"
+  if "$check_fn"; then
+    return 0
+  fi
+  PENDING_SCHEMA_MIGRATIONS+=("$migration_name")
+}
+
+collect_pending_schema_migrations() {
+  PENDING_SCHEMA_MIGRATIONS=()
+  add_pending_schema_migration 003_route_policy_request_format.sql route_policy_request_format_schema_current
+  add_pending_schema_migration 004_runtime_config.sql runtime_config_schema_current
+  add_pending_schema_migration 005_route_policy_client_profile.sql route_policy_client_profile_schema_current
+  add_pending_schema_migration 006_schema_cleanup.sql schema_cleanup_schema_current
+  add_pending_schema_migration 007_route_policy_load_balance_strategy.sql route_policy_load_balance_schema_current
+  add_pending_schema_migration 008_usage_ai_credits.sql usage_ai_credits_schema_current
+  add_pending_schema_migration 009_usage_rollups.sql usage_rollups_schema_current
+  add_pending_schema_migration 010_pool_user_binding.sql pool_user_binding_schema_current
 }
 
 apply_incremental_migrations() {
-  if ! route_policy_request_format_migrated; then
-    log "Applying incremental migration 003_route_policy_request_format.sql"
-    apply_migration_file 003_route_policy_request_format.sql
+  local migration
+  collect_pending_schema_migrations
+  if [[ "${#PENDING_SCHEMA_MIGRATIONS[@]}" -eq 0 ]]; then
+    log "Database schema is up to date"
+    return 0
   fi
-  if ! runtime_config_migrated; then
-    log "Applying incremental migration 004_runtime_config.sql"
-    apply_migration_file 004_runtime_config.sql
-  fi
-  if ! route_policy_client_profile_migrated; then
-    log "Applying incremental migration 005_route_policy_client_profile.sql"
-    apply_migration_file 005_route_policy_client_profile.sql
-  fi
-  if ! schema_cleanup_migrated; then
-    log "Applying incremental migration 006_schema_cleanup.sql"
-    apply_migration_file 006_schema_cleanup.sql
-  fi
-  if ! route_policy_load_balance_migrated; then
-    log "Applying incremental migration 007_route_policy_load_balance_strategy.sql"
-    apply_migration_file 007_route_policy_load_balance_strategy.sql
-  fi
-  if ! usage_ai_credits_migrated; then
-    log "Applying incremental migration 008_usage_ai_credits.sql"
-    apply_migration_file 008_usage_ai_credits.sql
-  fi
-  if ! usage_rollups_migrated; then
-    log "Applying incremental migration 009_usage_rollups.sql"
-    apply_migration_file 009_usage_rollups.sql
-  fi
+
+  log "Database schema has updates: ${PENDING_SCHEMA_MIGRATIONS[*]}"
+  log "No schema conflicts detected; applying updates automatically"
+  for migration in "${PENDING_SCHEMA_MIGRATIONS[@]}"; do
+    log "Applying incremental migration $migration"
+    apply_migration_file "$migration"
+  done
+
+  collect_pending_schema_migrations
+  [[ "${#PENDING_SCHEMA_MIGRATIONS[@]}" -eq 0 ]] || schema_conflict "schema updates completed, but migrations are still pending: ${PENDING_SCHEMA_MIGRATIONS[*]}"
 }
 
 list_migration_files() {
@@ -817,21 +984,25 @@ list_migration_files() {
 apply_migration_file() {
   local migration_name="$1"
   if [[ -f "$LOCAL_MIGRATIONS_DIR/$migration_name" ]]; then
-    db_psql -v ON_ERROR_STOP=1 -f - < "$LOCAL_MIGRATIONS_DIR/$migration_name"
+    db_psql -v ON_ERROR_STOP=1 --single-transaction -f - < "$LOCAL_MIGRATIONS_DIR/$migration_name"
     return 0
   fi
 
-  docker_cli run --rm --entrypoint sh "$MIGRATION_IMAGE" -c 'cat "/srv/ghcp/migrations/$1"' sh "$migration_name" | db_psql -v ON_ERROR_STOP=1 -f -
+  docker_cli run --rm --entrypoint sh "$MIGRATION_IMAGE" -c 'cat "/srv/ghcp/migrations/$1"' sh "$migration_name" | db_psql -v ON_ERROR_STOP=1 --single-transaction -f -
 }
 
 apply_migrations_if_needed() {
   if database_migrated; then
-    log "Database schema already exists; checking incremental migrations"
+    log "Database schema already exists; checking compatibility"
     apply_incremental_migrations
     return 0
   fi
 
-  log "Applying database migrations"
+  if schema_project_objects_exist; then
+    schema_conflict "database contains a partial GHCP schema but the required initial schema is incomplete"
+  fi
+
+  log "Database schema is empty; applying database migrations"
   local migrations=()
   local migration
   while IFS= read -r migration; do

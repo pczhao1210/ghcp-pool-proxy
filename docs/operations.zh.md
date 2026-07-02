@@ -143,6 +143,24 @@ flowchart TD
 | `GET /metrics` | Gateway 指标检查 |
 | Dashboard | 查看账号状态、池状态、错误事件、用量、费用、cache 命中率和同步状态 |
 
+## Gateway 错误映射
+
+客户端按标准 AI 网关语义接收 `external_status`、`external_code` 和中性 `external_message`。Gateway 日志事件 `gateway error mapped` 保留内部排障字段：`internal_status`、`internal_code`、`internal_message`、`external_status`、`external_code`、`external_message`，并在可用时附带 `model`、`account_id`、`pool_id`、`redis_rebind_reason` 等上下文。
+
+| Internal status / code | 内部场景 | External status / code | External message | 运维说明 |
+| --- | --- | --- | --- | --- |
+| `503 no_available_accounts` / `503 user_binding_exhausted` | 路由候选为空、账号并发耗尽、user-binding 无可分配容量 | `429 rate_limited` | `rate limit exceeded; please retry later` | 看 `internal_message`、`account_id`、`pool_id` 区分容量、绑定或并发原因 |
+| `503 route_unavailable` | 没有可用路由或模型路由配置不可用 | `503 service_unavailable` | `model route unavailable` | 检查 route policy、pool 状态和模型目录 |
+| `400 missing_user_binding_owner` | user-binding pool 请求缺少稳定用户标识 | `400 invalid_request_error` | `user identifier is required` | 新客户端优先传 OpenAI `user` 或 Anthropic `metadata.user_id` / `metadata.user` |
+| `400 invalid_user_binding_owner` | 用户标识非法，例如长度超限 | `400 invalid_request_error` | `user identifier is invalid` | 检查客户端传入的用户标识归一化结果 |
+| `503 user_binding_unavailable` | user-binding 依赖 PostgreSQL 或缓存访问失败 | `503 service_unavailable` | `service temporarily unavailable` | 检查 PostgreSQL、Redis 和绑定表状态 |
+| `503 budget_unavailable` | 限流或预算状态不可读 | `503 service_unavailable` | `gateway limit state unavailable` | 检查 budget checker、Redis/PostgreSQL 和配置同步 |
+| `429 global_rate_limited` / `429 account_rate_limited` | 全局或内部资源级 RPM 命中 | `429 rate_limited` | `rate limit exceeded; please retry later` | 对外不暴露资源层级；日志保留 global/account 粒度 |
+| `429 global_budget_exhausted` / `429 account_budget_exhausted` | 全局或内部资源级 token / AI Credits 日预算耗尽 | `429 budget_exhausted` | `quota exceeded` | 对外按标准配额耗尽处理；日志保留预算层级 |
+| `502 upstream_error` | 上游模型提供方错误 | `502 upstream_error` | `model provider error` | 内部日志和 usage ledger 保留原始错误分类 |
+| `500 stream_error` | SSE writer 或流式响应初始化失败 | `500 stream_error` | `stream response unavailable` | 检查响应写出、代理和客户端连接状态 |
+| 未显式映射的 internal code | 其它走映射函数的错误 | 与 internal 相同 | 与 internal 相同 | 默认透传；新增错误类型时应评估是否需要中性化 |
+
 ## 用量、费用与 Cache 观测
 
 Gateway 在成功请求后写入 proxy-side `usage_ledger`。真实 Copilot provider 会解析上游响应中的 `usage` 和 `copilot_usage`，记录 input、cached input、cache write、output、reasoning tokens、`nano_aiu`、估算 AI Credits 和估算 USD。
@@ -284,7 +302,7 @@ flowchart TD
 | `vendor` | 可选，从 Copilot `/models` 刷新的模型供应商；`OpenAI` 会自动推导为 Responses |
 | `enabled` | 是否暴露给 `/v1/models`，以及是否允许请求 |
 
-GitHub Copilot 上游 endpoint 采用混合选择，不是全局默认 Responses。选择顺序是：模型目录中的 `upstream_api` 优先；从 Copilot 刷新的 `vendor=OpenAI` 模型和已知 `gpt-5.5` 走上游 Responses；Gemini、Anthropic、Grok 等已知 chat-only vendor/model family 即使客户端调用 `/v1/responses` 也走上游 Chat Completions；其他模型按下游请求协议选择。
+GitHub Copilot 上游 endpoint 采用混合选择，不是全局默认 Responses。选择顺序是：模型目录中的 `upstream_api` 优先；然后归一化 Copilot `/models` 刷新的 `vendor`，其中 `OpenAI` / `Azure OpenAI` 走上游 Responses，Google、Anthropic、Microsoft、xAI 走上游 Chat Completions；如果 vendor 为空，再从 `upstream`、`name`、`exposed` 推断，`gpt*`/o-series 归 OpenAI，`gemini*` 归 Google，`claude*`/`opus*`/`haiku*`/`sonnet*` 归 Anthropic，`MAI*` 归 Microsoft，`grok*`/`xai*` 归 xAI；其他模型按下游请求协议选择。
 
 ```mermaid
 flowchart LR

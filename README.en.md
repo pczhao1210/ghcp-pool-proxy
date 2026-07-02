@@ -8,21 +8,20 @@ GHCP Pool Proxy is a gateway and control-plane system for controlled GitHub Copi
 | --- | --- |
 | Architecture | [docs/architecture.en.md](docs/architecture.en.md) |
 | Operations | [docs/operations.en.md](docs/operations.en.md) |
-| Routing Rules | [docs/routing.en.md](docs/routing.en.md) |
-| Routing, Sticky Affinity, and Risk Score | [docs/routing-sticky-risk.en.md](docs/routing-sticky-risk.en.md) |
-| Protocol-Aware Routing and Coding Client Setup | [docs/protocol-aware-routing.en.md](docs/protocol-aware-routing.en.md) |
-| Routing Sticky Metrics | [docs/routing-sticky-metrics.en.md](docs/routing-sticky-metrics.en.md) |
+| Protocol | [docs/protocol.en.md](docs/protocol.en.md) |
+| Routing | [docs/routing.en.md](docs/routing.en.md) |
 
 ## Current Capabilities
 
 - The gateway exposes OpenAI Chat Completions, OpenAI Responses API, and Anthropic Messages endpoints.
 - The model catalog is controlled by `model_catalog_json`, including exposed names, upstream model IDs, Copilot `name/vendor` metadata, `upstream_api`, and `enabled` status.
-- GitHub Copilot upstream endpoint selection is mixed: `upstream_api` can override per model; Copilot-refreshed `vendor=OpenAI` models and known `gpt-5.5` default to upstream Responses; known chat-only vendors/model families such as Gemini, Anthropic, and Grok default to upstream Chat Completions even when clients call `/v1/responses`; other models follow the downstream protocol.
+- GitHub Copilot upstream endpoint selection is mixed: `upstream_api` can override per model; `vendor=OpenAI` / `Azure OpenAI` and `gpt*`/o-series use upstream Responses; Gemini, Anthropic/Claude/Opus/Haiku/Sonnet, Microsoft MAI, Grok/xAI, and other non-OpenAI families use upstream Chat Completions; unknown models fall back to the downstream protocol.
 - The router selects pools by model and route policy, then applies sticky affinity, overflow, pool/account/seat filtering, concurrency constraints, and weighted selection.
 - Route policies support `request_format`, enabling protocol-level routing for `openai_chat`, `openai_responses`, and `anthropic_messages`.
+- Pools support `allocation_mode=shared/user_binding`. User-binding pools use only `X-GHCP-User` as the binding owner; bindings live in PostgreSQL, are cached in Redis, expire after 7 idle days, and can be released from expanded pool details in the dashboard.
 - The gateway loads routing configuration on startup and refreshes pool, account membership, and route policy snapshots from PostgreSQL every 30 seconds.
 - Admin and Worker are separate commands. Admin serves control-plane APIs and the dashboard, while Worker runs probes, metrics sync, credential warnings, and recovery tasks.
-- The dashboard is designed for operations workflows and covers overview, accounts, pools, clients, metrics, events, organizations, settings, and the model catalog.
+- The dashboard is designed for operations workflows and covers overview, accounts, pools, clients, metrics, events, settings, and the model catalog; organization-related backend capability is retained, but the current UI does not expose it.
 
 ## Quick Start
 

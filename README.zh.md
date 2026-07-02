@@ -6,23 +6,23 @@ GHCP Pool Proxy 是一个面向受控 GitHub Copilot 账号资源的网关与控
 
 | 说明 | 链接 |
 | --- | --- |
-| 架构设计 | [docs/architecture.zh.md](docs/architecture.zh.md) |
-| 运维说明 | [docs/operations.zh.md](docs/operations.zh.md) |
-| 路由规则 | [docs/routing.zh.md](docs/routing.zh.md) |
-| 路由、Sticky 与 Risk Score | [docs/routing-sticky-risk.zh.md](docs/routing-sticky-risk.zh.md) |
-| 协议感知路由与 Coding 客户端配置 | [docs/protocol-aware-routing.zh.md](docs/protocol-aware-routing.zh.md) |
-| 路由粘性指标 | [docs/routing-sticky-metrics.zh.md](docs/routing-sticky-metrics.zh.md) |
+| Architecture | [docs/architecture.zh.md](docs/architecture.zh.md) |
+| Operations | [docs/operations.zh.md](docs/operations.zh.md) |
+| Protocol | [docs/protocol.zh.md](docs/protocol.zh.md) |
+| Routing | [docs/routing.zh.md](docs/routing.zh.md) |
 
 ## 当前能力
 
 - Gateway 已提供 OpenAI Chat Completions、OpenAI Responses API、Anthropic Messages 三类入口。
 - 模型目录由 `model_catalog_json` 控制，支持暴露名、上游模型 ID、Copilot `name/vendor` 元数据、`upstream_api` 和 `enabled` 启停。
-- GitHub Copilot 上游 endpoint 采用混合选择：`upstream_api` 可按模型显式覆盖；从 Copilot 刷新的 `vendor=OpenAI` 模型和已知 `gpt-5.5` 默认走上游 Responses；Gemini、Anthropic、Grok 等已知 chat-only vendor/model family 即使客户端调用 `/v1/responses` 也默认走上游 Chat Completions；其他模型按下游协议选择。
+- GitHub Copilot 上游 endpoint 采用混合选择：`upstream_api` 可按模型显式覆盖；`vendor=OpenAI` / `Azure OpenAI` 与 `gpt*`/o-series 走上游 Responses；Gemini、Anthropic/Claude/Opus/Haiku/Sonnet、Microsoft MAI、Grok/xAI 等非 OpenAI 家族走上游 Chat Completions；其它模型按下游协议兜底。
 - Router 支持按模型与 route policy 选择池，并执行 sticky 亲和、overflow、pool/account/seat 过滤、并发约束和权重选择。
 - route policy 已支持 `request_format`，可按 `openai_chat`、`openai_responses`、`anthropic_messages` 做协议级分流。
+- Pool 已支持 `allocation_mode=shared/user_binding`。`user_binding` 池只根据 `X-GHCP-User` 把用户强制绑定到一个账号并保持独占；绑定存 PostgreSQL，Redis 缓存热路由状态，7 天未使用后自动过期，也可在 Dashboard 的 pool 展开详情中手动释放。
 - Gateway 启动时加载路由配置，并每 30 秒从 PostgreSQL 刷新 pool、账号关系和 route policy 快照。
 - Admin 和 Worker 已拆分为独立命令入口；Admin 提供控制面 API 并服务 Dashboard，Worker 执行探针、指标同步、凭据提醒和恢复任务。
-- Dashboard 面向运维场景，覆盖概览、账号、池、客户端、指标、事件、组织、设置和模型目录。
+- Dashboard 面向运维场景，覆盖概览、账号、池、客户端、指标、事件、设置和模型目录；组织相关能力暂保留在后端，当前 UI 暂不展示。
+- Dashboard Overview 支持按 Gateway Public URL 生成 Claude Code、Codex 或 curl 启动脚本，可勾选 custom headers 并自动生成随机 `X-GHCP-Session-ID`。
 
 ## 快速开始
 

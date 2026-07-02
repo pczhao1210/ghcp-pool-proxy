@@ -32,7 +32,7 @@ deploy/deploy.sh --start
 - 首次运行生成宿主机文件 `~/ghcp_proxy/.env`，保存 admin token、`PROVIDER=copilot`、数据库密码和 `CREDENTIAL_MASTER_KEY`。
 - 拉取 `pczhao1210/ghcp-pool-proxy:gateway-latest`、`admin-latest`、`worker-latest` 以及 PostgreSQL/Redis 镜像。
 - 启动 PostgreSQL 和 Redis，等待健康检查通过。
-- 从已发布 admin 镜像内读取数据库迁移 SQL 并执行迁移。
+- 读取发布包或已发布 admin 镜像内的 `migrations/schema_version` 和 `migrations/001_init.sql`。空库直接应用单一 init schema；已有库读取 DB 内 `system_settings.schema_version`，只在脚本内置了平滑升级路径时自动升级。
 - 启动 gateway、admin 和 worker。
 - 启动日志采集器，把 compose 日志按小时写入 `~/ghcp_proxy/logs/ghcp-proxy-YYYYMMDD-HH.log`，默认保留 30 天。
 
@@ -48,12 +48,22 @@ deploy/deploy.sh --logs
 deploy/deploy.sh --stop
 ```
 
+重置 VM 数据库和 Redis 数据但保留 `.env`：
+
+```bash
+GHCP_RESET_CONFIRM=reset deploy/deploy.sh --reset
+deploy/deploy.sh --start
+```
+
+本地开发环境使用 `./start.sh --reset`，它会执行 Docker Compose volume reset 后按当前 `migrations/001_init.sql` 重建数据库。
+
 VM Docker 持久化：
 
 - PostgreSQL 数据默认保存在 `~/ghcp_proxy/data/postgres`。
 - Redis AOF 数据默认保存在 `~/ghcp_proxy/data/redis`。
 - 日志默认保存在 `~/ghcp_proxy/logs`，按小时分段，`LOG_RETENTION_DAYS` 默认值为 `30`。
 - 部署密钥和端口配置保存在 `~/ghcp_proxy/.env`。已有凭据数据后不要随意替换 `CREDENTIAL_MASTER_KEY`。
+- `~/ghcp_proxy/.env` 会写入当前发布包的 `SCHEMA_VERSION`，便于运维确认目标 schema 版本；数据库实际已安装版本记录在 `system_settings.schema_version`。
 - 以上路径都是宿主机路径；PostgreSQL 和 Redis 通过 Docker Compose bind mount 使用这些目录，不是在镜像内部创建持久化目录。
 
 ## 主要配置
@@ -65,6 +75,7 @@ VM Docker 持久化：
 | `ADMIN_TOKEN` | admin API 鉴权 token |
 | `POSTGRES_DSN` | PostgreSQL 连接串 |
 | `REDIS_ADDR` | Redis 地址 |
+| `SCHEMA_VERSION` | 当前发布包目标 schema 版本；由 `deploy.sh` 写入 `.env`，DB 已安装版本以 `system_settings.schema_version` 为准 |
 | `PROVIDER` | 上游 provider 类型，VM 部署默认 `copilot` |
 | `CREDENTIAL_MASTER_KEY` | 凭据加密主密钥 |
 | `GITHUB_OAUTH_CLIENT_ID` | Dashboard Device Flow 登录 Copilot 账号的 GitHub OAuth App client ID，可选覆盖项；默认使用内置 GitHub OAuth Client ID。 |

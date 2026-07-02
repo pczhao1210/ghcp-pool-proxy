@@ -32,7 +32,7 @@ Startup flow:
 - Generates host file `~/ghcp_proxy/.env` on first run with the admin token, `PROVIDER=copilot`, database password, and `CREDENTIAL_MASTER_KEY`.
 - Pulls `pczhao1210/ghcp-pool-proxy:gateway-latest`, `admin-latest`, `worker-latest`, plus PostgreSQL and Redis images.
 - Starts PostgreSQL and Redis, then waits for health checks.
-- Reads migration SQL from the published admin image and applies database migrations.
+- Reads `migrations/schema_version` and `migrations/001_init.sql` from the release package or published admin image. Empty databases receive the single init schema; existing databases read `system_settings.schema_version` and are upgraded only when the script has an explicit smooth upgrade path.
 - Starts gateway, admin, and worker.
 - Starts a log collector that writes compose logs hourly to `~/ghcp_proxy/logs/ghcp-proxy-YYYYMMDD-HH.log` with 30-day retention by default.
 
@@ -48,12 +48,22 @@ Stop services while preserving persistent data:
 deploy/deploy.sh --stop
 ```
 
+Reset VM PostgreSQL and Redis data while preserving `.env`:
+
+```bash
+GHCP_RESET_CONFIRM=reset deploy/deploy.sh --reset
+deploy/deploy.sh --start
+```
+
+For local development, use `./start.sh --reset`; it resets Docker Compose volumes and rebuilds the database from the current `migrations/001_init.sql`.
+
 VM Docker persistence:
 
 - PostgreSQL data is stored under `~/ghcp_proxy/data/postgres` by default.
 - Redis AOF data is stored under `~/ghcp_proxy/data/redis` by default.
 - Logs are stored under `~/ghcp_proxy/logs`, split hourly, with `LOG_RETENTION_DAYS=30` by default.
 - Deployment secrets and ports are stored in `~/ghcp_proxy/.env`. Do not rotate `CREDENTIAL_MASTER_KEY` casually after storing credentials.
+- `~/ghcp_proxy/.env` records the current release package `SCHEMA_VERSION` for operations visibility; the installed database version is stored in `system_settings.schema_version`.
 - These are host paths. PostgreSQL and Redis use them through Docker Compose bind mounts; persistent directories are not created inside the images.
 
 ## Main Configuration
@@ -65,6 +75,7 @@ VM Docker persistence:
 | `ADMIN_TOKEN` | Admin API authentication token |
 | `POSTGRES_DSN` | PostgreSQL connection string |
 | `REDIS_ADDR` | Redis address |
+| `SCHEMA_VERSION` | Target schema version for the current release package; written to `.env` by `deploy.sh`, while the installed DB version is stored in `system_settings.schema_version` |
 | `PROVIDER` | Upstream provider type, `copilot` by default for VM deployment |
 | `CREDENTIAL_MASTER_KEY` | Credential encryption master key |
 | `GITHUB_OAUTH_CLIENT_ID` | Optional override for the GitHub OAuth App client ID used by dashboard Device Flow. Defaults to the built-in GitHub OAuth Client ID. |

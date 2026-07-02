@@ -1532,7 +1532,10 @@ reset_stack() {
   fi
 
   log "Deleting persistent PostgreSQL and Redis data under $DATA_DIR"
-  rm -rf "$POSTGRES_DATA_DIR" "$REDIS_DATA_DIR" "$RUN_DIR"
+  if ! rm -rf "$POSTGRES_DATA_DIR" "$REDIS_DATA_DIR" "$RUN_DIR"; then
+    log "Retrying data deletion with sudo"
+    run_privileged rm -rf "$POSTGRES_DATA_DIR" "$REDIS_DATA_DIR" "$RUN_DIR"
+  fi
   mkdir -p "$POSTGRES_DATA_DIR" "$REDIS_DATA_DIR" "$RUN_DIR" "$LOG_DIR"
 
   cat <<EOF

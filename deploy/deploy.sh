@@ -1307,6 +1307,16 @@ apply_migrations_if_needed() {
   reconcile_database_schema
 }
 
+reset_data_dir_with_container() {
+  local path="$1"
+  mkdir -p "$path"
+  docker_cli run --rm \
+    --entrypoint sh \
+    -v "$path:/target" \
+    alpine:3.19 \
+    -c 'find /target -mindepth 1 -maxdepth 1 -exec rm -rf {} +'
+}
+
 export_runtime_setting() {
   local env_name="$1"
   local setting_key="$2"
@@ -1532,10 +1542,9 @@ reset_stack() {
   fi
 
   log "Deleting persistent PostgreSQL and Redis data under $DATA_DIR"
-  if ! rm -rf "$POSTGRES_DATA_DIR" "$REDIS_DATA_DIR" "$RUN_DIR"; then
-    log "Retrying data deletion with sudo"
-    run_privileged rm -rf "$POSTGRES_DATA_DIR" "$REDIS_DATA_DIR" "$RUN_DIR"
-  fi
+  reset_data_dir_with_container "$POSTGRES_DATA_DIR"
+  reset_data_dir_with_container "$REDIS_DATA_DIR"
+  rm -rf "$RUN_DIR" || true
   mkdir -p "$POSTGRES_DATA_DIR" "$REDIS_DATA_DIR" "$RUN_DIR" "$LOG_DIR"
 
   cat <<EOF

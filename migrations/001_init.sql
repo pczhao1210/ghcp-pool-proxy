@@ -38,7 +38,7 @@ CREATE TABLE accounts (
     status TEXT NOT NULL DEFAULT 'pending',
     risk_score INT NOT NULL DEFAULT 0,
     priority INT NOT NULL DEFAULT 100,
-    max_concurrency INT NOT NULL DEFAULT 1,
+    max_concurrency INT NOT NULL DEFAULT 6,
     current_failure_count INT NOT NULL DEFAULT 0,
     last_success_at TIMESTAMPTZ,
     last_failure_at TIMESTAMPTZ,

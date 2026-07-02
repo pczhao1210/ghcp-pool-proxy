@@ -101,6 +101,8 @@ truncation, include, store, service_tier
 
 `reasoning` 和 `reasoning_effort` 只按原名透传；不会转换为 Anthropic `thinking`。
 
+对于 Copilot 上游，`include` 会丢弃不支持的 `reasoning.encrypted_content`；如果列表因此为空，则省略 `include`。
+
 转换：`function_call` 转为 assistant tool call；`function_call_output` 转为 tool message；`input_text`、`output_text`、`text` 统一为 canonical text part；`input_image`、`image_url` 统一为 canonical `image_url`。
 
 丢弃或拒绝：未列出的 body 字段会被丢弃；`metadata` 除 `session_id`、`conversation_id` 外丢弃；`input` array 里不支持的 content part 会被跳过；图片校验规则与 Chat Completions 相同。
@@ -194,6 +196,8 @@ Provider 按 `CanonicalRequest.UpstreamAPI` 选择上游路径；为空时，`op
 | assistant tool call | `tool_calls` | `function_call` input item |
 | tool result | `tool` message + `tool_call_id` | `function_call_output` input item |
 | `cache_control` | 尽量保留在 tool/content part | 尽量保留在 tool/content part |
+
+对于 Copilot Responses 上游，过长的 `call_id` 会被稳定缩短，以满足上游 64 字符限制；对应的 `function_call_output` 会使用同一个缩短后的 ID。
 
 ## 响应适配
 

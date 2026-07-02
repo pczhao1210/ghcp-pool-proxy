@@ -26,7 +26,7 @@ In the dashboard **Accounts** tab, click **+ Add Account** to create an account.
 | `Account Name` | Display name for the account |
 | `Account Source` | `personal`, `org_business_seat`, or `enterprise_seat` |
 | `GitHub Login` | Associated GitHub username |
-| `Max Concurrency` | Maximum concurrent requests, default 1 |
+| `Max Concurrency` | Maximum concurrent requests, default 6 |
 
 After creation, assign the account to one or more pools before it can receive routed traffic.
 

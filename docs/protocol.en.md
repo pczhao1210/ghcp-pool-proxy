@@ -101,6 +101,8 @@ truncation, include, store, service_tier
 
 `reasoning` and `reasoning_effort` are passed through by name only; they are not converted to Anthropic `thinking`.
 
+For Copilot upstream, `include` drops the unsupported `reasoning.encrypted_content` value; if that leaves the list empty, `include` is omitted.
+
 Conversions: `function_call` becomes an assistant tool call; `function_call_output` becomes a tool message; `input_text`, `output_text`, and `text` normalize to canonical text parts; `input_image` and `image_url` normalize to canonical `image_url`.
 
 Discarded or rejected: unlisted body fields are discarded; `metadata` keys other than `session_id` and `conversation_id` are discarded; unsupported content parts inside `input` arrays are skipped; image validation is the same as Chat Completions.
@@ -194,6 +196,8 @@ Content conversions during upstream rebuild:
 | assistant tool call | `tool_calls` | `function_call` input item |
 | tool result | `tool` message + `tool_call_id` | `function_call_output` input item |
 | `cache_control` | Retained where possible on tool/content part | Retained where possible on tool/content part |
+
+For Copilot Responses upstream, overlong `call_id` values are deterministically shortened to stay within the upstream 64-character limit; matching `function_call_output` items use the same shortened ID.
 
 ## Response Adaptation
 

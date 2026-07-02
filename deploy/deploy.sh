@@ -20,6 +20,19 @@ GATEWAY_IMAGE="pczhao1210/ghcp-pool-proxy:gateway-latest"
 ADMIN_IMAGE="pczhao1210/ghcp-pool-proxy:admin-latest"
 WORKER_IMAGE="pczhao1210/ghcp-pool-proxy:worker-latest"
 MIGRATION_IMAGE="$ADMIN_IMAGE"
+DISTRO_ID=""
+DISTRO_ID_LIKE=""
+DISTRO_NAME=""
+DISTRO_FAMILY=""
+ARCH_RAW=""
+ARCH=""
+HOST_ENV_READY=0
+APT_UPDATED=0
+SUDO_VALIDATED=0
+SUDO_KEEPALIVE_PID=""
+DOCKER_CMD=(docker)
+DOCKER_REQUIRES_SUDO=0
+COMPOSE_MODE=""
 
 usage() {
   cat <<'EOF'
@@ -40,6 +53,10 @@ Environment:
   GHCP_PROXY_HOME      Alternative default for the persistent data directory.
   LOG_RETENTION_DAYS   Hourly file log retention days. Default: 30
   WAIT_TIMEOUT         Seconds to wait for containers and HTTP endpoints. Default: 120
+
+Host setup:
+  Automatically validates x86_64 Linux, detects Ubuntu/Debian, Fedora, Red Hat family, or SUSE,
+  installs Docker Engine/Compose when missing, and adds the invoking user to the docker group.
 
 Generated host files and bind-mount directories:
   ~/ghcp_proxy/.env             Private deployment settings and generated secrets.
@@ -64,6 +81,47 @@ die() {
 
 require_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"
+}
+
+stop_sudo_keepalive() {
+  if [[ -n "$SUDO_KEEPALIVE_PID" ]]; then
+    kill "$SUDO_KEEPALIVE_PID" >/dev/null 2>&1 || true
+    SUDO_KEEPALIVE_PID=""
+  fi
+}
+
+start_sudo_keepalive() {
+  [[ -z "$SUDO_KEEPALIVE_PID" ]] || return 0
+  (
+    while true; do
+      sudo -n true >/dev/null 2>&1 || exit 0
+      sleep 60
+    done
+  ) &
+  SUDO_KEEPALIVE_PID="$!"
+  trap stop_sudo_keepalive EXIT
+}
+
+ensure_sudo() {
+  if [[ "$(id -u)" -eq 0 ]]; then
+    return 0
+  fi
+  require_cmd sudo
+  if [[ "$SUDO_VALIDATED" -eq 0 ]]; then
+    log "Requesting sudo privileges for host setup"
+    sudo -v || die "sudo privileges are required to install Docker, manage its service, or update docker group membership"
+    SUDO_VALIDATED=1
+    start_sudo_keepalive
+  fi
+}
+
+run_privileged() {
+  if [[ "$(id -u)" -eq 0 ]]; then
+    "$@"
+    return $?
+  fi
+  ensure_sudo
+  sudo "$@"
 }
 
 set_action() {
@@ -153,18 +211,345 @@ require_linux() {
   [[ "$(uname -s)" == "Linux" ]] || die "this VM deploy script expects Linux"
 }
 
-require_docker() {
-  require_cmd docker
+detect_architecture() {
+  ARCH_RAW="$(uname -m)"
+  case "$ARCH_RAW" in
+    x86_64|amd64)
+      ARCH="amd64"
+      ;;
+    aarch64|arm64|armv*|arm)
+      die "ARM architecture ($ARCH_RAW) is not supported; only x86_64/amd64 Linux hosts are currently supported"
+      ;;
+    i386|i686)
+      die "32-bit x86 architecture ($ARCH_RAW) is not supported; only x86_64/amd64 Linux hosts are currently supported"
+      ;;
+    *)
+      die "unsupported CPU architecture: $ARCH_RAW; only x86_64/amd64 Linux hosts are currently supported"
+      ;;
+  esac
+}
+
+detect_linux_distro() {
+  [[ -r /etc/os-release ]] || die "cannot detect Linux distribution: /etc/os-release is missing"
+  # shellcheck disable=SC1091
+  . /etc/os-release
+  DISTRO_ID="${ID:-unknown}"
+  DISTRO_ID_LIKE="${ID_LIKE:-}"
+  DISTRO_NAME="${PRETTY_NAME:-$DISTRO_ID}"
+
+  case "$DISTRO_ID" in
+    ubuntu|debian)
+      DISTRO_FAMILY="debian"
+      ;;
+    fedora)
+      DISTRO_FAMILY="fedora"
+      ;;
+    rhel|redhat|centos|rocky|almalinux|ol)
+      DISTRO_FAMILY="redhat"
+      ;;
+    opensuse*|sles|suse)
+      DISTRO_FAMILY="suse"
+      ;;
+    *)
+      case " $DISTRO_ID_LIKE " in
+        *" rhel "*|*" redhat "*|*" centos "*)
+          DISTRO_FAMILY="redhat"
+          ;;
+        *" fedora "*)
+          DISTRO_FAMILY="fedora"
+          ;;
+        *" ubuntu "*|*" debian "*)
+          DISTRO_FAMILY="debian"
+          ;;
+        *" suse "*|*" opensuse "*)
+          DISTRO_FAMILY="suse"
+          ;;
+        *)
+          die "unsupported Linux distribution: $DISTRO_NAME. Supported families: Ubuntu/Debian, Fedora, Red Hat/CentOS/Rocky/AlmaLinux, and SUSE/openSUSE"
+          ;;
+      esac
+      ;;
+  esac
+}
+
+package_manager() {
+  case "$DISTRO_FAMILY" in
+    debian)
+      require_cmd apt-get
+      printf '%s\n' apt-get
+      ;;
+    fedora|redhat)
+      if command -v dnf >/dev/null 2>&1; then
+        printf '%s\n' dnf
+      elif command -v yum >/dev/null 2>&1; then
+        printf '%s\n' yum
+      else
+        die "dnf or yum is required to install Docker on $DISTRO_NAME"
+      fi
+      ;;
+    suse)
+      require_cmd zypper
+      printf '%s\n' zypper
+      ;;
+    *)
+      die "unsupported Linux distribution family: $DISTRO_FAMILY"
+      ;;
+  esac
+}
+
+apt_update_once() {
+  if [[ "$APT_UPDATED" -eq 0 ]]; then
+    run_privileged apt-get update
+    APT_UPDATED=1
+  fi
+}
+
+install_host_packages() {
+  local pm
+  [[ "$#" -gt 0 ]] || return 0
+  pm="$(package_manager)"
+  case "$DISTRO_FAMILY" in
+    debian)
+      apt_update_once
+      run_privileged env DEBIAN_FRONTEND=noninteractive apt-get install -y "$@"
+      ;;
+    fedora|redhat)
+      run_privileged "$pm" install -y "$@"
+      ;;
+    suse)
+      run_privileged zypper --non-interactive install --no-recommends "$@"
+      ;;
+  esac
+}
+
+ensure_command_package() {
+  local command_name="$1"
+  local package_name="$2"
+  if command -v "$command_name" >/dev/null 2>&1; then
+    return 0
+  fi
+  log "Installing missing host command: $command_name"
+  install_host_packages "$package_name"
+  command -v "$command_name" >/dev/null 2>&1 || die "failed to install required command: $command_name"
+}
+
+docker_compose_binary_available() {
+  if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
+    return 0
+  fi
+  if command -v docker-compose >/dev/null 2>&1 && docker-compose version >/dev/null 2>&1; then
+    return 0
+  fi
+  return 1
+}
+
+install_docker_debian() {
+  local repo_os="$DISTRO_ID"
+  local codename="${VERSION_CODENAME:-}"
+
+  if [[ "$repo_os" != "ubuntu" && "$repo_os" != "debian" ]]; then
+    if [[ " $DISTRO_ID_LIKE " == *" ubuntu "* ]]; then
+      repo_os="ubuntu"
+      codename="${UBUNTU_CODENAME:-$codename}"
+    elif [[ " $DISTRO_ID_LIKE " == *" debian "* ]]; then
+      repo_os="debian"
+    fi
+  fi
+  [[ -n "$codename" ]] || die "cannot determine Debian/Ubuntu codename for Docker repository"
+
+  apt_update_once
+  run_privileged env DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl gnupg
+  run_privileged install -m 0755 -d /etc/apt/keyrings
+  if [[ ! -f /etc/apt/keyrings/docker.gpg ]]; then
+    curl -fsSL "https://download.docker.com/linux/$repo_os/gpg" | run_privileged gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+  fi
+  run_privileged chmod a+r /etc/apt/keyrings/docker.gpg
+  printf 'deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/%s %s stable\n' "$repo_os" "$codename" | run_privileged tee /etc/apt/sources.list.d/docker.list >/dev/null
+  APT_UPDATED=0
+  apt_update_once
+  run_privileged env DEBIAN_FRONTEND=noninteractive apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+}
+
+dnf_add_docker_repo() {
+  local pm="$1"
+  local repo_url="$2"
+  if [[ "$pm" == "dnf" ]]; then
+    run_privileged dnf install -y dnf-plugins-core ca-certificates curl
+    if ! run_privileged dnf config-manager --add-repo "$repo_url"; then
+      run_privileged dnf config-manager addrepo --from-repofile="$repo_url"
+    fi
+    return 0
+  fi
+
+  run_privileged yum install -y yum-utils ca-certificates curl
+  run_privileged yum-config-manager --add-repo "$repo_url"
+}
+
+install_docker_dnf_family() {
+  local pm
+  local repo_url
+  pm="$(package_manager)"
+  if [[ "$DISTRO_FAMILY" == "fedora" ]]; then
+    repo_url="https://download.docker.com/linux/fedora/docker-ce.repo"
+  elif [[ "$DISTRO_ID" == "rhel" || "$DISTRO_ID" == "redhat" ]]; then
+    repo_url="https://download.docker.com/linux/rhel/docker-ce.repo"
+  else
+    repo_url="https://download.docker.com/linux/centos/docker-ce.repo"
+  fi
+
+  dnf_add_docker_repo "$pm" "$repo_url"
+  run_privileged "$pm" install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+}
+
+install_docker_suse() {
+  run_privileged zypper --non-interactive refresh
+  if ! run_privileged zypper --non-interactive install --no-recommends docker docker-compose-plugin curl; then
+    run_privileged zypper --non-interactive install --no-recommends docker docker-compose curl
+  fi
+}
+
+install_docker_stack() {
+  log "Installing Docker Engine and Compose for $DISTRO_NAME"
+  case "$DISTRO_FAMILY" in
+    debian)
+      install_docker_debian
+      ;;
+    fedora|redhat)
+      install_docker_dnf_family
+      ;;
+    suse)
+      install_docker_suse
+      ;;
+    *)
+      die "automatic Docker installation is not supported on $DISTRO_NAME"
+      ;;
+  esac
+}
+
+start_docker_service() {
+  if command -v systemctl >/dev/null 2>&1; then
+    if systemctl is-active --quiet docker 2>/dev/null; then
+      return 0
+    fi
+    log "Starting Docker service"
+    run_privileged systemctl enable --now docker || run_privileged systemctl start docker || true
+  elif command -v service >/dev/null 2>&1; then
+    if service docker status >/dev/null 2>&1; then
+      return 0
+    fi
+    log "Starting Docker service"
+    run_privileged service docker start || true
+  else
+    warn "systemctl/service not found; assuming Docker daemon is managed externally"
+  fi
+}
+
+docker_group_user() {
+  if [[ "$(id -u)" -eq 0 ]]; then
+    if [[ -n "${SUDO_USER:-}" && "${SUDO_USER:-}" != "root" ]]; then
+      printf '%s\n' "$SUDO_USER"
+    fi
+    return 0
+  fi
+  id -un
+}
+
+ensure_docker_group_membership() {
+  local target_user
+  target_user="$(docker_group_user)"
+  if [[ -z "$target_user" ]]; then
+    warn "running as root; no non-root user was detected for docker group membership"
+    return 0
+  fi
+
+  if command -v getent >/dev/null 2>&1; then
+    getent group docker >/dev/null 2>&1 || run_privileged groupadd docker
+  else
+    run_privileged groupadd -f docker
+  fi
+
+  if ! id -nG "$target_user" 2>/dev/null | tr ' ' '\n' | grep -qx docker; then
+    log "Adding $target_user to docker group"
+    run_privileged usermod -aG docker "$target_user"
+    warn "User '$target_user' was added to docker group. Start a new login shell or run 'newgrp docker' to use Docker without sudo in future sessions."
+  fi
+}
+
+docker_cli() {
+  "${DOCKER_CMD[@]}" "$@"
+}
+
+select_docker_command() {
+  DOCKER_CMD=(docker)
+  DOCKER_REQUIRES_SUDO=0
+  if docker info >/dev/null 2>&1; then
+    return 0
+  fi
+
+  if [[ "$(id -u)" -ne 0 ]]; then
+    ensure_sudo
+    if sudo docker info >/dev/null 2>&1; then
+      DOCKER_CMD=(sudo docker)
+      DOCKER_REQUIRES_SUDO=1
+      warn "Using sudo for Docker in this session; docker group membership will remove that requirement after the next login shell."
+      return 0
+    fi
+  fi
+
   docker info >/dev/null 2>&1 || die "docker daemon is not available; start Docker or check permissions"
-  docker compose version >/dev/null 2>&1 || die "docker compose is required"
+}
+
+select_compose_command() {
+  if docker_cli compose version >/dev/null 2>&1; then
+    COMPOSE_MODE="plugin"
+    return 0
+  fi
+  if command -v docker-compose >/dev/null 2>&1; then
+    if [[ "$DOCKER_REQUIRES_SUDO" -eq 1 && "$(id -u)" -ne 0 ]]; then
+      run_privileged docker-compose version >/dev/null 2>&1 || return 1
+    else
+      docker-compose version >/dev/null 2>&1 || return 1
+    fi
+    COMPOSE_MODE="standalone"
+    return 0
+  fi
+  return 1
+}
+
+ensure_docker_stack() {
+  local needs_install=0
+  command -v docker >/dev/null 2>&1 || needs_install=1
+  if [[ "$needs_install" -eq 0 ]] && ! docker_compose_binary_available; then
+    needs_install=1
+  fi
+
+  if [[ "$needs_install" -eq 1 ]]; then
+    install_docker_stack
+  fi
+
+  require_cmd docker
+  ensure_docker_group_membership
+  start_docker_service
+  select_docker_command
+  select_compose_command || die "Docker Compose is required but was not found after installation"
+}
+
+prepare_host_environment() {
+  [[ "$HOST_ENV_READY" -eq 0 ]] || return 0
+  require_linux
+  detect_architecture
+  detect_linux_distro
+  log "Detected host: $DISTRO_NAME ($DISTRO_FAMILY), architecture: $ARCH_RAW"
+  ensure_docker_stack
+  HOST_ENV_READY=1
 }
 
 require_common_cmds() {
-  require_linux
-  require_docker
+  prepare_host_environment
   require_cmd awk
   require_cmd date
   require_cmd find
+  require_cmd grep
   require_cmd od
   require_cmd sed
   require_cmd sort
@@ -174,8 +559,8 @@ require_common_cmds() {
 
 require_start_cmds() {
   require_common_cmds
-  require_cmd curl
-  require_cmd nohup
+  ensure_command_package curl curl
+  ensure_command_package nohup coreutils
 }
 
 random_hex() {
@@ -269,7 +654,15 @@ load_environment() {
 }
 
 compose() {
-  docker compose --env-file "$ENV_FILE" -p "$PROJECT_NAME" -f "$COMPOSE_FILE" "$@"
+  if [[ "$COMPOSE_MODE" == "standalone" ]]; then
+    if [[ "$DOCKER_REQUIRES_SUDO" -eq 1 && "$(id -u)" -ne 0 ]]; then
+      run_privileged docker-compose --env-file "$ENV_FILE" -p "$PROJECT_NAME" -f "$COMPOSE_FILE" "$@"
+      return $?
+    fi
+    docker-compose --env-file "$ENV_FILE" -p "$PROJECT_NAME" -f "$COMPOSE_FILE" "$@"
+    return $?
+  fi
+  docker_cli compose --env-file "$ENV_FILE" -p "$PROJECT_NAME" -f "$COMPOSE_FILE" "$@"
 }
 
 pull_runtime_images() {
@@ -287,7 +680,7 @@ wait_container_healthy() {
   while (( elapsed < WAIT_TIMEOUT )); do
     container_id="$(compose ps -q "$service")"
     if [[ -n "$container_id" ]]; then
-      status="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$container_id" 2>/dev/null || true)"
+      status="$(docker_cli inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$container_id" 2>/dev/null || true)"
       if [[ "$status" == "healthy" ]]; then
         return 0
       fi
@@ -418,7 +811,7 @@ list_migration_files() {
     return 0
   fi
 
-  docker run --rm --entrypoint sh "$MIGRATION_IMAGE" -c 'for file in /srv/ghcp/migrations/*.sql; do [ -f "$file" ] || continue; basename "$file"; done | sort'
+  docker_cli run --rm --entrypoint sh "$MIGRATION_IMAGE" -c 'for file in /srv/ghcp/migrations/*.sql; do [ -f "$file" ] || continue; basename "$file"; done | sort'
 }
 
 apply_migration_file() {
@@ -428,7 +821,7 @@ apply_migration_file() {
     return 0
   fi
 
-  docker run --rm --entrypoint sh "$MIGRATION_IMAGE" -c 'cat "/srv/ghcp/migrations/$1"' sh "$migration_name" | db_psql -v ON_ERROR_STOP=1 -f -
+  docker_cli run --rm --entrypoint sh "$MIGRATION_IMAGE" -c 'cat "/srv/ghcp/migrations/$1"' sh "$migration_name" | db_psql -v ON_ERROR_STOP=1 -f -
 }
 
 apply_migrations_if_needed() {
@@ -508,7 +901,11 @@ collector_is_running() {
   pid_file="$(collector_pid_file)"
   [[ -f "$pid_file" ]] || return 1
   pid="$(cat "$pid_file" 2>/dev/null || true)"
-  [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null
+  [[ -n "$pid" ]] || return 1
+  if kill -0 "$pid" 2>/dev/null; then
+    return 0
+  fi
+  [[ "$(id -u)" -ne 0 ]] && command -v sudo >/dev/null 2>&1 && sudo -n kill -0 "$pid" 2>/dev/null
 }
 
 seconds_until_next_hour() {
@@ -563,7 +960,7 @@ stop_log_collector() {
 
   pid="$(cat "$pid_file")"
   log "Stopping hourly file log collector"
-  kill "$pid" 2>/dev/null || true
+  kill "$pid" 2>/dev/null || run_privileged kill "$pid" 2>/dev/null || true
   rm -f "$pid_file"
 }
 
@@ -576,14 +973,26 @@ start_log_collector() {
   fi
 
   log "Starting hourly file log collector in $LOG_DIR"
-  GHCP_PROXY_HOME="$DATA_DIR" \
-    ENV_FILE="$ENV_FILE" \
-    COMPOSE_FILE="$COMPOSE_FILE" \
-    COMPOSE_PROJECT_NAME="$PROJECT_NAME" \
-    LOG_DIR="$LOG_DIR" \
-    RUN_DIR="$RUN_DIR" \
-    LOG_RETENTION_DAYS="$LOG_RETENTION_DAYS" \
-    nohup "$SCRIPT_PATH" __collect-logs >> "$LOG_DIR/log-collector.log" 2>&1 &
+  if [[ "$DOCKER_REQUIRES_SUDO" -eq 1 && "$(id -u)" -ne 0 ]]; then
+    run_privileged env \
+      GHCP_PROXY_HOME="$DATA_DIR" \
+      ENV_FILE="$ENV_FILE" \
+      COMPOSE_FILE="$COMPOSE_FILE" \
+      COMPOSE_PROJECT_NAME="$PROJECT_NAME" \
+      LOG_DIR="$LOG_DIR" \
+      RUN_DIR="$RUN_DIR" \
+      LOG_RETENTION_DAYS="$LOG_RETENTION_DAYS" \
+      nohup "$SCRIPT_PATH" __collect-logs >> "$LOG_DIR/log-collector.log" 2>&1 &
+  else
+    GHCP_PROXY_HOME="$DATA_DIR" \
+      ENV_FILE="$ENV_FILE" \
+      COMPOSE_FILE="$COMPOSE_FILE" \
+      COMPOSE_PROJECT_NAME="$PROJECT_NAME" \
+      LOG_DIR="$LOG_DIR" \
+      RUN_DIR="$RUN_DIR" \
+      LOG_RETENTION_DAYS="$LOG_RETENTION_DAYS" \
+      nohup "$SCRIPT_PATH" __collect-logs >> "$LOG_DIR/log-collector.log" 2>&1 &
+  fi
   printf '%s\n' "$!" > "$(collector_pid_file)"
 }
 
@@ -634,11 +1043,11 @@ EOF
 }
 
 stop_stack() {
-  require_common_cmds
   if [[ ! -f "$ENV_FILE" ]]; then
     warn "environment file not found: $ENV_FILE"
     return 0
   fi
+  require_common_cmds
   load_environment
   prepare_directories
   stop_log_collector
@@ -648,8 +1057,8 @@ stop_stack() {
 }
 
 show_logs() {
-  require_common_cmds
   [[ -f "$ENV_FILE" ]] || die "environment file not found: $ENV_FILE"
+  require_common_cmds
   load_environment
   prepare_directories
   local latest_log

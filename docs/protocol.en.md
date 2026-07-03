@@ -31,6 +31,49 @@ The model catalog maps the client-visible exposed model to an upstream model and
 
 The current cached Copilot model names include `GPT-5.4`, `GPT-5 mini`, `Gemini 3.1 Pro`, `Claude Opus/Sonnet/Haiku`, and `MAI-Code-1-Flash`, so inference checks the real upstream ID and display name, not only the exposed alias.
 
+### Claude Code Custom Model Names
+
+Claude Code can send its own `model` names in Anthropic Messages requests. The adaptation point is the model catalog, not the Copilot provider: configure the name Claude Code sends as `exposed`, and configure the real model ID returned by GitHub Copilot `/models` as `upstream`.
+
+Example:
+
+```json
+[
+  {
+    "exposed": "sonnet",
+    "upstream": "claude-sonnet-4-20250514",
+    "vendor": "Anthropic",
+    "upstream_api": "chat_completions",
+    "enabled": true
+  },
+  {
+    "exposed": "opus",
+    "upstream": "claude-opus-4-20250514",
+    "vendor": "Anthropic",
+    "upstream_api": "chat_completions",
+    "enabled": true
+  }
+]
+```
+
+In the Dashboard, open Models, click `Refresh from Copilot` to load the real models, then change `Exposed Model ID` to the name Claude Code should use. After saving, a Claude Code request with `model=sonnet` is mapped to `claude-sonnet-4-20250514` before it reaches Copilot.
+
+On the Claude Code side, the model can be set with `/model <alias|name>`, the startup flag `claude --model <alias|name>`, the environment variable `ANTHROPIC_MODEL=<alias|name>`, or the `model` field in `~/.claude/settings.json` / `.claude/settings.json`. Claude Code often sends aliases rather than full Anthropic model IDs; in this gateway, those aliases should be configured as `exposed` model names.
+
+| Claude Code model name | Recommended `model_catalog_json.exposed` | `model_catalog_json.upstream` should be | Notes |
+| --- | --- | --- | --- |
+| `sonnet` | `sonnet` | The Sonnet model ID returned by Copilot `/models`, for example `claude-sonnet-4-20250514` | Common daily-coding alias; route policies may match either `sonnet` or the real upstream ID |
+| `sonnet[1m]` | `sonnet[1m]` | A Sonnet upstream that supports 1M context; if there is no separate 1M ID, map it to the same Sonnet ID first | Claude Code uses this name behind LLM gateways to request 1M context; actual support depends on the model capabilities Copilot exposes |
+| `opus` | `opus` | The Opus model ID returned by Copilot `/models` | Complex reasoning alias |
+| `opus[1m]` | `opus[1m]` | An Opus upstream that supports 1M context; if there is no separate 1M ID, map it to the same Opus ID first | Configure explicitly so the catalog does not reject the request |
+| `haiku` | `haiku` | The Haiku model ID returned by Copilot `/models` | Low-latency/simple-task alias |
+| `fable` | `fable` | The Fable model ID returned by Copilot `/models` | Configure only when the Copilot account can see a Fable-family model |
+| `best` | `best` | Prefer Fable; map to Opus when Fable is unavailable | Claude Code's meaning is “Fable when available, otherwise latest Opus”; the gateway does not infer that automatically, so choose based on your account's visible models |
+| Full model IDs, for example `claude-sonnet-5`, `claude-opus-4-8`, `claude-haiku-4-5` | The exact full ID the client sends | The matching real ID from Copilot `/models` | If Claude Code is pinned to a full model name, use that full name as `exposed`; if Copilot returns the same ID, `upstream` can be identical |
+| Custom picker values, for example `my-gateway/claude-opus-4-8` | The exact custom string | The real model ID to send to Copilot | Applies to `ANTHROPIC_CUSTOM_MODEL_OPTION`; `exposed` must exactly match the string Claude Code sends |
+
+The authoritative source for `upstream` is the Dashboard Models page after `Refresh from Copilot`, not the examples above. Different accounts, seats, regions, or Copilot backend versions may expose different IDs. For Claude/Anthropic-family models, keep `vendor="Anthropic"` or set `upstream_api="chat_completions"` explicitly.
+
 ## Reasoning Parameter Policy
 
 `reasoning`, `reasoning_effort`, and `thinking` are not normalized across protocols. They remain protocol-native passthrough parameters in `Params` and are written to the final upstream request with their original field names. The gateway does not translate Anthropic `thinking` into OpenAI `reasoning`, and it does not translate OpenAI `reasoning_effort` into an Anthropic thinking budget.
@@ -55,8 +98,8 @@ Retained and normalized:
 | `tools` | `Tools` | OpenAI `function` tools become canonical tools |
 | `tool_choice` | `ToolChoice` | Preserved and written upstream |
 | `max_tokens` / `max_completion_tokens` | `MaxTokens` | `max_tokens` wins; otherwise `max_completion_tokens` is used |
-| `user` | `Metadata.user` | Sticky fallback; user-binding pools prefer it as the binding owner; not written upstream as `user` |
-| `metadata.session_id` / `metadata.conversation_id` | `Metadata` | Sticky fallback only |
+| `user` | `Metadata.user` | Sticky fallback; `user_binding` pools prefer it as `user_id`; not written upstream as `user` |
+| `session` / `metadata.session_id` / `metadata.session` / `metadata.conversation_id` | `Metadata` | Sticky fallback; `session_binding` pools use `session_id` / `session` as `session_id` |
 
 Passed through to `Params` and written to the upstream body with the same name:
 
@@ -88,8 +131,8 @@ Retained and normalized:
 | `tool_choice` | `ToolChoice` | Preserved and written upstream |
 | `max_output_tokens` | `MaxTokens` | Written upstream as `max_output_tokens` |
 | `previous_response_id` | `Metadata.previous_response_id` | Written upstream only when the upstream API is also Responses |
-| `user` | `Metadata.user` | Sticky fallback; user-binding pools prefer it as the binding owner |
-| `metadata.session_id` / `metadata.conversation_id` | `Metadata` | Sticky fallback only |
+| `user` | `Metadata.user` | Sticky fallback; `user_binding` pools prefer it as `user_id` |
+| `session` / `metadata.session_id` / `metadata.session` / `metadata.conversation_id` | `Metadata` | Sticky fallback; `session_binding` pools use `session_id` / `session` as `session_id` |
 
 Passed through to `Params` and written to the upstream body with the same name:
 
@@ -129,7 +172,7 @@ Passed through to `Params`:
 temperature, top_p, top_k, stop, thinking, metadata
 ```
 
-`stop_sequences` is renamed to `stop`. `thinking` is passed through by name only; it is not converted to OpenAI `reasoning` or `reasoning_effort`. Anthropic `metadata` remains an upstream body parameter; in user-binding pools, `metadata.user_id` or `metadata.user` may also be used as the binding owner.
+`stop_sequences` is renamed to `stop`. `thinking` is passed through by name only; it is not converted to OpenAI `reasoning` or `reasoning_effort`. Anthropic `metadata` remains an upstream body parameter; binding pools may also read `metadata.user_id` / `metadata.user` as `user_id` and `metadata.session_id` / `metadata.session` as `session_id`.
 
 Conversions: `tool_use` becomes a canonical function tool call; `tool_result` becomes a tool message; `image.source.url` or `image.source.data + media_type` becomes an OpenAI-style `image_url`; `cache_control` is cleaned of undefined placeholders and retained on tools or content parts.
 
@@ -214,9 +257,9 @@ Usage is normalized to input/output/cached/reasoning tokens, AI credits, and cos
 ## Loss And Distortion Notes
 
 - Unknown client body fields are discarded by default; they do not enter `Params` and are not forwarded to Copilot.
-- Client headers are not forwarded by default; auth, sticky, and user-binding inputs affect only gateway logic.
-- `user`, `metadata.session_id`, and `metadata.conversation_id` are not forwarded upstream as `user`.
-- User-binding owner is preferred from standard request fields: OpenAI Chat/Responses `user`, Anthropic `metadata.user_id`, or Anthropic `metadata.user`; `X-GHCP-User` is only a backwards-compatible fallback.
+- Client headers are not forwarded by default; auth, sticky, and account-binding inputs affect only gateway logic.
+- `user`, `session`, `metadata.session_id`, and `metadata.conversation_id` are not forwarded upstream as `user`.
+- `user_binding` uses OpenAI Chat/Responses `user`, Anthropic `metadata.user_id` / `metadata.user`, or `X-GHCP-User` as `user_id`; `session_binding` uses request/metadata session fields or session headers as `session_id`.
 - Responses `previous_response_id` is preserved only when the target upstream API is Responses; it is lost if the model is configured for upstream Chat Completions.
 - Responses `developer`/`system` input and Anthropic `system` arrays are merged into one `System` string, so original block boundaries and some ordering detail may be distorted.
 - Anthropic `tool_choice.any` becomes OpenAI-style `required`; `tool_choice.tool` becomes a function choice.

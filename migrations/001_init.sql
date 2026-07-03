@@ -87,7 +87,9 @@ CREATE TABLE backend_pools (
     name TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'active',
     priority INT NOT NULL DEFAULT 100,
-    allocation_mode TEXT NOT NULL DEFAULT 'shared' CHECK (allocation_mode IN ('shared', 'user_binding')),
+    allocation_mode TEXT NOT NULL DEFAULT 'shared' CHECK (allocation_mode IN ('shared', 'user_binding', 'session_binding')),
+    binding_max_concurrency INT NOT NULL DEFAULT 10,
+    binding_ttl_seconds INT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -321,9 +323,9 @@ CREATE TABLE account_user_bindings (
     client_profile_id UUID NOT NULL REFERENCES client_profiles(id) ON DELETE CASCADE,
     pool_id UUID NOT NULL REFERENCES backend_pools(id) ON DELETE CASCADE,
     account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-    owner_key_hash TEXT NOT NULL,
-    owner_display TEXT NOT NULL,
-    source_header TEXT,
+    user_id_hash TEXT NOT NULL,
+    user_id_display TEXT NOT NULL,
+    user_id_source TEXT,
     status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'released', 'expired')),
     last_used_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     expires_at TIMESTAMPTZ NOT NULL,
@@ -334,7 +336,7 @@ CREATE TABLE account_user_bindings (
 );
 
 CREATE UNIQUE INDEX idx_account_user_bindings_active_owner
-    ON account_user_bindings(client_profile_id, pool_id, owner_key_hash)
+    ON account_user_bindings(client_profile_id, pool_id, user_id_hash)
     WHERE status = 'active';
 
 CREATE UNIQUE INDEX idx_account_user_bindings_active_account
@@ -346,3 +348,34 @@ CREATE INDEX idx_account_user_bindings_pool_status
 
 CREATE INDEX idx_account_user_bindings_expires
     ON account_user_bindings(status, expires_at);
+
+CREATE TABLE account_session_bindings (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    client_profile_id UUID NOT NULL REFERENCES client_profiles(id) ON DELETE CASCADE,
+    pool_id UUID NOT NULL REFERENCES backend_pools(id) ON DELETE CASCADE,
+    account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    session_id_hash TEXT NOT NULL,
+    session_id_display TEXT NOT NULL,
+    session_id_source TEXT,
+    status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'released', 'expired')),
+    last_used_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    expires_at TIMESTAMPTZ NOT NULL,
+    released_at TIMESTAMPTZ,
+    release_reason TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE UNIQUE INDEX idx_account_session_bindings_active_owner
+    ON account_session_bindings(client_profile_id, pool_id, session_id_hash)
+    WHERE status = 'active';
+
+CREATE UNIQUE INDEX idx_account_session_bindings_active_account
+    ON account_session_bindings(account_id)
+    WHERE status = 'active';
+
+CREATE INDEX idx_account_session_bindings_pool_status
+    ON account_session_bindings(pool_id, status, expires_at);
+
+CREATE INDEX idx_account_session_bindings_expires
+    ON account_session_bindings(status, expires_at);

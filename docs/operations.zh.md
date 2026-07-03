@@ -160,11 +160,11 @@ flowchart TD
 
 | Internal status / code | 内部场景 | External status / code | External message | 运维说明 |
 | --- | --- | --- | --- | --- |
-| `503 no_available_accounts` / `503 user_binding_exhausted` | 路由候选为空、账号并发耗尽、user-binding 无可分配容量 | `429 rate_limited` | `rate limit exceeded; please retry later` | 看 `internal_message`、`account_id`、`pool_id` 区分容量、绑定或并发原因 |
+| `503 no_available_accounts` / `503 user_binding_exhausted` / `503 session_binding_exhausted` | 路由候选为空、账号并发耗尽、绑定池无可分配容量 | `429 rate_limited` | `rate limit exceeded; please retry later` | 看 `internal_message`、`account_id`、`pool_id` 区分容量、绑定或并发原因 |
 | `503 route_unavailable` | 没有可用路由或模型路由配置不可用 | `503 service_unavailable` | `model route unavailable` | 检查 route policy、pool 状态和模型目录 |
-| `400 missing_user_binding_owner` | user-binding pool 请求缺少稳定用户标识 | `400 invalid_request_error` | `user identifier is required` | 新客户端优先传 OpenAI `user` 或 Anthropic `metadata.user_id` / `metadata.user` |
-| `400 invalid_user_binding_owner` | 用户标识非法，例如长度超限 | `400 invalid_request_error` | `user identifier is invalid` | 检查客户端传入的用户标识归一化结果 |
-| `503 user_binding_unavailable` | user-binding 依赖 PostgreSQL 或缓存访问失败 | `503 service_unavailable` | `service temporarily unavailable` | 检查 PostgreSQL、Redis 和绑定表状态 |
+| `400 missing_user_id` / `400 invalid_user_id` | user-binding pool 缺少或传入非法 `user_id` | `400 invalid_request_error` | `user identifier is required` / `user identifier is invalid` | 优先传 OpenAI `user` 或 Anthropic `metadata.user_id` / `metadata.user` |
+| `400 missing_session_id` / `400 invalid_session_id` | session-binding pool 缺少或传入非法 `session_id` | `400 invalid_request_error` | `session identifier is required` / `session identifier is invalid` | 优先传 `metadata.session_id` / `metadata.session`，或 header `X-GHCP-Session-ID` |
+| `503 user_binding_unavailable` / `503 session_binding_unavailable` | 绑定依赖 PostgreSQL 或缓存访问失败 | `503 service_unavailable` | `service temporarily unavailable` | 检查 PostgreSQL、Redis 和绑定表状态 |
 | `503 budget_unavailable` | 限流或预算状态不可读 | `503 service_unavailable` | `gateway limit state unavailable` | 检查 budget checker、Redis/PostgreSQL 和配置同步 |
 | `429 global_rate_limited` / `429 account_rate_limited` | 全局或内部资源级 RPM 命中 | `429 rate_limited` | `rate limit exceeded; please retry later` | 对外不暴露资源层级；日志保留 global/account 粒度 |
 | `429 global_budget_exhausted` / `429 account_budget_exhausted` | 全局或内部资源级 token / AI Credits 日预算耗尽 | `429 budget_exhausted` | `quota exceeded` | 对外按标准配额耗尽处理；日志保留预算层级 |

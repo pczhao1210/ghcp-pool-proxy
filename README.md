@@ -18,7 +18,7 @@ GHCP Pool Proxy 是一个面向受控 GitHub Copilot 账号资源的网关与控
 - GitHub Copilot 上游 endpoint 采用混合选择：`upstream_api` 可按模型显式覆盖；`vendor=OpenAI` / `Azure OpenAI` 与 `gpt*`/o-series 走上游 Responses；Gemini、Anthropic/Claude/Opus/Haiku/Sonnet、Microsoft MAI、Grok/xAI 等非 OpenAI 家族走上游 Chat Completions；其它模型按下游协议兜底。
 - Router 支持按模型与 route policy 选择池，并执行 sticky 亲和、overflow、pool/account/seat 过滤、并发约束和权重选择。
 - route policy 已支持 `request_format`，可按 `openai_chat`、`openai_responses`、`anthropic_messages` 做协议级分流。
-- Pool 已支持 `allocation_mode=shared/user_binding`。`user_binding` 池只根据 `X-GHCP-User` 把用户强制绑定到一个账号并保持独占；绑定存 PostgreSQL，Redis 缓存热路由状态，7 天未使用后自动过期，也可在 Dashboard 的 pool 展开详情中手动释放。
+- Pool 已支持 `allocation_mode=shared/user_binding/session_binding`。`user_binding` 按 `user_id` 独占账号，`session_binding` 按 `session_id` 独占账号；绑定存 PostgreSQL，Redis 缓存热路由状态，支持 pool 级 `binding_max_concurrency` 和 idle TTL，也可在 Dashboard 的 pool 展开详情中手动释放。
 - Gateway 启动时加载路由配置，并每 30 秒从 PostgreSQL 刷新 pool、账号关系和 route policy 快照。
 - Admin 和 Worker 已拆分为独立命令入口；Admin 提供控制面 API 并服务 Dashboard，Worker 执行探针、指标同步、凭据提醒和恢复任务。
 - Dashboard 面向运维场景，覆盖概览、账号、池、客户端、指标、事件、设置和模型目录；组织相关能力暂保留在后端，当前 UI 暂不展示。
@@ -71,6 +71,26 @@ deploy/deploy.sh --start
 ```
 
 首次运行会生成宿主机文件 `~/ghcp_proxy/.env`，其中包含 `ADMIN_TOKEN`、`PROVIDER=copilot`、`CREDENTIAL_MASTER_KEY` 和数据库密码。请妥善保存该文件，尤其不要在已有数据的情况下随意更换 `CREDENTIAL_MASTER_KEY`。
+
+### Schema 变更后的重建
+
+近期版本调整了数据库 schema，包括 pool binding、user/session binding、模型目录和路由相关字段。已有旧数据目录不能直接复用；升级到该版本前请先 reset PostgreSQL 和 Redis 数据，再重新启动并在 Dashboard 中重新配置账号、凭据、pool、client profile、route policy 和模型目录。
+
+VM 部署可执行：
+
+```bash
+deploy/deploy.sh --stop
+GHCP_RESET_CONFIRM=reset deploy/deploy.sh --reset
+deploy/deploy.sh --start
+```
+
+本地开发环境可执行：
+
+```bash
+./start.sh --reset
+```
+
+reset 会删除运行数据，但会保留宿主机 `.env`。请在 reset 前确认已记录必要的账号配置、client API key、pool/route policy 和模型映射；reset 后需要重新登录 Copilot 账号并重新配置 Dashboard。
 
 查看按小时落盘的服务日志：
 

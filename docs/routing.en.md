@@ -23,7 +23,7 @@ flowchart TD
   N --> O["Record usage / risk / sticky metrics"]
 ```
 
-The routing hot path uses an in-memory snapshot sourced from PostgreSQL. The gateway loads pools, pool accounts, route policies, and active user bindings at startup, then refreshes every 30 seconds. Redis stores sticky maps, user-binding hot cache, concurrency leases, and other hot distributed state.
+The routing hot path uses an in-memory snapshot sourced from PostgreSQL. The gateway loads pools, pool accounts, route policies, and active account bindings at startup, then refreshes every 30 seconds. Redis stores sticky maps, account-binding hot cache, concurrency leases, and other hot distributed state.
 
 ## Route Policy Matching
 
@@ -32,14 +32,14 @@ The routing hot path uses an in-memory snapshot sourced from PostgreSQL. The gat
 | Field | Source | Purpose |
 | --- | --- | --- |
 | `request_format` | Request endpoint | `openai_chat`, `openai_responses`, or `anthropic_messages` |
-| `model` | Upstream model after catalog resolution | Exact or glob match against `model_pattern` |
+| `model` | Upstream model after catalog resolution, plus the original client model and client-profile aliased exposed model | Exact or glob match against `model_pattern` |
 | `client_profile_id` | API key client profile | Optional client-specific routing |
 
 Matching rules:
 
 1. Ignore `enabled=false` policies.
 2. `request_format` must match; empty or `*` means any protocol.
-3. `model_pattern` must match; exact values and `filepath.Match`-style globs are supported.
+3. `model_pattern` must match the upstream model, original client model, or client-profile aliased exposed model; exact values and `filepath.Match`-style globs are supported.
 4. If `client_profile_id` is set, it must match the current profile.
 5. Sort by ascending `priority`; within equal priority, client-profile-specific policies are more specific, then `name` and `id` break ties.
 6. If a matching policy points at an inactive pool, continue to the next policy.
@@ -50,16 +50,19 @@ Matching rules:
 | `allocation_mode` | Behavior |
 | --- | --- |
 | `shared` | Users share pool accounts; sticky affinity is a preference and may rebind under load or health changes |
-| `user_binding` | A standard request user identifier is bound to one account; while active, the account is exclusive to that binding |
+| `user_binding` | A standard request `user_id` is bound to one account; while active, the account is exclusive to that binding |
+| `session_binding` | A standard request `session_id` is bound to one account; while active, the account is exclusive to that binding |
 
-For user-binding pools:
+For binding pools:
 
-- The gateway prefers standard request user identifiers: OpenAI Chat/Responses `user`, Anthropic `metadata.user_id`, or Anthropic `metadata.user`; `X-GHCP-User` is only a backwards-compatible fallback.
-- The binding key is `client_profile_id + pool_id + lower(trim(user_identifier))`.
-- One user can have only one active binding per client profile and pool.
+- `user_id` comes from OpenAI Chat/Responses `user`, Anthropic `metadata.user_id`, or Anthropic `metadata.user`; `X-GHCP-User` is a header fallback.
+- `session_id` comes from request `session_id` / `session` or `metadata.session_id` / `metadata.session`; `X-GHCP-Session-ID` and `X-Claude-Code-Session-Id` are header fallbacks.
+- Binding keys are `client_profile_id + pool_id + lower(trim(user_id))` and `client_profile_id + pool_id + lower(trim(session_id))` respectively.
+- One user/session id can have only one active binding per client profile and pool.
 - One account can be occupied by only one active binding at a time.
 - First binding selects an unbound account ordered by low account `priority`, low `risk_score`, high pool membership `weight`, and low account `id`.
-- Each hit refreshes `last_used_at` and `expires_at`; the default idle expiration is 7 days.
+- Each hit refreshes `last_used_at` and `expires_at`; defaults are 7 idle days for `user_binding` and 5 idle minutes for `session_binding`; pool `binding_ttl_seconds` may override this.
+- Binding pools use pool `binding_max_concurrency` as the effective concurrency limit, defaulting to 10, without changing the account's original `max_concurrency`.
 - Release happens only by expiration or manual Dashboard `Release` from the expanded pool detail.
 - If the bound account is unavailable or at concurrency limit, the request fails instead of rebinding.
 - Shared pools avoid accounts occupied by active bindings.
@@ -74,7 +77,7 @@ All ordinary and required-account selections must pass these filters.
 | Account status | Only `active` accounts are eligible |
 | Seat status | Org/business/enterprise seats must be empty, `active`, or `assigned` |
 | Reserved account | Active binding accounts are unavailable to shared pools; binding requests may use only their own required account |
-| Process concurrency | `current_concurrency < max_concurrency`; `max_concurrency <= 0` is treated as 1 |
+| Process concurrency | `current_concurrency < effective_max_concurrency`; binding pools prefer pool `binding_max_concurrency`, otherwise account `max_concurrency`; non-positive values are treated as 1 |
 | Exclusion set | Sticky overflow and concurrency rebinding may temporarily exclude the old account |
 
 An empty candidate set enters gateway error mapping; see [operations.en.md](operations.en.md) for the client-facing status and internal routing reason mapping.
@@ -135,7 +138,7 @@ load_ratio = existing_concurrency_before_this_request / max_concurrency
 
 When `load_ratio > max_sticky_load_ratio` and another candidate exists, the gateway releases the old account and overflows to another account. The default `max_sticky_load_ratio` is `0.85`. `strict` skips this ratio-based overflow only; it never exceeds `max_concurrency`.
 
-If a required user-binding account reaches its concurrency limit, the request fails and does not rebind.
+If a required user/session binding account reaches its effective concurrency limit, the request fails and does not rebind.
 
 ## Risk Score And Account State
 
@@ -192,6 +195,6 @@ Common reasons:
 
 - Long-lived coding-client sessions should use `soft` sticky with a stable session ID; use `strict` only when stronger affinity is worth lower flexibility.
 - Batch and short requests usually work well with `soft + risk_weighted`.
-- Use `user_binding` pools when accounts must be exclusive per user, and keep the standard request user identifier stable and low-cardinality; older clients may continue using `X-GHCP-User`.
+- Use `user_binding` when accounts must be exclusive per user and `session_binding` when short-lived sessions need exclusive accounts; keep `user_id` / `session_id` stable and low-cardinality for the intended scope.
 - Avoid very low risk thresholds for small pools, or transient errors can exhaust capacity.
 - Tune after observing `no_available_accounts`, sticky hit/rebind/overflow, 429, 401/403, account state changes, and success rate.

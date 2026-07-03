@@ -18,7 +18,7 @@ GHCP Pool Proxy is a gateway and control-plane system for controlled GitHub Copi
 - GitHub Copilot upstream endpoint selection is mixed: `upstream_api` can override per model; `vendor=OpenAI` / `Azure OpenAI` and `gpt*`/o-series use upstream Responses; Gemini, Anthropic/Claude/Opus/Haiku/Sonnet, Microsoft MAI, Grok/xAI, and other non-OpenAI families use upstream Chat Completions; unknown models fall back to the downstream protocol.
 - The router selects pools by model and route policy, then applies sticky affinity, overflow, pool/account/seat filtering, concurrency constraints, and weighted selection.
 - Route policies support `request_format`, enabling protocol-level routing for `openai_chat`, `openai_responses`, and `anthropic_messages`.
-- Pools support `allocation_mode=shared/user_binding`. User-binding pools use only `X-GHCP-User` as the binding owner; bindings live in PostgreSQL, are cached in Redis, expire after 7 idle days, and can be released from expanded pool details in the dashboard.
+- Pools support `allocation_mode=shared/user_binding/session_binding`. User-binding pools bind by `user_id`, session-binding pools bind by `session_id`; bindings live in PostgreSQL, are cached in Redis, support pool-level `binding_max_concurrency` and idle TTL, and can be released from expanded pool details in the dashboard.
 - The gateway loads routing configuration on startup and refreshes pool, account membership, and route policy snapshots from PostgreSQL every 30 seconds.
 - Admin and Worker are separate commands. Admin serves control-plane APIs and the dashboard, while Worker runs probes, metrics sync, credential warnings, and recovery tasks.
 - The dashboard is designed for operations workflows and covers overview, accounts, pools, clients, metrics, events, settings, and the model catalog; organization-related backend capability is retained, but the current UI does not expose it.
@@ -70,6 +70,26 @@ deploy/deploy.sh --start
 ```
 
 On first run, the script generates host file `~/ghcp_proxy/.env` containing `ADMIN_TOKEN`, `PROVIDER=copilot`, `CREDENTIAL_MASTER_KEY`, and the database password. Keep this file private, and do not rotate `CREDENTIAL_MASTER_KEY` casually after storing credentials.
+
+### Rebuild After Schema Changes
+
+Recent versions changed the database schema, including pool binding, user/session binding, model catalog, and routing fields. Existing old data directories should not be reused directly. Before upgrading to this version, reset PostgreSQL and Redis data, then start again and reconfigure accounts, credentials, pools, client profiles, route policies, and the model catalog in the dashboard.
+
+For VM deployments:
+
+```bash
+deploy/deploy.sh --stop
+GHCP_RESET_CONFIRM=reset deploy/deploy.sh --reset
+deploy/deploy.sh --start
+```
+
+For local development:
+
+```bash
+./start.sh --reset
+```
+
+Reset deletes runtime data but preserves the host `.env`. Before resetting, record any required account setup, client API keys, pool/route policy settings, and model mappings. After reset, log in Copilot accounts again and reconfigure the dashboard.
 
 Tail hourly file logs:
 

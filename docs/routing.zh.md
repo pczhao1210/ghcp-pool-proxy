@@ -196,6 +196,8 @@ Risk score 是账号级健康分，数值越高风险越高。候选过滤只接
 
 Gateway 在路由前检查全局 RPM、全局 daily tokens 和全局 daily AI credits；选中账号后再检查账号级 RPM、tokens 和 AI credits。预算不通过时请求返回 429 或预算错误，不会继续尝试其它账号。
 
+Daily token 和 AI Credits 预算默认关闭。可在 Dashboard Config 页配置，或将 `BUDGET_MAX_DAILY_TOKENS_PER_ACCOUNT`、`BUDGET_MAX_DAILY_TOKENS_GLOBAL`、`BUDGET_MAX_DAILY_NANO_AIU_PER_ACCOUNT`、`BUDGET_MAX_DAILY_NANO_AIU_GLOBAL` 设置为大于 `0` 的值启用对应上限。RPM 保护默认开启：`BUDGET_MAX_RPM_PER_ACCOUNT=60`、`BUDGET_MAX_RPM_GLOBAL=600`；任一值设为 `0` 可关闭对应 RPM 检查。Gateway 会周期性刷新 Dashboard 保存的预算设置，环境变量只是启动默认值。
+
 Router 本身不读取预算账本；它只处理 pool、policy、账号状态、seat、reserved 和并发。
 
 ## 指标

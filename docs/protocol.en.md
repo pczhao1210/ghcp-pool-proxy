@@ -106,11 +106,11 @@ Passed through to `Params` and written to the upstream body with the same name:
 ```text
 temperature, top_p, stop, seed, response_format,
 reasoning_effort, parallel_tool_calls, stream_options,
-presence_penalty, frequency_penalty, logit_bias,
+max_completion_tokens, presence_penalty, frequency_penalty, logit_bias,
 logprobs, top_logprobs, service_tier, modalities, audio
 ```
 
-`reasoning_effort` is passed through by name only; it is not converted to Responses `reasoning` or Anthropic `thinking`.
+`max_completion_tokens` is passed through only when the client used it and did not also send `max_tokens`; this preserves stricter o-series Chat-compatible behavior. `reasoning_effort` is passed through by name only; it is not converted to Responses `reasoning` or Anthropic `thinking`.
 
 Discarded or rejected: unlisted body fields are discarded; `metadata` keys other than `session_id` and `conversation_id` are discarded; image URLs are rejected unless they are `http`, `https`, or `data:image/*;base64,...`; requests are rejected when they contain more than 20 image parts or an image data URL larger than 20 MiB.
 
@@ -146,7 +146,9 @@ truncation, include, store, service_tier
 
 For Copilot upstream, `include` drops the unsupported `reasoning.encrypted_content` value; if that leaves the list empty, `include` is omitted.
 
-Conversions: `function_call` becomes an assistant tool call; `function_call_output` becomes a tool message; `input_text`, `output_text`, and `text` normalize to canonical text parts; `input_image` and `image_url` normalize to canonical `image_url`.
+Tools from OpenAI Responses requests are first retained in the canonical tool record for diagnostics and future adapters. Before calling Copilot, the provider uses a cc-switch-style tools adapter instead of raw-passthrough for non-function tools: `function` tools are kept directly; `custom` tools are wrapped as function tools with a fixed string `input` parameter and the original definition embedded in the description; `tool_search` is wrapped as a proxy function named `tool_search`; and `namespace` expands function children into flattened `<namespace>___<tool>` function names. `tool_choice` is mapped to the converted function name as well, and omitted when it cannot target a valid upstream tool. When upstream returns a tool call, the adapter restores the downstream Responses semantics: `custom_tool_call` uses `response.custom_tool_call_input.*` events, `tool_search` is emitted as a `tool_search_call` item, and namespace child tools restore the original tool name with a `namespace` field on the `function_call` item. The Copilot upstream currently rejects OpenAI Responses remote MCP `type: "mcp"`, so remote MCP tools are still filtered until a gateway-managed MCP discovery/execution adapter is implemented. If no supported tools remain after adaptation/filtering, `tool_choice` and `parallel_tool_calls` are omitted. Use `scripts/probe_stream_mcp.py` to compare the SSE event shape for an MCP request against a no-tool baseline.
+
+Conversions: direct top-level `input_text`, `input_image`, `text`, and `image_url` input items are grouped into a user message; `function_call` becomes an assistant tool call; `function_call_output` becomes a tool message; `input_text`, `output_text`, and `text` normalize to canonical text parts; `input_image` and `image_url` normalize to canonical `image_url`.
 
 Discarded or rejected: unlisted body fields are discarded; `metadata` keys other than `session_id` and `conversation_id` are discarded; unsupported content parts inside `input` arrays are skipped; image validation is the same as Chat Completions.
 
@@ -161,7 +163,7 @@ Retained and normalized:
 | `model` | `Model` | Later resolved to the upstream model |
 | `stream` | `Stream` | Controls downstream Anthropic SSE |
 | `system` string / array | `System` | Text blocks are joined with newlines; other blocks are not retained |
-| `messages` | `Messages` | `text`, `image`, `tool_use`, and `tool_result` are normalized |
+| `messages` | `Messages` / `System` | `text`, `image`, `tool_use`, and `tool_result` are normalized; `role=system` messages are folded into `System` |
 | `tools` | `Tools` | Preserves `name`, `description`, `input_schema`, and `cache_control` |
 | `tool_choice` | `ToolChoice` | `any` maps to `required`; `tool` maps to an OpenAI function choice |
 | `max_tokens` | `MaxTokens` | Written upstream as `max_tokens` for Chat and `max_output_tokens` for Responses |
@@ -210,10 +212,12 @@ Path: `POST https://api.githubcopilot.com/chat/completions`.
 | --- | --- |
 | `model` | `CanonicalRequest.Model` |
 | `messages` | `System` prepended as a system message, followed by `Messages` |
-| `tools` | `Tools` rebuilt as OpenAI function tool shape |
-| `tool_choice` | `ToolChoice` |
-| `max_tokens` | `MaxTokens` |
+| `tools` | Function `Tools` rebuilt as OpenAI function tool shape; non-function tools are omitted for Chat upstream |
+| `tool_choice` | `ToolChoice`, omitted when no valid tool is sent upstream |
+| `max_tokens` / `max_completion_tokens` | `MaxTokens`, preserving `max_completion_tokens` when the client used that field |
 | passthrough fields | `Params` copied by name |
+
+If the valid upstream tool list is empty, `tool_choice` and `parallel_tool_calls` are omitted. Some strict upstream Chat-compatible APIs reject tool controls without tools.
 
 ### Upstream Responses
 
@@ -225,7 +229,7 @@ Path: `POST https://api.githubcopilot.com/v1/responses`.
 | `input` | `Messages` rebuilt as Responses input items |
 | `instructions` | `System` |
 | `tools` | `Tools` rebuilt as Responses tool shape |
-| `tool_choice` | `ToolChoice` |
+| `tool_choice` | `ToolChoice`, omitted when no valid tool is sent upstream |
 | `max_output_tokens` | `MaxTokens` |
 | `previous_response_id` | `Metadata.previous_response_id` |
 | passthrough fields | `Params` copied by name |
@@ -242,6 +246,8 @@ Content conversions during upstream rebuild:
 
 For Copilot Responses upstream, overlong `call_id` values are deterministically shortened to stay within the upstream 64-character limit; matching `function_call_output` items use the same shortened ID.
 
+If the valid upstream tool list is empty, `tool_choice` and `parallel_tool_calls` are omitted for Responses upstream too. Copilot Responses upstream currently rejects remote MCP tools (`type: "mcp"`), so they are filtered before this check.
+
 ## Response Adaptation
 
 Upstream responses are parsed into `CanonicalResponse` or `StreamEvent`, then rebuilt for the original client endpoint.
@@ -252,7 +258,15 @@ Upstream responses are parsed into `CanonicalResponse` or `StreamEvent`, then re
 | OpenAI Responses | `response` | `response.created`, `response.output_text.delta`, `response.completed`, and related events |
 | Anthropic Messages | Anthropic message shape | `message_start`, `content_block_delta`, `message_delta`, `message_stop`, and related events |
 
-Usage is normalized to input/output/cached/reasoning tokens, AI credits, and cost estimates, and records `request_format`, `pool_id`, and `account_id`.
+Usage is normalized to input/output/cached/reasoning tokens, AI credits, and cost estimates, and records `request_format`, `pool_id`, and `account_id`. Responses stream usage includes OpenAI-style `input_tokens_details.cached_tokens` and `output_tokens_details.reasoning_tokens` as well as gateway cost/cache extensions.
+
+Streaming correctness rules are explicit: Chat upstream must end with `[DONE]`; Responses upstream must emit `response.completed`, `response.incomplete`, or a terminal output event accepted for Copilot Responses variants. Downstream Responses streams start with both `response.created` and `response.in_progress`; text content parts include `annotations: []` for OpenAI client compatibility. Upstream `response.incomplete` is passed through as downstream `response.incomplete` plus `[DONE]`, while upstream `response.failed`, read errors, and EOF before a recognized completion marker become protocol-level `response.failed` plus `[DONE]` for Responses clients.
+
+To reproduce MCP/tool streaming differences against a running local gateway:
+
+```bash
+python3 scripts/probe_stream_mcp.py --models gpt-5.5 gemini-3.5-flash claude-sonnet-4.6 --timeout 90 --dump-raw-dir /tmp/ghcp-mcp-probe
+```
 
 ## Loss And Distortion Notes
 
@@ -261,9 +275,9 @@ Usage is normalized to input/output/cached/reasoning tokens, AI credits, and cos
 - `user`, `session`, `metadata.session_id`, and `metadata.conversation_id` are not forwarded upstream as `user`.
 - `user_binding` uses OpenAI Chat/Responses `user`, Anthropic `metadata.user_id` / `metadata.user`, or `X-GHCP-User` as `user_id`; `session_binding` uses request/metadata session fields or session headers as `session_id`.
 - Responses `previous_response_id` is preserved only when the target upstream API is Responses; it is lost if the model is configured for upstream Chat Completions.
-- Responses `developer`/`system` input and Anthropic `system` arrays are merged into one `System` string, so original block boundaries and some ordering detail may be distorted.
+- Responses `developer`/`system` input, Anthropic `system` arrays, and Anthropic `messages` with `role=system` are merged into one `System` string, so original block boundaries and some ordering detail may be distorted.
 - Anthropic `tool_choice.any` becomes OpenAI-style `required`; `tool_choice.tool` becomes a function choice.
 - Anthropic `stop_sequences` is renamed to upstream `stop`.
 - Unsupported Responses content parts, Anthropic content blocks, and Anthropic system blocks are skipped.
-- Non-streaming upstream Responses currently extracts mainly text output; complex output item structure is not preserved across all downstream protocols.
+- Non-streaming upstream Responses extracts text output and `function_call` output items; other complex output item structures are not preserved across all downstream protocols.
 - Streaming event conversion rebuilds protocol-compatible shapes; it does not guarantee one-to-one preservation of every original protocol event field.

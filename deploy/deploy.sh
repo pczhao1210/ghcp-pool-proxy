@@ -944,9 +944,9 @@ pool_user_binding_schema_current() {
     schema_require_column account_user_bindings client_profile_id uuid
     schema_require_column account_user_bindings pool_id uuid
     schema_require_column account_user_bindings account_id uuid
-    schema_require_column account_user_bindings owner_key_hash text
-    schema_require_column account_user_bindings owner_display text
-    schema_require_column account_user_bindings source_header text
+    schema_require_column account_user_bindings user_id_hash text
+    schema_require_column account_user_bindings user_id_display text
+    schema_require_column account_user_bindings user_id_source text
     schema_require_column account_user_bindings status text
     schema_require_column account_user_bindings last_used_at timestamptz
     schema_require_column account_user_bindings expires_at timestamptz
@@ -954,6 +954,25 @@ pool_user_binding_schema_current() {
     schema_require_column account_user_bindings release_reason text
     schema_require_column account_user_bindings created_at timestamptz
     schema_require_column account_user_bindings updated_at timestamptz
+  else
+    missing=1
+  fi
+
+  if schema_table_exists account_session_bindings; then
+    schema_require_column account_session_bindings id uuid
+    schema_require_column account_session_bindings client_profile_id uuid
+    schema_require_column account_session_bindings pool_id uuid
+    schema_require_column account_session_bindings account_id uuid
+    schema_require_column account_session_bindings session_id_hash text
+    schema_require_column account_session_bindings session_id_display text
+    schema_require_column account_session_bindings session_id_source text
+    schema_require_column account_session_bindings status text
+    schema_require_column account_session_bindings last_used_at timestamptz
+    schema_require_column account_session_bindings expires_at timestamptz
+    schema_require_column account_session_bindings released_at timestamptz
+    schema_require_column account_session_bindings release_reason text
+    schema_require_column account_session_bindings created_at timestamptz
+    schema_require_column account_session_bindings updated_at timestamptz
   else
     missing=1
   fi
@@ -1215,27 +1234,25 @@ FROM usage_ledger
 ON CONFLICT (name) DO NOTHING;
 
 ALTER TABLE backend_pools
-    ADD COLUMN IF NOT EXISTS allocation_mode TEXT NOT NULL DEFAULT 'shared';
+  ADD COLUMN IF NOT EXISTS allocation_mode TEXT NOT NULL DEFAULT 'shared',
+  ADD COLUMN IF NOT EXISTS binding_max_concurrency INT NOT NULL DEFAULT 10,
+  ADD COLUMN IF NOT EXISTS binding_ttl_seconds INT;
 
-DO $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint WHERE conname = 'backend_pools_allocation_mode_check'
-    ) THEN
-        ALTER TABLE backend_pools
-            ADD CONSTRAINT backend_pools_allocation_mode_check
-            CHECK (allocation_mode IN ('shared', 'user_binding'));
-    END IF;
-END $$;
+ALTER TABLE backend_pools
+  DROP CONSTRAINT IF EXISTS backend_pools_allocation_mode_check;
+
+ALTER TABLE backend_pools
+  ADD CONSTRAINT backend_pools_allocation_mode_check
+  CHECK (allocation_mode IN ('shared', 'user_binding', 'session_binding'));
 
 CREATE TABLE IF NOT EXISTS account_user_bindings (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     client_profile_id UUID NOT NULL REFERENCES client_profiles(id) ON DELETE CASCADE,
     pool_id UUID NOT NULL REFERENCES backend_pools(id) ON DELETE CASCADE,
     account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-    owner_key_hash TEXT NOT NULL,
-    owner_display TEXT NOT NULL,
-    source_header TEXT,
+  user_id_hash TEXT NOT NULL,
+  user_id_display TEXT NOT NULL,
+  user_id_source TEXT,
     status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'released', 'expired')),
     last_used_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     expires_at TIMESTAMPTZ NOT NULL,
@@ -1245,8 +1262,40 @@ CREATE TABLE IF NOT EXISTS account_user_bindings (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+  DO $$
+  BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'account_user_bindings' AND column_name = 'owner_key_hash')
+       AND NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'account_user_bindings' AND column_name = 'user_id_hash') THEN
+      ALTER TABLE account_user_bindings RENAME COLUMN owner_key_hash TO user_id_hash;
+    END IF;
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'account_user_bindings' AND column_name = 'owner_display')
+       AND NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'account_user_bindings' AND column_name = 'user_id_display') THEN
+      ALTER TABLE account_user_bindings RENAME COLUMN owner_display TO user_id_display;
+    END IF;
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'account_user_bindings' AND column_name = 'source_header')
+       AND NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'account_user_bindings' AND column_name = 'user_id_source') THEN
+      ALTER TABLE account_user_bindings RENAME COLUMN source_header TO user_id_source;
+    END IF;
+  END $$;
+
+  ALTER TABLE account_user_bindings
+    ADD COLUMN IF NOT EXISTS user_id_hash TEXT,
+    ADD COLUMN IF NOT EXISTS user_id_display TEXT,
+    ADD COLUMN IF NOT EXISTS user_id_source TEXT;
+
+  UPDATE account_user_bindings
+  SET user_id_hash = COALESCE(user_id_hash, id::text),
+    user_id_display = COALESCE(user_id_display, user_id_hash, id::text)
+  WHERE user_id_hash IS NULL OR user_id_display IS NULL;
+
+  ALTER TABLE account_user_bindings
+    ALTER COLUMN user_id_hash SET NOT NULL,
+    ALTER COLUMN user_id_display SET NOT NULL;
+
+  DROP INDEX IF EXISTS idx_account_user_bindings_active_owner;
+
 CREATE UNIQUE INDEX IF NOT EXISTS idx_account_user_bindings_active_owner
-    ON account_user_bindings(client_profile_id, pool_id, owner_key_hash)
+    ON account_user_bindings(client_profile_id, pool_id, user_id_hash)
     WHERE status = 'active';
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_account_user_bindings_active_account
@@ -1258,6 +1307,37 @@ CREATE INDEX IF NOT EXISTS idx_account_user_bindings_pool_status
 
 CREATE INDEX IF NOT EXISTS idx_account_user_bindings_expires
     ON account_user_bindings(status, expires_at);
+
+CREATE TABLE IF NOT EXISTS account_session_bindings (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  client_profile_id UUID NOT NULL REFERENCES client_profiles(id) ON DELETE CASCADE,
+  pool_id UUID NOT NULL REFERENCES backend_pools(id) ON DELETE CASCADE,
+  account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  session_id_hash TEXT NOT NULL,
+  session_id_display TEXT NOT NULL,
+  session_id_source TEXT,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'released', 'expired')),
+  last_used_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  expires_at TIMESTAMPTZ NOT NULL,
+  released_at TIMESTAMPTZ,
+  release_reason TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_account_session_bindings_active_owner
+  ON account_session_bindings(client_profile_id, pool_id, session_id_hash)
+  WHERE status = 'active';
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_account_session_bindings_active_account
+  ON account_session_bindings(account_id)
+  WHERE status = 'active';
+
+CREATE INDEX IF NOT EXISTS idx_account_session_bindings_pool_status
+  ON account_session_bindings(pool_id, status, expires_at);
+
+CREATE INDEX IF NOT EXISTS idx_account_session_bindings_expires
+  ON account_session_bindings(status, expires_at);
 SQL
 
   set_database_schema_version "$target"

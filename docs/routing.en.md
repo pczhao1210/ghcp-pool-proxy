@@ -170,6 +170,8 @@ The current state machine supports `active -> degraded` and `degraded -> quarant
 
 Before routing, the gateway checks global RPM, daily tokens, and daily AI credits. After selecting an account, it checks account-level RPM, tokens, and AI credits. Budget failures return rate-limit or budget errors and do not try another account.
 
+Daily token and AI Credits budgets are disabled by default. Configure them from the Dashboard Config page or set `BUDGET_MAX_DAILY_TOKENS_PER_ACCOUNT`, `BUDGET_MAX_DAILY_TOKENS_GLOBAL`, `BUDGET_MAX_DAILY_NANO_AIU_PER_ACCOUNT`, or `BUDGET_MAX_DAILY_NANO_AIU_GLOBAL` to a value greater than `0` to enable those caps. RPM protection remains enabled by default through `BUDGET_MAX_RPM_PER_ACCOUNT=60` and `BUDGET_MAX_RPM_GLOBAL=600`; set either value to `0` to disable that RPM check. Gateway refreshes Dashboard-saved budget settings periodically, while environment values are startup defaults.
+
 The router itself does not read budget ledgers; it handles pools, policies, account status, seats, reservations, and concurrency.
 
 ## Metrics

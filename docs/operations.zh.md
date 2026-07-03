@@ -57,6 +57,8 @@ deploy/deploy.sh --start
 
 本地开发环境使用 `./start.sh --reset`，它会执行 Docker Compose volume reset 后按当前 `migrations/001_init.sql` 重建数据库。
 
+源码树验证可使用 `./start.sh --new`。它默认运行 Go 测试，除非显式传入 `--skip-tests`，随后重建应用镜像、重建 gateway/admin/worker 容器并执行 HTTP smoke check。smoke client profile 会使用专用 route policy：`PROVIDER=fake` 时指向本地 seed 的 smoke pool；`PROVIDER=copilot` 时优先指向第一个 active shared pool。smoke payload 会带稳定的 `user` 和 `session` 标识；如果环境只有 user-binding 或 session-binding pool，缺少标识导致的路由错误会更容易定位。
+
 VM Docker 持久化：
 
 - PostgreSQL 数据默认保存在 `~/ghcp_proxy/data/postgres`。
@@ -144,6 +146,7 @@ flowchart TD
 - 迁移顺序应先数据库后服务。
 - 变更 route policy、client profile 和预算阈值应优先通过 admin 完成。
 - 多实例部署时，Redis 和 PostgreSQL 必须先于服务可用。
+- 平滑 schema 升级必须与 consolidated schema 保持一致：`backend_pools.allocation_mode` 允许 `shared`、`user_binding`、`session_binding`；user binding 使用 `user_id_*` 列；session binding 使用独立的 `account_session_bindings` 表。
 
 ## 日常检查
 
@@ -171,6 +174,10 @@ flowchart TD
 | `502 upstream_error` | 上游模型提供方错误 | `502 upstream_error` | `model provider error` | 内部日志和 usage ledger 保留原始错误分类 |
 | `500 stream_error` | SSE writer 或流式响应初始化失败 | `500 stream_error` | `stream response unavailable` | 检查响应写出、代理和客户端连接状态 |
 | 未显式映射的 internal code | 其它走映射函数的错误 | 与 internal 相同 | 与 internal 相同 | 默认透传；新增错误类型时应评估是否需要中性化 |
+
+上游 Copilot 4xx 响应会先分类，再决定是否影响账号健康。认证、权限、限流、配额、网络和 5xx 失败仍可能增加 risk；`invalid_request` 和通用 `upstream_4xx` 会记录到指标和 usage，但不会增加账号 risk，因为它们通常来自请求形态、模型兼容性或客户端参数，而不是账号健康问题。流式请求中，上游 SSE 读取错误，或在完成标记前提前 EOF，都会按失败请求处理，不能伪装成成功的 `[DONE]` 结束事件。对于上游 Responses API 流，如果 EOF 前已经收到 `response.output_text.done` 或 `response.output_item.done` 这类终止输出事件，则按完成处理，以兼容省略 `response.completed` 的模型变体。
+
+如果客户端收到 `budget_exhausted`，先看 gateway 日志里的 `internal_code`、`account_id` 和 `pool_id`，再检查 Redis 计数，例如 `budget:daily:account:<account_id>:<yyyymmdd>` 和 `budget:daily:global:<yyyymmdd>`。Daily token 和 AI Credits 上限只有在 Dashboard Config 值或对应 `BUDGET_MAX_DAILY_*` 环境变量大于 `0` 时才会启用。
 
 ## 用量、费用与 Cache 观测
 

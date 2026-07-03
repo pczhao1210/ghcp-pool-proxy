@@ -57,6 +57,8 @@ deploy/deploy.sh --start
 
 For local development, use `./start.sh --reset`; it resets Docker Compose volumes and rebuilds the database from the current `migrations/001_init.sql`.
 
+For source-tree validation, `./start.sh --new` runs Go tests unless `--skip-tests` is set, rebuilds the app images, recreates gateway/admin/worker, and runs HTTP smoke checks. The smoke client profile uses a dedicated route policy: with `PROVIDER=fake` it targets the seeded local smoke pool; with `PROVIDER=copilot` it targets the first active shared pool when one exists. The smoke payload includes stable `user` and `session` identifiers so user-binding or session-binding routing errors are easier to diagnose if no shared pool is available.
+
 VM Docker persistence:
 
 - PostgreSQL data is stored under `~/ghcp_proxy/data/postgres` by default.
@@ -144,6 +146,7 @@ flowchart TD
 - Run database migrations before deploying services.
 - Prefer admin workflows for changing route policies, client profiles, and budget thresholds.
 - In multi-instance deployments, Redis and PostgreSQL must be available before services start.
+- Smooth schema upgrades must keep binding-pool objects aligned with the consolidated schema: `backend_pools.allocation_mode` allows `shared`, `user_binding`, and `session_binding`; user bindings use `user_id_*` columns; session bindings use the separate `account_session_bindings` table.
 
 ## Daily Checks
 
@@ -171,6 +174,10 @@ Clients receive standard AI gateway semantics through `external_status`, `extern
 | `502 upstream_error` | Upstream model provider failure | `502 upstream_error` | `model provider error` | Internal logs and usage ledger keep the original failure classification |
 | `500 stream_error` | SSE writer or streaming response initialization failed | `500 stream_error` | `stream response unavailable` | Check response writing, proxying, and client connection state |
 | Unmapped internal code | Other errors passed through the mapping function | Same as internal | Same as internal | Default passthrough; review new error types for neutralization needs |
+
+Upstream Copilot 4xx responses are classified before account health is updated. Authentication, permission, rate-limit, quota, network, and 5xx failures can still affect risk. Invalid request and generic upstream 4xx classifications are recorded in metrics and usage, but they do not increase account risk because they usually come from request shape, model compatibility, or client parameters rather than account health. For streaming calls, an upstream SSE read error or premature EOF before a completion marker is treated as a failed request and must not be emitted as a successful `[DONE]` terminator. For upstream Responses API streams, EOF after terminal output events such as `response.output_text.done` or `response.output_item.done` is accepted as completion for model variants that omit `response.completed`.
+
+If clients receive `budget_exhausted`, check the gateway log fields `internal_code`, `account_id`, and `pool_id`, then inspect Redis counters such as `budget:daily:account:<account_id>:<yyyymmdd>` and `budget:daily:global:<yyyymmdd>`. Daily token and AI Credits caps are only active when the Dashboard Config value or corresponding `BUDGET_MAX_DAILY_*` environment value is greater than `0`.
 
 ## Usage, Cost, and Cache Observability
 

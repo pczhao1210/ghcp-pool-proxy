@@ -938,6 +938,8 @@ pool_user_binding_schema_current() {
   schema_require_table backend_pools
   schema_require_table client_profiles
   schema_column_exists_with_type backend_pools allocation_mode text || missing=1
+  schema_column_exists_with_type backend_pools binding_max_concurrency int4 || missing=1
+  schema_column_exists_with_type backend_pools binding_ttl_seconds int4 || missing=1
 
   if schema_table_exists account_user_bindings; then
     schema_require_column account_user_bindings id uuid
@@ -978,6 +980,17 @@ pool_user_binding_schema_current() {
   fi
 
   [[ "$missing" -eq 0 ]]
+}
+
+target_schema_current() {
+  case "$(target_schema_version)" in
+    10)
+      pool_user_binding_schema_current
+      ;;
+    *)
+      return 0
+      ;;
+  esac
 }
 
 apply_incremental_migrations() {
@@ -1364,6 +1377,11 @@ reconcile_database_schema() {
   if [[ -n "$current" ]]; then
     log "Database schema version: current=$current target=$target"
     if (( current == target )); then
+      if ! target_schema_current; then
+        warn "Database schema version is $target but required objects are missing; applying idempotent schema repair"
+        apply_smooth_schema_upgrade "$current" "$target"
+        return 0
+      fi
       set_database_schema_version "$target"
       log "Database schema is up to date"
       return 0

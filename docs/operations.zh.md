@@ -73,6 +73,10 @@ VM Docker 持久化：
 | Variable / Setting | 说明 |
 | --- | --- |
 | `GATEWAY_ADDR` | gateway 监听地址 |
+| `GATEWAY_READ_TIMEOUT` | 读取完整请求的最长时间，默认 `30s` |
+| `GATEWAY_READ_HEADER_TIMEOUT` | 读取请求头的最长时间，默认 `5s` |
+| `GATEWAY_WRITE_TIMEOUT` | 整体响应写入超时；默认 `0s`，允许长时间 SSE 流 |
+| `GATEWAY_IDLE_TIMEOUT` | keep-alive 空闲超时，默认 `120s` |
 | `ADMIN_ADDR` | admin 监听地址 |
 | `ADMIN_TOKEN` | admin API 鉴权 token |
 | `POSTGRES_DSN` | PostgreSQL 连接串 |
@@ -145,7 +149,7 @@ flowchart TD
 
 - 迁移顺序应先数据库后服务。
 - 变更 route policy、client profile 和预算阈值应优先通过 admin 完成。
-- 多实例部署时，Redis 和 PostgreSQL 必须先于服务可用。
+- 多实例部署时，Redis 和 PostgreSQL 必须先于服务可用。Redis 初始 ping 或后续命令失败时，readiness 返回 `503`；预算和分布式并发检查 fail-closed，sticky 亲和与绑定缓存则回退到普通路由或 PostgreSQL。保留的 Redis client 会在依赖恢复后自动恢复正常操作。
 - 平滑 schema 升级必须与 consolidated schema 保持一致：`backend_pools.allocation_mode` 允许 `shared`、`user_binding`、`session_binding`；user binding 使用 `user_id_*` 列；session binding 使用独立的 `account_session_bindings` 表。
 
 ## 日常检查
@@ -163,6 +167,7 @@ flowchart TD
 
 | Internal status / code | 内部场景 | External status / code | External message | 运维说明 |
 | --- | --- | --- | --- | --- |
+| `413 invalid_request_error` | JSON 请求体超过 `32 MiB` | `413 invalid_request_error` | 请求体上限提示 | 缩小内嵌图片、tool payload 或会话历史后重试 |
 | `503 no_available_accounts` / `503 user_binding_exhausted` / `503 session_binding_exhausted` | 路由候选为空、账号并发耗尽、绑定池无可分配容量 | `429 rate_limited` | `rate limit exceeded; please retry later` | 看 `internal_message`、`account_id`、`pool_id` 区分容量、绑定或并发原因 |
 | `503 route_unavailable` | 没有可用路由或模型路由配置不可用 | `503 service_unavailable` | `model route unavailable` | 检查 route policy、pool 状态和模型目录 |
 | `400 missing_user_id` / `400 invalid_user_id` | user-binding pool 缺少或传入非法 `user_id` | `400 invalid_request_error` | `user identifier is required` / `user identifier is invalid` | 优先传 OpenAI `user` 或 Anthropic `metadata.user_id` / `metadata.user` |
@@ -175,7 +180,7 @@ flowchart TD
 | `500 stream_error` | SSE writer 或流式响应初始化失败 | `500 stream_error` | `stream response unavailable` | 检查响应写出、代理和客户端连接状态 |
 | 未显式映射的 internal code | 其它走映射函数的错误 | 与 internal 相同 | 与 internal 相同 | 默认透传；新增错误类型时应评估是否需要中性化 |
 
-上游 Copilot 4xx 响应会先分类，再决定是否影响账号健康。认证、权限、限流、配额、网络和 5xx 失败仍可能增加 risk；`invalid_request` 和通用 `upstream_4xx` 会记录到指标和 usage，但不会增加账号 risk，因为它们通常来自请求形态、模型兼容性或客户端参数，而不是账号健康问题。流式请求中，上游 SSE 读取错误，或在完成标记前提前 EOF，都会按失败请求处理，不能伪装成成功的 `[DONE]` 结束事件。对于上游 Responses API 流，如果 EOF 前已经收到 `response.output_text.done` 或 `response.output_item.done` 这类终止输出事件，则按完成处理，以兼容省略 `response.completed` 的模型变体。
+上游 Copilot 4xx 响应会先分类，再决定是否影响账号健康。认证、权限、限流、配额、网络和 5xx 失败仍可能增加 risk；`invalid_request` 和通用 `upstream_4xx` 会记录到指标和 usage，但不会增加账号 risk，因为它们通常来自请求形态、模型兼容性或客户端参数，而不是账号健康问题。流式请求中，上游 SSE 读取错误，或在完成标记前提前 EOF，都会按失败请求处理，不能伪装成成功的 `[DONE]` 结束事件。客户端取消会中断阻塞的流事件发送、关闭上游响应，并释放本地和 Redis 并发占用。对于上游 Responses API 流，如果 EOF 前已经收到 `response.output_text.done` 或 `response.output_item.done` 这类终止输出事件，则按完成处理，以兼容省略 `response.completed` 的模型变体。
 
 如果客户端收到 `budget_exhausted`，先看 gateway 日志里的 `internal_code`、`account_id` 和 `pool_id`，再检查 Redis 计数，例如 `budget:daily:account:<account_id>:<yyyymmdd>` 和 `budget:daily:global:<yyyymmdd>`。Daily token 和 AI Credits 上限只有在 Dashboard Config 值或对应 `BUDGET_MAX_DAILY_*` 环境变量大于 `0` 时才会启用。
 
@@ -390,7 +395,8 @@ flowchart TD
 1. 检查 worker 是否存活。
 2. 检查 `copilot_metrics_sync_enabled` 是否启用。
 3. 检查 org access token 或 `GITHUB_TOKEN` 是否可用。
-4. 检查 GitHub API 返回状态和 Postgres 写入是否受阻。
+4. 检查 usage report 元数据请求和所有签名下载；无效或不完整的报告会被拒绝，不会覆盖最新快照。
+5. 检查 Postgres 写入是否受阻。
 
 Metrics 同步路径
 
@@ -401,10 +407,10 @@ flowchart TD
   B -->|"是"| D["读取启用 metrics 的 org"]
   D --> E{"org access_token 或 GITHUB_TOKEN?"}
   E -->|"无"| F["记录 warning 并跳过 org"]
-  E -->|"有"| G["调用 GitHub Copilot Metrics API"]
-  G --> H[(metrics snapshots)]
-  H --> I["更新 last sync timestamp"]
-  H --> J["与 proxy usage 做 24h 对账"]
+  E -->|"有"| G["请求最新 28 天报告"]
+  G --> H["下载并校验全部报告文件"]
+  H --> I[(原子保存快照和同步时间)]
+  I --> J["将报告最新 UTC 日与同 org 的 proxy 请求对账"]
   J --> K{"漂移 > 10%?"}
   K -->|"是"| L["记录 audit event"]
   K -->|"否"| M["仅更新指标"]

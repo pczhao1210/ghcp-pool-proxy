@@ -98,9 +98,10 @@ flowchart LR
   Flag -->|"yes"| Orgs["read metrics-enabled orgs"]
   Orgs --> Token{"org token or GITHUB_TOKEN?"}
   Token -->|"none"| Warn["warn and skip org"]
-  Token -->|"present"| GitHub["GitHub Copilot Metrics API"]
-  GitHub --> Snapshot[(metrics snapshots)]
-  Snapshot --> Reconcile["reconcile with proxy usage"]
+  Token -->|"present"| GitHub["latest 28-day usage report"]
+  GitHub --> Download["signed report downloads"]
+  Download --> Snapshot[(validated metrics snapshots)]
+  Snapshot --> Reconcile["reconcile latest UTC day with same-org proxy usage"]
   Reconcile --> Dashboard["dashboard sync status"]
 ```
 

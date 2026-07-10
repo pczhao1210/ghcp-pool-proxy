@@ -73,6 +73,10 @@ VM Docker persistence:
 | Variable / Setting | Description |
 | --- | --- |
 | `GATEWAY_ADDR` | Gateway listen address |
+| `GATEWAY_READ_TIMEOUT` | Maximum time to read a request, default `30s` |
+| `GATEWAY_READ_HEADER_TIMEOUT` | Maximum time to read request headers, default `5s` |
+| `GATEWAY_WRITE_TIMEOUT` | Overall response write timeout; default `0s` keeps long SSE streams open |
+| `GATEWAY_IDLE_TIMEOUT` | Keep-alive idle timeout, default `120s` |
 | `ADMIN_ADDR` | Admin listen address |
 | `ADMIN_TOKEN` | Admin API authentication token |
 | `POSTGRES_DSN` | PostgreSQL connection string |
@@ -145,7 +149,7 @@ flowchart TD
 
 - Run database migrations before deploying services.
 - Prefer admin workflows for changing route policies, client profiles, and budget thresholds.
-- In multi-instance deployments, Redis and PostgreSQL must be available before services start.
+- In multi-instance deployments, Redis and PostgreSQL must be available before services start. If the initial Redis ping or a later command fails, readiness returns `503`; budget and distributed concurrency checks fail closed, while sticky affinity and binding caches fall back to ordinary routing or PostgreSQL. The retained Redis client resumes normal operation automatically after recovery.
 - Smooth schema upgrades must keep binding-pool objects aligned with the consolidated schema: `backend_pools.allocation_mode` allows `shared`, `user_binding`, and `session_binding`; user bindings use `user_id_*` columns; session bindings use the separate `account_session_bindings` table.
 
 ## Daily Checks
@@ -163,6 +167,7 @@ Clients receive standard AI gateway semantics through `external_status`, `extern
 
 | Internal status / code | Internal condition | External status / code | External message | Operations note |
 | --- | --- | --- | --- | --- |
+| `413 invalid_request_error` | JSON request body exceeds `32 MiB` | `413 invalid_request_error` | Request body limit message | Reduce embedded images, tool payloads, or conversation history before retrying |
 | `503 no_available_accounts` / `503 user_binding_exhausted` / `503 session_binding_exhausted` | Empty routing candidates, exhausted internal concurrency, or no binding-pool capacity | `429 rate_limited` | `rate limit exceeded; please retry later` | Use `internal_message`, `account_id`, and `pool_id` to distinguish capacity, binding, and concurrency causes |
 | `503 route_unavailable` | No usable route or model route configuration unavailable | `503 service_unavailable` | `model route unavailable` | Check route policies, pool status, and model catalog configuration |
 | `400 missing_user_id` / `400 invalid_user_id` | User-binding pool lacks or receives an invalid `user_id` | `400 invalid_request_error` | `user identifier is required` / `user identifier is invalid` | Prefer OpenAI `user` or Anthropic `metadata.user_id` / `metadata.user` |
@@ -175,7 +180,7 @@ Clients receive standard AI gateway semantics through `external_status`, `extern
 | `500 stream_error` | SSE writer or streaming response initialization failed | `500 stream_error` | `stream response unavailable` | Check response writing, proxying, and client connection state |
 | Unmapped internal code | Other errors passed through the mapping function | Same as internal | Same as internal | Default passthrough; review new error types for neutralization needs |
 
-Upstream Copilot 4xx responses are classified before account health is updated. Authentication, permission, rate-limit, quota, network, and 5xx failures can still affect risk. Invalid request and generic upstream 4xx classifications are recorded in metrics and usage, but they do not increase account risk because they usually come from request shape, model compatibility, or client parameters rather than account health. For streaming calls, an upstream SSE read error or premature EOF before a completion marker is treated as a failed request and must not be emitted as a successful `[DONE]` terminator. For upstream Responses API streams, EOF after terminal output events such as `response.output_text.done` or `response.output_item.done` is accepted as completion for model variants that omit `response.completed`.
+Upstream Copilot 4xx responses are classified before account health is updated. Authentication, permission, rate-limit, quota, network, and 5xx failures can still affect risk. Invalid request and generic upstream 4xx classifications are recorded in metrics and usage, but they do not increase account risk because they usually come from request shape, model compatibility, or client parameters rather than account health. For streaming calls, an upstream SSE read error or premature EOF before a completion marker is treated as a failed request and must not be emitted as a successful `[DONE]` terminator. Client cancellation interrupts blocked stream event delivery, closes the upstream response, and releases local and Redis concurrency reservations. For upstream Responses API streams, EOF after terminal output events such as `response.output_text.done` or `response.output_item.done` is accepted as completion for model variants that omit `response.completed`.
 
 If clients receive `budget_exhausted`, check the gateway log fields `internal_code`, `account_id`, and `pool_id`, then inspect Redis counters such as `budget:daily:account:<account_id>:<yyyymmdd>` and `budget:daily:global:<yyyymmdd>`. Daily token and AI Credits caps are only active when the Dashboard Config value or corresponding `BUDGET_MAX_DAILY_*` environment value is greater than `0`.
 
@@ -390,7 +395,8 @@ flowchart TD
 1. Check whether worker is alive.
 2. Check whether `copilot_metrics_sync_enabled` is enabled.
 3. Check whether org access token or `GITHUB_TOKEN` is available.
-4. Check GitHub API status and whether Postgres writes are blocked.
+4. Check the usage-report metadata request and every signed report download; an invalid or partial report is rejected without replacing the latest snapshot.
+5. Check whether Postgres writes are blocked.
 
 Metrics sync path:
 
@@ -401,10 +407,10 @@ flowchart TD
   B -->|"yes"| D["read metrics-enabled orgs"]
   D --> E{"org access_token or GITHUB_TOKEN?"}
   E -->|"none"| F["warn and skip org"]
-  E -->|"present"| G["call API"]
-  G --> H[(metrics snapshots)]
-  H --> I["update last sync timestamp"]
-  H --> J["reconcile 24h proxy usage"]
+  E -->|"present"| G["request latest 28-day report"]
+  G --> H["download and validate every report file"]
+  H --> I[(save snapshot and sync timestamp atomically)]
+  I --> J["compare the latest report UTC day with same-org proxy requests"]
   J --> K{"drift > 10%?"}
   K -->|"yes"| L["record audit event"]
   K -->|"no"| M["update metrics only"]

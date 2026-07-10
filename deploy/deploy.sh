@@ -1411,7 +1411,7 @@ reset_data_dir_with_container() {
   docker_cli run --rm \
     --entrypoint sh \
     -v "$path:/target" \
-    alpine:3.19 \
+    alpine:3.24 \
     -c 'find /target -mindepth 1 -maxdepth 1 -exec rm -rf {} +'
 }
 

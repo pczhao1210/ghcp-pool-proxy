@@ -98,9 +98,10 @@ flowchart LR
   Flag -->|"是"| Orgs["读取启用 metrics 的 org"]
   Orgs --> Token{"org token 或 GITHUB_TOKEN?"}
   Token -->|"无"| Warn["记录告警并跳过 org"]
-  Token -->|"有"| GitHub["GitHub Copilot Metrics API"]
-  GitHub --> Snapshot[(metrics snapshots)]
-  Snapshot --> Reconcile["与 proxy usage 汇总对账"]
+  Token -->|"有"| GitHub["最新 28 天 usage report"]
+  GitHub --> Download["签名报告下载"]
+  Download --> Snapshot[(已校验的 metrics snapshots)]
+  Snapshot --> Reconcile["将最新 UTC 日与同 org 的 proxy usage 对账"]
   Reconcile --> Dashboard["Dashboard 展示同步状态"]
 ```
 

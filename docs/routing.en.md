@@ -42,8 +42,8 @@ Matching rules:
 3. `model_pattern` must match the upstream model, original client model, or client-profile aliased exposed model; exact values and `filepath.Match`-style globs are supported.
 4. If `client_profile_id` is set, it must match the current profile.
 5. Sort by ascending `priority`; within equal priority, client-profile-specific policies are more specific, then `name` and `id` break ties.
-6. If a matching policy points at an inactive pool, continue to the next policy.
-7. If no policy matches, fallback to all active pools ordered by pool `priority`, `name`, and `id`.
+6. If a matching policy points at an inactive pool, continue to the next policy. Once a client-profile-specific policy has matched by priority, only later policies for that same client profile are considered; routing fails closed rather than falling through to a global policy or arbitrary pool.
+7. If no policy matches, fallback across active pools ordered by pool `priority`, `name`, and `id`, without crossing the first pool's allocation mode.
 
 ## Pool Allocation Modes
 

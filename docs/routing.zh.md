@@ -42,8 +42,8 @@ flowchart TD
 3. `model_pattern` 必须匹配 upstream model、客户端原始 model 或 alias 后的 exposed model 之一；支持精确值和 `filepath.Match` 风格 glob。
 4. 如果策略设置了 `client_profile_id`，必须等于当前 client profile。
 5. 排序按 `priority` 升序；同优先级下，带 `client_profile_id` 的策略更具体；随后按 `name`、`id` 排序。
-6. 命中策略但目标 pool 不 active 时继续找下一条策略。
-7. 没有命中策略时，回退到所有 active pool，按 pool `priority`、`name`、`id` 排序尝试。
+6. 命中策略但目标 pool 不 active 时继续找下一条策略。一旦按优先级命中 client profile 专属策略，后续只考虑同一 client profile 的策略；不会降级到全局策略或任意 pool，而是 fail closed。
+7. 没有命中策略时，按 pool `priority`、`name`、`id` 排序尝试 active pool，但不会跨越首个 pool 的 allocation mode。
 
 route policy 关键字段：
 

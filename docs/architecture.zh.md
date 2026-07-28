@@ -51,7 +51,8 @@ sequenceDiagram
 
   C->>G: POST /v1/chat/completions or /v1/responses or /v1/messages
   G->>G: 解析协议并生成 canonical request / parse protocol and build canonical request
-  G->>R: 选择池、账号和 sticky target / select pool, account, and sticky target
+  G->>G: 认证 Client 并解析必填 pool / authenticate client and resolve required pool
+  G->>R: 在指定 pool 内选择账号和 sticky target / select account and sticky target within assigned pool
   R-->>G: 返回 selection / return selection
   G->>P: 发起上游请求 / call upstream adapter
   P->>U: 访问 Copilot 上游 / call Copilot upstream
@@ -112,7 +113,7 @@ flowchart LR
 - 接收 OpenAI Chat Completions、OpenAI Responses API 和 Anthropic Messages 请求。
 - 统一转换成 canonical request。
 - 执行认证、全局预算检查、模型目录映射、路由、账号级预算检查、流式转发和错误回写。
-- 启动时加载 router 快照，并定期从 PostgreSQL 刷新 pool、账号关系和 route policy。
+- 启动时加载 router 快照，并定期从 PostgreSQL 刷新 pool、账号关系和 active binding。
 - 记录 trace、latency、token、sticky、provider error 和 usage ledger。
 
 ### Canonical 协议层
@@ -123,7 +124,7 @@ flowchart LR
 
 ### 路由器
 
-- 依据协议、模型、route policy、池状态、账号状态和并发上限选定账号。
+- 使用认证后 client profile 的必填 pool，并只在该 pool 内选择可用账号。
 - 支持 sticky 亲和、重绑定和 overflow。
 - 路由时剔除非 active pool、非 active 账号、不可用 org/enterprise seat 和超并发账号。
 - 候选账号按风险、当前并发、pool membership weight 和账号 priority 排序。

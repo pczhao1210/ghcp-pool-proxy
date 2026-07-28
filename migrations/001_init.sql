@@ -86,8 +86,8 @@ CREATE TABLE backend_pools (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'active',
-    priority INT NOT NULL DEFAULT 100,
     allocation_mode TEXT NOT NULL DEFAULT 'shared' CHECK (allocation_mode IN ('shared', 'user_binding', 'session_binding')),
+    load_balance_strategy TEXT NOT NULL DEFAULT 'risk_weighted' CHECK (load_balance_strategy IN ('risk_weighted', 'round_robin', 'least_concurrency')),
     binding_max_concurrency INT NOT NULL DEFAULT 10,
     binding_ttl_seconds INT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -103,10 +103,13 @@ CREATE TABLE pool_accounts (
     PRIMARY KEY (pool_id, account_id)
 );
 
+CREATE UNIQUE INDEX idx_pool_accounts_account_unique ON pool_accounts(account_id);
+
 CREATE TABLE client_profiles (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name TEXT NOT NULL,
     api_key_hash TEXT NOT NULL UNIQUE,
+    pool_id UUID NOT NULL REFERENCES backend_pools(id) ON DELETE RESTRICT,
     default_request_format TEXT NOT NULL,
     default_response_format TEXT NOT NULL,
     default_model TEXT,
@@ -121,27 +124,6 @@ CREATE TABLE client_profiles (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-
-CREATE TABLE route_policies (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    name TEXT NOT NULL,
-    request_format TEXT NOT NULL DEFAULT '*',
-    client_profile_id UUID REFERENCES client_profiles(id) ON DELETE CASCADE,
-    model_pattern TEXT NOT NULL,
-    pool_id UUID NOT NULL REFERENCES backend_pools(id),
-    priority INT NOT NULL DEFAULT 100,
-    load_balance_strategy TEXT NOT NULL DEFAULT 'risk_weighted' CHECK (load_balance_strategy IN ('risk_weighted', 'round_robin', 'least_concurrency')),
-    sticky_mode TEXT,
-    affinity_scope TEXT,
-    sticky_ttl_seconds INT,
-    enabled BOOLEAN NOT NULL DEFAULT TRUE,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-CREATE INDEX idx_route_policies_request_format ON route_policies(request_format);
-CREATE INDEX idx_route_policies_client_profile ON route_policies(client_profile_id);
-CREATE INDEX idx_route_policies_match ON route_policies(client_profile_id, request_format, model_pattern, priority) WHERE enabled = TRUE;
 
 CREATE TABLE usage_ledger (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

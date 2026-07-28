@@ -57,7 +57,7 @@ deploy/deploy.sh --start
 
 For local development, use `./start.sh --reset`; it resets Docker Compose volumes and rebuilds the database from the current `migrations/001_init.sql`.
 
-For source-tree validation, `./start.sh --new` runs Go tests unless `--skip-tests` is set, rebuilds the app images, recreates gateway/admin/worker, and runs HTTP smoke checks. The smoke client profile uses a dedicated route policy: with `PROVIDER=fake` it targets the seeded local smoke pool; with `PROVIDER=copilot` it targets the first active shared pool when one exists. The smoke payload includes stable `user` and `session` identifiers so user-binding or session-binding routing errors are easier to diagnose if no shared pool is available.
+For source-tree validation, `./start.sh --new` runs Go tests unless `--skip-tests` is set, rebuilds the app images, recreates gateway/admin/worker, and runs HTTP smoke checks. The smoke client profile has a concrete `pool_id`: with `PROVIDER=fake` it targets the seeded local smoke pool; with `PROVIDER=copilot` it targets the first active shared pool when one exists. The smoke payload includes stable `user` and `session` identifiers so binding-pool errors are easier to diagnose.
 
 VM Docker persistence:
 
@@ -101,8 +101,7 @@ The current implementation isolates GitHub Copilot accounts across account recor
 ```mermaid
 flowchart TD
   Client["Client API Key"] --> Profile["Client Profile"]
-  Profile --> Policy["Route Policy"]
-  Policy --> Pool["Backend Pool"]
+  Profile -->|"required pool_id"| Pool["Backend Pool"]
   Pool --> AccountA["GitHub Account A"]
   Pool --> AccountB["GitHub Account B"]
   AccountA --> CredA[(Encrypted Credential A)]
@@ -115,7 +114,7 @@ flowchart TD
 - Each account is a separate `accounts` row, credentials are bound through `credentials.account_id`, and no global Copilot token is used.
 - After Device Flow, the account's own GitHub OAuth token and Copilot bearer token are stored as encrypted payload under that account only.
 - Before a request, the gateway reads `account_id` from router selection, then loads and caches the token by that `account_id`.
-- Pool membership is managed by `pool_accounts`; route policies control which models, protocols, or tenants route to which account pool.
+- Pool membership is managed by `pool_accounts`; each account belongs to at most one pool and each client profile points to exactly one pool.
 - Redis sticky keys include pool, model, request format, and affinity hash; sticky only affects account reuse within the same scope.
 - Organization/enterprise seat accounts should fill `account_source`, `org_id`, and `seat_status`; the router filters unavailable seats.
 
@@ -123,7 +122,7 @@ Recommended isolation practices:
 
 1. Split pools by tenant, purpose, or risk tier, such as `team-a-copilot`, `team-b-copilot`, and `sandbox-copilot`.
 2. Run Device Flow separately for each GitHub account and do not reuse manual tokens.
-3. Bind client profiles or route policies to fixed pools to avoid sharing account pools across teams.
+3. Assign each client profile to its concrete pool to prevent accidental cross-team account sharing.
 4. Periodically sync Business/Enterprise seat status and move invalid accounts to `quarantined` or `revoked`.
 5. Use a dedicated `CREDENTIAL_MASTER_KEY` in production; do not use the compose default development key.
 
@@ -148,7 +147,7 @@ flowchart TD
 ```
 
 - Run database migrations before deploying services.
-- Prefer admin workflows for changing route policies, client profiles, and budget thresholds.
+- Prefer admin workflows for changing pool membership, client profiles, and budget thresholds.
 - In multi-instance deployments, Redis and PostgreSQL must be available before services start. If the initial Redis ping or a later command fails, readiness returns `503`; budget and distributed concurrency checks fail closed, while sticky affinity and binding caches fall back to ordinary routing or PostgreSQL. The retained Redis client resumes normal operation automatically after recovery.
 - Smooth schema upgrades must keep binding-pool objects aligned with the consolidated schema: `backend_pools.allocation_mode` allows `shared`, `user_binding`, and `session_binding`; user bindings use `user_id_*` columns; session bindings use the separate `account_session_bindings` table.
 
@@ -169,7 +168,7 @@ Clients receive standard AI gateway semantics through `external_status`, `extern
 | --- | --- | --- | --- | --- |
 | `413 invalid_request_error` | JSON request body exceeds `32 MiB` | `413 invalid_request_error` | Request body limit message | Reduce embedded images, tool payloads, or conversation history before retrying |
 | `503 no_available_accounts` / `503 user_binding_exhausted` / `503 session_binding_exhausted` | Empty routing candidates, exhausted internal concurrency, or no binding-pool capacity | `429 rate_limited` | `rate limit exceeded; please retry later` | Use `internal_message`, `account_id`, and `pool_id` to distinguish capacity, binding, and concurrency causes |
-| `503 route_unavailable` | No usable route or model route configuration unavailable | `503 service_unavailable` | `model route unavailable` | Check route policies, pool status, and model catalog configuration |
+| `503 route_unavailable` / `503 client_pool_not_configured` | Assigned client pool missing, inactive, or unavailable | `503 service_unavailable` | `model route unavailable` or client-pool configuration message | Check the client profile `pool_id`, pool status, and model catalog configuration |
 | `400 missing_user_id` / `400 invalid_user_id` | User-binding pool lacks or receives an invalid `user_id` | `400 invalid_request_error` | `user identifier is required` / `user identifier is invalid` | Prefer OpenAI `user` or Anthropic `metadata.user_id` / `metadata.user` |
 | `400 missing_session_id` / `400 invalid_session_id` | Session-binding pool lacks or receives an invalid `session_id` | `400 invalid_request_error` | `session identifier is required` / `session identifier is invalid` | Prefer `metadata.session_id` / `metadata.session`, or header `X-GHCP-Session-ID` |
 | `503 user_binding_unavailable` / `503 session_binding_unavailable` | Binding dependency failure, such as PostgreSQL or cache access | `503 service_unavailable` | `service temporarily unavailable` | Check PostgreSQL, Redis, and binding table state |
@@ -198,7 +197,7 @@ The dashboard Metrics tab shows these key indicators over the selected window:
 | Reasoning Tokens | Identifies cost sources from reasoning models or high-reasoning requests |
 | Token Details | Preserves upstream token type, count, and batch cost in ledger `token_details` |
 
-Prometheus text metrics also include cached/cache read tokens, cache write tokens, reasoning tokens, nano AIU, AI Credits micro, estimated USD micros, and cache hit ratio permille. If cache hit rate stays low, check client profile sticky mode, route policies, session headers, and rebind/overflow metrics.
+Prometheus text metrics also include cached/cache read tokens, cache write tokens, reasoning tokens, nano AIU, AI Credits micro, estimated USD micros, and cache hit ratio permille. If cache hit rate stays low, check client profile sticky mode, session headers, and rebind/overflow metrics.
 
 Query granularity:
 
@@ -248,7 +247,7 @@ Onboarding
 1. Create the account in the dashboard or Admin API.
 2. Use Device Flow or manual credential import for GitHub Copilot login credentials.
 3. Worker runs the first probe; success keeps `active`, while failure may move to `degraded` or `quarantined`.
-4. Add the account to one or more pools so it can be routed.
+4. Add the account to one pool so it can be routed; moving it later atomically replaces that membership.
 
 Device Flow:
 
@@ -290,9 +289,9 @@ If complete returns `202` with `error=authorization_pending`, the user has not f
 
 Grouping
 
-1. Create a pool and set default model, priority, and sticky policy.
-2. Add accounts to the pool and verify max concurrency, weights, and routing priority.
-3. Use route policies to control protocol, model, and pool matching; sticky should not override health, budget, or seat validity.
+1. Create a pool and choose its allocation mode and load-balancing strategy.
+2. Add or move accounts from the Pool page and verify max concurrency, weights, and binding state. Release active bindings before moving accounts.
+3. Assign each client to one concrete pool. Sticky remains a within-pool preference and cannot override health, budget, or seat validity.
 
 Offboarding
 
@@ -385,7 +384,7 @@ flowchart TD
 
 ### Low Sticky Hit Rate
 
-1. Confirm that sticky is enabled in client profile or route policy.
+1. Confirm that sticky is enabled in the client profile.
 2. Check whether `sticky_session_header`, Claude Code/Codex session headers, or the derived affinity key are stable.
 3. Check whether overflow triggers frequently.
 4. Check whether account additions/removals caused large affinity migration.

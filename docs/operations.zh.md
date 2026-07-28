@@ -57,7 +57,7 @@ deploy/deploy.sh --start
 
 本地开发环境使用 `./start.sh --reset`，它会执行 Docker Compose volume reset 后按当前 `migrations/001_init.sql` 重建数据库。
 
-源码树验证可使用 `./start.sh --new`。它默认运行 Go 测试，除非显式传入 `--skip-tests`，随后重建应用镜像、重建 gateway/admin/worker 容器并执行 HTTP smoke check。smoke client profile 会使用专用 route policy：`PROVIDER=fake` 时指向本地 seed 的 smoke pool；`PROVIDER=copilot` 时优先指向第一个 active shared pool。smoke payload 会带稳定的 `user` 和 `session` 标识；如果环境只有 user-binding 或 session-binding pool，缺少标识导致的路由错误会更容易定位。
+源码树验证可使用 `./start.sh --new`。它默认运行 Go 测试，除非显式传入 `--skip-tests`，随后重建应用镜像、重建 gateway/admin/worker 容器并执行 HTTP smoke check。smoke client profile 有具体 `pool_id`：`PROVIDER=fake` 时指向本地 seed 的 smoke pool；`PROVIDER=copilot` 时优先指向第一个 active shared pool。smoke payload 会带稳定的 `user` 和 `session` 标识，便于定位 binding pool 错误。
 
 VM Docker 持久化：
 
@@ -101,8 +101,7 @@ VM Docker 持久化：
 ```mermaid
 flowchart TD
   Client["Client API Key"] --> Profile["Client Profile"]
-  Profile --> Policy["Route Policy"]
-  Policy --> Pool["Backend Pool"]
+  Profile -->|"必填 pool_id"| Pool["Backend Pool"]
   Pool --> AccountA["GitHub Account A"]
   Pool --> AccountB["GitHub Account B"]
   AccountA --> CredA[(Encrypted Credential A)]
@@ -115,7 +114,7 @@ flowchart TD
 - 每个账号是一条独立 `accounts` 记录，凭据通过 `credentials.account_id` 绑定，不使用全局 Copilot token。
 - Device Flow 完成后保存的是该账号自己的 GitHub OAuth token 和 Copilot bearer token，加密 payload 只挂在该账号下。
 - Gateway 在请求前从 router selection 取 `account_id`，再按该 `account_id` 读取和缓存 token。
-- pool membership 使用 `pool_accounts` 管理，route policy 控制哪些模型、协议或租户可路由到哪个账号池。
+- pool membership 使用 `pool_accounts` 管理；每个账号最多属于一个 pool，每个 client profile 必须指向一个 pool。
 - Redis sticky key 包含 pool、model、request format 和 affinity hash，sticky 只影响同一 scope 下的账号复用。
 - 组织/企业 seat 账号应填写 `account_source`、`org_id`、`seat_status`，router 会过滤不可用 seat。
 
@@ -123,7 +122,7 @@ flowchart TD
 
 1. 按租户、用途或风险等级拆 pool，例如 `team-a-copilot`、`team-b-copilot`、`sandbox-copilot`。
 2. 每个 GitHub 账号单独 Device Flow 登录，不复用任何手工 token。
-3. 给 client profile 或 route policy 绑定固定 pool，避免不同团队共享账号池。
+3. 给每个 client profile 分配具体 pool，避免意外共享其它团队的账号。
 4. 对 Business/Enterprise seat 定期同步 seat 状态，失效账号进入 `quarantined` 或 `revoked`。
 5. 生产环境使用独立 `CREDENTIAL_MASTER_KEY`，不要使用 compose 默认开发 key。
 
@@ -148,7 +147,7 @@ flowchart TD
 ```
 
 - 迁移顺序应先数据库后服务。
-- 变更 route policy、client profile 和预算阈值应优先通过 admin 完成。
+- 变更 pool membership、client profile 和预算阈值应优先通过 admin 完成。
 - 多实例部署时，Redis 和 PostgreSQL 必须先于服务可用。Redis 初始 ping 或后续命令失败时，readiness 返回 `503`；预算和分布式并发检查 fail-closed，sticky 亲和与绑定缓存则回退到普通路由或 PostgreSQL。保留的 Redis client 会在依赖恢复后自动恢复正常操作。
 - 平滑 schema 升级必须与 consolidated schema 保持一致：`backend_pools.allocation_mode` 允许 `shared`、`user_binding`、`session_binding`；user binding 使用 `user_id_*` 列；session binding 使用独立的 `account_session_bindings` 表。
 
@@ -169,7 +168,7 @@ flowchart TD
 | --- | --- | --- | --- | --- |
 | `413 invalid_request_error` | JSON 请求体超过 `32 MiB` | `413 invalid_request_error` | 请求体上限提示 | 缩小内嵌图片、tool payload 或会话历史后重试 |
 | `503 no_available_accounts` / `503 user_binding_exhausted` / `503 session_binding_exhausted` | 路由候选为空、账号并发耗尽、绑定池无可分配容量 | `429 rate_limited` | `rate limit exceeded; please retry later` | 看 `internal_message`、`account_id`、`pool_id` 区分容量、绑定或并发原因 |
-| `503 route_unavailable` | 没有可用路由或模型路由配置不可用 | `503 service_unavailable` | `model route unavailable` | 检查 route policy、pool 状态和模型目录 |
+| `503 route_unavailable` / `503 client_pool_not_configured` | Client 指定 pool 缺失、非 active 或不可用 | `503 service_unavailable` | `model route unavailable` 或 Client-Pool 配置提示 | 检查 client profile `pool_id`、pool 状态和模型目录 |
 | `400 missing_user_id` / `400 invalid_user_id` | user-binding pool 缺少或传入非法 `user_id` | `400 invalid_request_error` | `user identifier is required` / `user identifier is invalid` | 优先传 OpenAI `user` 或 Anthropic `metadata.user_id` / `metadata.user` |
 | `400 missing_session_id` / `400 invalid_session_id` | session-binding pool 缺少或传入非法 `session_id` | `400 invalid_request_error` | `session identifier is required` / `session identifier is invalid` | 优先传 `metadata.session_id` / `metadata.session`，或 header `X-GHCP-Session-ID` |
 | `503 user_binding_unavailable` / `503 session_binding_unavailable` | 绑定依赖 PostgreSQL 或缓存访问失败 | `503 service_unavailable` | `service temporarily unavailable` | 检查 PostgreSQL、Redis 和绑定表状态 |
@@ -198,7 +197,7 @@ Dashboard Metrics 页按窗口展示以下关键指标：
 | Reasoning Tokens | 识别 reasoning 模型或高推理请求的成本来源 |
 | Token Details | 通过 ledger 中的 `token_details` 保留上游 token type、count 和 batch cost |
 
-Prometheus 文本指标中也包含 cached/cache read tokens、cache write tokens、reasoning tokens、nano AIU、AI Credits micro、estimated USD micros 和 cache hit ratio permille。若 cache hit rate 持续偏低，应检查 client profile sticky mode、route policy、session header 以及 rebind/overflow 指标。
+Prometheus 文本指标中也包含 cached/cache read tokens、cache write tokens、reasoning tokens、nano AIU、AI Credits micro、estimated USD micros 和 cache hit ratio permille。若 cache hit rate 持续偏低，应检查 client profile sticky mode、session header 以及 rebind/overflow 指标。
 
 查询粒度：
 
@@ -248,7 +247,7 @@ stateDiagram-v2
 1. 在 Dashboard 或 Admin API 创建账号。
 2. 使用 Device Flow 或手工凭据导入 GitHub Copilot 登录凭据。
 3. Worker 进行首次 probe；成功后保持 `active`，失败则可能进入 `degraded` 或 `quarantined`。
-4. 将账号加入一个或多个 pool，完成可路由准备。
+4. 将账号加入一个 pool，完成可路由准备；后续移动会原子替换该 membership。
 
 Device Flow:
 
@@ -290,9 +289,9 @@ curl -s http://localhost:8001/admin/accounts/{account_id}/device-flow/complete \
 
 账号分组:
 
-1. 创建 pool，并设置默认模型、优先级和 sticky 策略。
-2. 把账号加入 pool，确认最大并发、权重和路由优先级。
-3. 通过 route policy 控制协议、模型和 pool 命中；sticky 不应覆盖健康、预算和 seat 有效性。
+1. 创建 pool，并选择 allocation mode 与 load-balancing strategy。
+2. 在 Pool 页添加或移动账号，确认最大并发、权重和 binding 状态；移动前先 Release active binding。
+3. 给每个 Client 分配一个具体 pool。Sticky 只在该 pool 内生效，不能覆盖健康、预算和 seat 有效性。
 
 账号下线:
 
@@ -385,7 +384,7 @@ flowchart TD
 
 ### sticky 命中率偏低
 
-1. 确认 client profile 或 route policy 是否启用了 sticky。
+1. 确认 client profile 是否启用了 sticky。
 2. 检查 `sticky_session_header`、Claude Code/Codex session header 或派生 affinity key 是否稳定。
 3. 检查 overflow 是否频繁触发。
 4. 检查新增或摘除账号是否导致大量 affinity 迁移。
@@ -421,7 +420,7 @@ flowchart TD
 ```mermaid
 flowchart TD
   A["发现故障"] --> B{"可通过配置回退?"}
-  B -->|"是"| C["回退 route policy / budget 配置"]
+  B -->|"是"| C["回退 client pool / budget 配置"]
   B -->|"否"| D["回滚服务版本"]
   C --> E["复核指标恢复"]
   D --> E

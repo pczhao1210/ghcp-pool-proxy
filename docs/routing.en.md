@@ -1,6 +1,6 @@
 # Routing Rules
 
-This is the primary gateway routing document. It covers route policies, pool allocation modes, sticky affinity, load balancing, concurrency, risk score, and sticky metrics. Protocol parsing, conversion, discarded fields, and upstream passthrough parameters are documented in [protocol.en.md](protocol.en.md).
+This is the primary gateway routing document. It covers fixed client-to-pool assignment, pool allocation modes, sticky affinity, load balancing, concurrency, risk score, and sticky metrics. Protocol parsing, conversion, discarded fields, and upstream passthrough parameters are documented in [protocol.en.md](protocol.en.md).
 
 ## Execution Order
 
@@ -10,7 +10,7 @@ flowchart TD
   B --> C["Protocol parser -> CanonicalRequest"]
   C --> D["Model catalog exposed -> upstream"]
   D --> E["Global RPM / token / AI credit checks"]
-  E --> F["Match route policy"]
+  E --> F["Use client profile pool_id"]
   F --> G{"pool allocation_mode"}
   G -->|"user_binding"| H["standard user identifier -> DB/Redis binding"]
   G -->|"shared"| I["Compute affinity key / read sticky target"]
@@ -23,27 +23,24 @@ flowchart TD
   N --> O["Record usage / risk / sticky metrics"]
 ```
 
-The routing hot path uses an in-memory snapshot sourced from PostgreSQL. The gateway loads pools, pool accounts, route policies, and active account bindings at startup, then refreshes every 30 seconds. Redis stores sticky maps, account-binding hot cache, concurrency leases, and other hot distributed state.
+The routing hot path uses an in-memory snapshot sourced from PostgreSQL. The gateway loads pools, pool accounts, and active account bindings at startup, then refreshes every 30 seconds. Redis stores sticky maps, account-binding hot cache, concurrency leases, and other hot distributed state.
 
-## Route Policy Matching
+## Fixed Pool Ownership
 
-`RouteContext` contains only the fields needed by routing.
+Routing follows one deterministic ownership chain:
 
-| Field | Source | Purpose |
-| --- | --- | --- |
-| `request_format` | Request endpoint | `openai_chat`, `openai_responses`, or `anthropic_messages` |
-| `model` | Upstream model after catalog resolution, plus the original client model and client-profile aliased exposed model | Exact or glob match against `model_pattern` |
-| `client_profile_id` | API key client profile | Optional client-specific routing |
+```text
+API key -> enabled client profile -> one concrete pool -> one eligible account
+```
 
-Matching rules:
+Rules:
 
-1. Ignore `enabled=false` policies.
-2. `request_format` must match; empty or `*` means any protocol.
-3. `model_pattern` must match the upstream model, original client model, or client-profile aliased exposed model; exact values and `filepath.Match`-style globs are supported.
-4. If `client_profile_id` is set, it must match the current profile.
-5. Sort by ascending `priority`; within equal priority, client-profile-specific policies are more specific, then `name` and `id` break ties.
-6. If a matching policy points at an inactive pool, continue to the next policy. Once a client-profile-specific policy has matched by priority, only later policies for that same client profile are considered; routing fails closed rather than falling through to a global policy or arbitrary pool.
-7. If no policy matches, fallback across active pools ordered by pool `priority`, `name`, and `id`, without crossing the first pool's allocation mode.
+1. Every client profile has a required `pool_id`. API keys do not route until they resolve to an enabled profile with a concrete pool.
+2. The assigned pool must exist and be active. An absent, disabled, or exhausted pool fails closed; the gateway never falls back to another pool.
+3. Protocol and model catalog resolution do not select a pool. The same client stays in its assigned pool for Chat Completions, Responses, and Anthropic Messages requests.
+4. Each account belongs to zero or one pool. PostgreSQL enforces this with a unique account membership constraint.
+5. Account moves use the batch assignment API with `expected_pool_id`. The move is one transaction, stale membership aborts the full batch, and an active user/session binding blocks the move until released.
+6. `RouteContext` carries the assigned `pool_id` and resolved model. The router only selects an account inside that pool.
 
 ## Pool Allocation Modes
 
@@ -84,7 +81,7 @@ An empty candidate set enters gateway error mapping; see [operations.en.md](oper
 
 ## Load Balancing
 
-`load_balance_strategy` applies to shared-pool and fallback selection. User-binding first assignment uses its own deterministic ordering.
+`load_balance_strategy` is owned by the pool and applies to ordinary selection inside that assigned pool. User/session-binding first assignment uses its own deterministic ordering.
 
 | Strategy | Ordering | Use case |
 | --- | --- | --- |
@@ -172,7 +169,7 @@ Before routing, the gateway checks global RPM, daily tokens, and daily AI credit
 
 Daily token and AI Credits budgets are disabled by default. Configure them from the Dashboard Config page or set `BUDGET_MAX_DAILY_TOKENS_PER_ACCOUNT`, `BUDGET_MAX_DAILY_TOKENS_GLOBAL`, `BUDGET_MAX_DAILY_NANO_AIU_PER_ACCOUNT`, or `BUDGET_MAX_DAILY_NANO_AIU_GLOBAL` to a value greater than `0` to enable those caps. RPM protection remains enabled by default through `BUDGET_MAX_RPM_PER_ACCOUNT=60` and `BUDGET_MAX_RPM_GLOBAL=600`; set either value to `0` to disable that RPM check. Gateway refreshes Dashboard-saved budget settings periodically, while environment values are startup defaults.
 
-The router itself does not read budget ledgers; it handles pools, policies, account status, seats, reservations, and concurrency.
+The router itself does not read budget ledgers; it handles the assigned pool, account status, seats, reservations, and concurrency.
 
 ## Metrics
 
@@ -181,17 +178,8 @@ Basic request, token, and account metrics are always available. Detailed sticky 
 | Metric | Meaning | Key labels |
 | --- | --- | --- |
 | `ghcp_sticky_hits_total` | Sticky target reused | `model`, `pool` |
-| `ghcp_sticky_rebinds_total` | Sticky target missing, unavailable, or moved | `model`, `pool`, `reason`, `policy_id`, `policy_name`, `model_pattern`, `sticky_mode`, `affinity_scope`, `priority` |
-| `ghcp_sticky_overflows_total` | Sticky target moved due to high load ratio | Same labels, with `reason=load_ratio_exceeded` |
-
-Common reasons:
-
-| Reason | Meaning |
-| --- | --- |
-| `target_unavailable` | Sticky target is missing, inactive, seat-invalid, over concurrency, or outside current policy constraints |
-| `concurrency_limit` | Redis concurrency lease is full and rebind is attempted |
-| `overflow` | Sticky target was initially selected but moved due to load ratio |
-| `load_ratio_exceeded` | Concrete overflow reason |
+| `ghcp_sticky_rebinds_total` | Sticky target missing, unavailable, full, or moved | `model`, `pool` |
+| `ghcp_sticky_overflows_total` | Sticky target moved due to high load ratio | `model`, `pool` |
 
 ## Tuning Guidance
 

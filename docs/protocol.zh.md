@@ -62,7 +62,7 @@ Claude Code 侧可通过 `/model <alias|name>`、启动参数 `claude --model <a
 
 | Claude Code model name | 建议 `model_catalog_json.exposed` | `model_catalog_json.upstream` 应填 | 说明 |
 | --- | --- | --- | --- |
-| `sonnet` | `sonnet` | Copilot `/models` 返回的 Sonnet 模型 ID，例如 `claude-sonnet-4-20250514` | 日常编码默认推荐别名；route policy 可直接写 `sonnet` 或真实 upstream ID |
+| `sonnet` | `sonnet` | Copilot `/models` 返回的 Sonnet 模型 ID，例如 `claude-sonnet-4-20250514` | 日常编码默认推荐别名；模型目录会在调用 provider 前完成解析 |
 | `sonnet[1m]` | `sonnet[1m]` | 支持 1M 上下文的 Sonnet upstream；没有单独 1M ID 时可先映射到同一个 Sonnet ID | Claude Code 在 LLM gateway 场景会用这个名字选择 1M 上下文；上游是否真的支持取决于 Copilot 返回的模型能力 |
 | `opus` | `opus` | Copilot `/models` 返回的 Opus 模型 ID | 复杂推理任务别名 |
 | `opus[1m]` | `opus[1m]` | 支持 1M 上下文的 Opus upstream；没有单独 1M ID 时可先映射到同一个 Opus ID | 与 `sonnet[1m]` 类似，建议显式配置，避免模型目录拒绝请求 |
@@ -98,8 +98,8 @@ Claude Code 侧可通过 `/model <alias|name>`、启动参数 `claude --model <a
 | `tools` | `Tools` | OpenAI `function` tool 转为 canonical tool |
 | `tool_choice` | `ToolChoice` | 保留并写入上游请求 |
 | `max_tokens` / `max_completion_tokens` | `MaxTokens` | `max_tokens` 优先；没有时使用 `max_completion_tokens` |
-| `user` | `Metadata.user` | sticky fallback；`user_binding` pool 会优先把它作为 `user_id`；不写入上游 `user` |
-| `session` / `metadata.session_id` / `metadata.session` / `metadata.conversation_id` | `Metadata` | sticky fallback；`session_binding` pool 使用 `session_id` / `session` 作为 `session_id` |
+| `user` | `Metadata.user` | sticky 备用输入；`user_binding` pool 会优先把它作为 `user_id`；不写入上游 `user` |
+| `session` / `metadata.session_id` / `metadata.session` / `metadata.conversation_id` | `Metadata` | sticky 备用输入；`session_binding` pool 使用 `session_id` / `session` 作为 `session_id` |
 
 透传到 `Params`，并在上游请求 body 中原名写出：
 
@@ -131,8 +131,8 @@ logprobs, top_logprobs, service_tier, modalities, audio
 | `tool_choice` | `ToolChoice` | 保留并写入上游请求 |
 | `max_output_tokens` | `MaxTokens` | 上游 Responses 写为 `max_output_tokens` |
 | `previous_response_id` | `Metadata.previous_response_id` | 仅当上游也走 Responses 时写回上游请求 |
-| `user` | `Metadata.user` | sticky fallback；`user_binding` pool 会优先把它作为 `user_id` |
-| `session` / `metadata.session_id` / `metadata.session` / `metadata.conversation_id` | `Metadata` | sticky fallback；`session_binding` pool 使用 `session_id` / `session` 作为 `session_id` |
+| `user` | `Metadata.user` | sticky 备用输入；`user_binding` pool 会优先把它作为 `user_id` |
+| `session` / `metadata.session_id` / `metadata.session` / `metadata.conversation_id` | `Metadata` | sticky 备用输入；`session_binding` pool 使用 `session_id` / `session` 作为 `session_id` |
 
 透传到 `Params`，并在上游请求 body 中原名写出：
 

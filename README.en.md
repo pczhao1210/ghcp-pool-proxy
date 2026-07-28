@@ -16,10 +16,10 @@ GHCP Pool Proxy is a gateway and control-plane system for controlled GitHub Copi
 - The gateway exposes OpenAI Chat Completions, OpenAI Responses API, and Anthropic Messages endpoints.
 - The model catalog is controlled by `model_catalog_json`, including exposed names, upstream model IDs, Copilot `name/vendor` metadata, `upstream_api`, and `enabled` status.
 - GitHub Copilot upstream endpoint selection is mixed: `upstream_api` can override per model; `vendor=OpenAI` / `Azure OpenAI` and `gpt*`/o-series use upstream Responses; Gemini, Anthropic/Claude/Opus/Haiku/Sonnet, Microsoft MAI, Grok/xAI, and other non-OpenAI families use upstream Chat Completions; unknown models fall back to the downstream protocol.
-- The router selects pools by model and route policy, then applies sticky affinity, overflow, pool/account/seat filtering, concurrency constraints, and weighted selection.
-- Route policies support `request_format`, enabling protocol-level routing for `openai_chat`, `openai_responses`, and `anthropic_messages`.
+- Authentication resolves an API key to a client profile with a required concrete pool. The router never falls back to another pool; it applies sticky affinity, account/seat filtering, budgets, concurrency constraints, and the pool's load-balancing strategy within that pool.
+- Each account belongs to at most one pool. Pool membership changes are atomic, reject stale state, and require active user/session bindings to be released before an account can move.
 - Pools support `allocation_mode=shared/user_binding/session_binding`. User-binding pools bind by `user_id`, session-binding pools bind by `session_id`; bindings live in PostgreSQL, are cached in Redis, support pool-level `binding_max_concurrency` and idle TTL, and can be released from expanded pool details in the dashboard.
-- The gateway loads routing configuration on startup and refreshes pool, account membership, and route policy snapshots from PostgreSQL every 30 seconds.
+- The gateway loads routing configuration on startup and refreshes pool, account membership, and active-binding snapshots from PostgreSQL every 30 seconds.
 - Admin and Worker are separate commands. Admin serves control-plane APIs and the dashboard, while Worker runs probes, metrics sync, credential warnings, and recovery tasks.
 - The dashboard is designed for operations workflows and covers overview, accounts, pools, clients, metrics, events, settings, and the model catalog; organization-related backend capability is retained, but the current UI does not expose it.
 
@@ -71,9 +71,11 @@ deploy/deploy.sh --start
 
 On first run, the script generates host file `~/ghcp_proxy/.env` containing `ADMIN_TOKEN`, `PROVIDER=copilot`, `CREDENTIAL_MASTER_KEY`, and the database password. Keep this file private, and do not rotate `CREDENTIAL_MASTER_KEY` casually after storing credentials.
 
-### Rebuild After Schema Changes
+### Upgrade After Schema Changes
 
-Recent versions changed the database schema, including pool binding, user/session binding, model catalog, and routing fields. Existing old data directories should not be reused directly. Before upgrading to this version, reset PostgreSQL and Redis data, then start again and reconfigure accounts, credentials, pools, client profiles, route policies, and the model catalog in the dashboard.
+Schema version 11 introduces deterministic client-to-pool ownership. The deployment scripts apply the smooth migration automatically: existing client profiles are assigned from legacy policy data when possible, otherwise to a deterministic active pool; duplicate account memberships are reduced to one; load-balancing strategy moves onto the pool; then the legacy policy table and Pool Priority are removed. Back up PostgreSQL before upgrading and review Client and Pool assignments afterward.
+
+Use a reset only when you intentionally want a clean installation or the migration reports an unrecoverable schema conflict:
 
 For VM deployments:
 
@@ -89,7 +91,7 @@ For local development:
 ./start.sh --reset
 ```
 
-Reset deletes runtime data but preserves the host `.env`. Before resetting, record any required account setup, client API keys, pool/route policy settings, and model mappings. After reset, log in Copilot accounts again and reconfigure the dashboard.
+Reset deletes runtime data but preserves the host `.env`. Before resetting, record any required account setup, client API keys, Client-to-Pool assignments, pool settings, and model mappings. After reset, log in Copilot accounts again and reconfigure the dashboard.
 
 Tail hourly file logs:
 
@@ -128,7 +130,7 @@ The deployment script uses fixed images:
 
 ## GitHub Copilot Onboarding
 
-- Multiple GitHub Copilot accounts are isolated through separate `accounts`, encrypted credentials, token cache entries, pool memberships, and route policies.
+- Multiple GitHub Copilot accounts are isolated through separate `accounts`, encrypted credentials, token cache entries, unique pool memberships, and explicit Client-to-Pool assignments.
 - The Accounts page supports `Device Flow`, which authorizes through GitHub's official device flow and stores the resulting Copilot bearer token encrypted under that account.
 - Set `PROVIDER=copilot` for the real Copilot provider. Device Flow defaults to the built-in GitHub OAuth Client ID; set `GITHUB_OAUTH_CLIENT_ID` only when you need an override.
 - See [docs/operations.en.md](docs/operations.en.md) for detailed procedures.

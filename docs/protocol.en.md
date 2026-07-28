@@ -62,7 +62,7 @@ On the Claude Code side, the model can be set with `/model <alias|name>`, the st
 
 | Claude Code model name | Recommended `model_catalog_json.exposed` | `model_catalog_json.upstream` should be | Notes |
 | --- | --- | --- | --- |
-| `sonnet` | `sonnet` | The Sonnet model ID returned by Copilot `/models`, for example `claude-sonnet-4-20250514` | Common daily-coding alias; route policies may match either `sonnet` or the real upstream ID |
+| `sonnet` | `sonnet` | The Sonnet model ID returned by Copilot `/models`, for example `claude-sonnet-4-20250514` | Common daily-coding alias; the model catalog resolves it before the provider call |
 | `sonnet[1m]` | `sonnet[1m]` | A Sonnet upstream that supports 1M context; if there is no separate 1M ID, map it to the same Sonnet ID first | Claude Code uses this name behind LLM gateways to request 1M context; actual support depends on the model capabilities Copilot exposes |
 | `opus` | `opus` | The Opus model ID returned by Copilot `/models` | Complex reasoning alias |
 | `opus[1m]` | `opus[1m]` | An Opus upstream that supports 1M context; if there is no separate 1M ID, map it to the same Opus ID first | Configure explicitly so the catalog does not reject the request |
@@ -98,8 +98,8 @@ Retained and normalized:
 | `tools` | `Tools` | OpenAI `function` tools become canonical tools |
 | `tool_choice` | `ToolChoice` | Preserved and written upstream |
 | `max_tokens` / `max_completion_tokens` | `MaxTokens` | `max_tokens` wins; otherwise `max_completion_tokens` is used |
-| `user` | `Metadata.user` | Sticky fallback; `user_binding` pools prefer it as `user_id`; not written upstream as `user` |
-| `session` / `metadata.session_id` / `metadata.session` / `metadata.conversation_id` | `Metadata` | Sticky fallback; `session_binding` pools use `session_id` / `session` as `session_id` |
+| `user` | `Metadata.user` | Secondary sticky input; `user_binding` pools prefer it as `user_id`; not written upstream as `user` |
+| `session` / `metadata.session_id` / `metadata.session` / `metadata.conversation_id` | `Metadata` | Secondary sticky input; `session_binding` pools use `session_id` / `session` as `session_id` |
 
 Passed through to `Params` and written to the upstream body with the same name:
 
@@ -131,8 +131,8 @@ Retained and normalized:
 | `tool_choice` | `ToolChoice` | Preserved and written upstream |
 | `max_output_tokens` | `MaxTokens` | Written upstream as `max_output_tokens` |
 | `previous_response_id` | `Metadata.previous_response_id` | Written upstream only when the upstream API is also Responses |
-| `user` | `Metadata.user` | Sticky fallback; `user_binding` pools prefer it as `user_id` |
-| `session` / `metadata.session_id` / `metadata.session` / `metadata.conversation_id` | `Metadata` | Sticky fallback; `session_binding` pools use `session_id` / `session` as `session_id` |
+| `user` | `Metadata.user` | Secondary sticky input; `user_binding` pools prefer it as `user_id` |
+| `session` / `metadata.session_id` / `metadata.session` / `metadata.conversation_id` | `Metadata` | Secondary sticky input; `session_binding` pools use `session_id` / `session` as `session_id` |
 
 Passed through to `Params` and written to the upstream body with the same name:
 

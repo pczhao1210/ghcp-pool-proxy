@@ -1,6 +1,6 @@
 # Routing 规则
 
-本文是 Gateway 路由的唯一主文档，覆盖 route policy、pool 分配模式、sticky、负载均衡、并发、risk score 和 sticky 指标。协议字段如何解析、转换、丢弃或透传见 [protocol.zh.md](protocol.zh.md)。
+本文是 Gateway 路由的唯一主文档，覆盖固定 Client-Pool 归属、pool 分配模式、sticky、负载均衡、并发、risk score 和 sticky 指标。协议字段如何解析、转换、丢弃或透传见 [protocol.zh.md](protocol.zh.md)。
 
 ## 执行顺序
 
@@ -10,7 +10,7 @@ flowchart TD
   B --> C["协议 parser -> CanonicalRequest"]
   C --> D["模型目录 exposed -> upstream"]
   D --> E["全局 RPM / token / AI credit 检查"]
-  E --> F["匹配 route policy"]
+  E --> F["使用 client profile pool_id"]
   F --> G{"pool allocation_mode"}
   G -->|"user_binding"| H["standard user identifier -> DB/Redis binding"]
   G -->|"shared"| I["计算 affinity key / 查 sticky target"]
@@ -23,40 +23,24 @@ flowchart TD
   N --> O["记录 usage / risk / sticky 指标"]
 ```
 
-路由热路径使用内存快照，数据来源于 PostgreSQL。Gateway 启动时加载一次 pool、pool account、route policy 和 active account bindings，之后每 30 秒刷新。Redis 用于 sticky map、account-binding 热缓存、并发 lease 和分布式热状态。
+路由热路径使用内存快照，数据来源于 PostgreSQL。Gateway 启动时加载一次 pool、pool account 和 active account bindings，之后每 30 秒刷新。Redis 用于 sticky map、account-binding 热缓存、并发 lease 和分布式热状态。
 
-## Route Policy 匹配
+## 固定 Pool 归属
 
-`RouteContext` 只包含当前路由需要的三项：
+路由只有一条确定的归属链：
 
-| 字段 | 来源 | 用途 |
-| --- | --- | --- |
-| `request_format` | 请求入口 | `openai_chat`、`openai_responses`、`anthropic_messages` |
-| `model` | 模型目录转换后的 upstream model，外加客户端原始模型名和 client profile alias 后的 exposed 模型名 | 与 `model_pattern` 精确或 glob 匹配 |
-| `client_profile_id` | API key 对应 client profile | 可把特定客户端固定到专用策略 |
+```text
+API key -> enabled client profile -> 一个具体 pool -> 一个可用账号
+```
 
-策略匹配规则：
+规则：
 
-1. 忽略 `enabled=false`。
-2. `request_format` 必须匹配；策略为空或 `*` 表示任意协议。
-3. `model_pattern` 必须匹配 upstream model、客户端原始 model 或 alias 后的 exposed model 之一；支持精确值和 `filepath.Match` 风格 glob。
-4. 如果策略设置了 `client_profile_id`，必须等于当前 client profile。
-5. 排序按 `priority` 升序；同优先级下，带 `client_profile_id` 的策略更具体；随后按 `name`、`id` 排序。
-6. 命中策略但目标 pool 不 active 时继续找下一条策略。一旦按优先级命中 client profile 专属策略，后续只考虑同一 client profile 的策略；不会降级到全局策略或任意 pool，而是 fail closed。
-7. 没有命中策略时，按 pool `priority`、`name`、`id` 排序尝试 active pool，但不会跨越首个 pool 的 allocation mode。
-
-route policy 关键字段：
-
-| 字段 | 当前行为 |
-| --- | --- |
-| `request_format` | 协议维度路由，支持 `*` |
-| `model_pattern` | 模型匹配，必须非空 |
-| `client_profile_id` | 可选客户端约束 |
-| `pool_id` | 策略目标 pool |
-| `load_balance_strategy` | `risk_weighted`、`least_concurrency`、`round_robin` |
-| `sticky_mode` | `none`、`soft`、`strict`、`prefix` |
-| `affinity_scope` | 非空时覆盖默认 sticky scope |
-| `sticky_ttl_seconds` | 非 0 时覆盖 client profile TTL |
+1. 每个 client profile 必须有 `pool_id`。API key 只有解析到 enabled profile 和具体 pool 后才能路由。
+2. 指定 pool 必须存在且 active。pool 缺失、disabled 或容量耗尽时 fail closed；Gateway 不会回退到其它 pool。
+3. 协议和模型目录只负责请求格式与模型映射，不参与选 pool。同一 Client 的 Chat Completions、Responses 和 Anthropic Messages 请求始终进入同一个 pool。
+4. 每个账号只能属于零个或一个 pool，PostgreSQL 使用账号 membership 唯一约束保证这一点。
+5. 移动账号必须调用带 `expected_pool_id` 的 batch assignment API。移动在一个事务中完成；stale membership 会回滚整批操作；active user/session binding 会阻止移动，必须先 Release。
+6. `RouteContext` 只携带已分配的 `pool_id` 和解析后的 model；Router 只在这个 pool 内选账号。
 
 ## Pool 分配模式
 
@@ -108,7 +92,7 @@ session_binding: client_profile_id + pool_id + lower(trim(session_id))
 
 ## 负载均衡策略
 
-`load_balance_strategy` 只在 shared pool 或普通 fallback 选择中使用。user-binding 的首次绑定账号选择使用独立排序，不走这些策略。
+`load_balance_strategy` 归 pool 所有，只在指定 pool 内的普通选择中使用。user/session binding 的首次绑定账号选择使用独立排序，不走这些策略。
 
 | 策略 | 排序逻辑 | 适用场景 |
 | --- | --- | --- |
@@ -198,7 +182,7 @@ Gateway 在路由前检查全局 RPM、全局 daily tokens 和全局 daily AI cr
 
 Daily token 和 AI Credits 预算默认关闭。可在 Dashboard Config 页配置，或将 `BUDGET_MAX_DAILY_TOKENS_PER_ACCOUNT`、`BUDGET_MAX_DAILY_TOKENS_GLOBAL`、`BUDGET_MAX_DAILY_NANO_AIU_PER_ACCOUNT`、`BUDGET_MAX_DAILY_NANO_AIU_GLOBAL` 设置为大于 `0` 的值启用对应上限。RPM 保护默认开启：`BUDGET_MAX_RPM_PER_ACCOUNT=60`、`BUDGET_MAX_RPM_GLOBAL=600`；任一值设为 `0` 可关闭对应 RPM 检查。Gateway 会周期性刷新 Dashboard 保存的预算设置，环境变量只是启动默认值。
 
-Router 本身不读取预算账本；它只处理 pool、policy、账号状态、seat、reserved 和并发。
+Router 本身不读取预算账本；它只处理指定 pool、账号状态、seat、reserved 和并发。
 
 ## 指标
 
@@ -207,17 +191,8 @@ Router 本身不读取预算账本；它只处理 pool、policy、账号状态�
 | 指标 | 含义 | 关键 label |
 | --- | --- | --- |
 | `ghcp_sticky_hits_total` | 成功复用 sticky target | `model`、`pool` |
-| `ghcp_sticky_rebinds_total` | sticky target 缺失、不可用或需要迁移 | `model`、`pool`、`reason`、`policy_id`、`policy_name`、`model_pattern`、`sticky_mode`、`affinity_scope`、`priority` |
-| `ghcp_sticky_overflows_total` | sticky target 因负载比例过高分流 | 同上，`reason=load_ratio_exceeded` |
-
-常见 reason：
-
-| Reason | 语义 |
-| --- | --- |
-| `target_unavailable` | sticky target 缺失、非 active、seat 不可用、超并发或不满足当前策略约束 |
-| `concurrency_limit` | Redis 并发 lease 已满，尝试 rebind |
-| `overflow` | 初选命中 sticky target，但因负载比例触发重绑 |
-| `load_ratio_exceeded` | overflow 的具体原因 |
+| `ghcp_sticky_rebinds_total` | sticky target 缺失、不可用、已满或需要迁移 | `model`、`pool` |
+| `ghcp_sticky_overflows_total` | sticky target 因负载比例过高分流 | `model`、`pool` |
 
 ## 调优建议
 

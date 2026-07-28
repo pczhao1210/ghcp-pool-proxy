@@ -982,10 +982,21 @@ pool_user_binding_schema_current() {
   [[ "$missing" -eq 0 ]]
 }
 
+fixed_pool_assignment_schema_current() {
+  local invalid
+  schema_require_table backend_pools
+  schema_require_table pool_accounts
+  schema_require_table client_profiles
+  schema_column_exists_with_type backend_pools load_balance_strategy text || return 1
+  schema_column_exists_with_type client_profiles pool_id uuid || return 1
+  invalid="$(db_scalar "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'backend_pools' AND column_name = 'priority') OR EXISTS (SELECT 1 FROM client_profiles WHERE pool_id IS NULL) OR EXISTS (SELECT account_id FROM pool_accounts GROUP BY account_id HAVING COUNT(*) > 1) OR to_regclass('public.idx_pool_accounts_account_unique') IS NULL OR to_regclass('public.route_policies') IS NOT NULL;")"
+  [[ "$invalid" != "t" ]]
+}
+
 target_schema_current() {
   case "$(target_schema_version)" in
-    10)
-      pool_user_binding_schema_current
+    11)
+      pool_user_binding_schema_current && fixed_pool_assignment_schema_current
       ;;
     *)
       return 0
@@ -1047,7 +1058,9 @@ infer_legacy_schema_version() {
     return 0
   fi
 
-  if pool_user_binding_schema_current; then
+  if fixed_pool_assignment_schema_current; then
+    printf '11\n'
+  elif pool_user_binding_schema_current; then
     printf '10\n'
   elif usage_rollups_schema_current; then
     printf '9\n'
@@ -1074,7 +1087,7 @@ apply_smooth_schema_upgrade() {
   local current="$1"
   local target="$2"
 
-  if [[ "$target" != "10" ]]; then
+  if [[ "$target" != "11" ]]; then
     schema_conflict "automatic smooth migration to schema version $target is not defined"
   fi
   if (( current > target )); then
@@ -1352,6 +1365,8 @@ CREATE INDEX IF NOT EXISTS idx_account_session_bindings_pool_status
 CREATE INDEX IF NOT EXISTS idx_account_session_bindings_expires
   ON account_session_bindings(status, expires_at);
 SQL
+
+  apply_migration_file "011_fixed_pool_assignment.sql"
 
   set_database_schema_version "$target"
 }

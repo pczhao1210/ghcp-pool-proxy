@@ -51,7 +51,8 @@ sequenceDiagram
 
   C->>G: POST /v1/chat/completions or /v1/responses or /v1/messages
   G->>G: parse protocol and build canonical request
-  G->>R: select pool, account, and sticky target
+  G->>G: authenticate client and resolve required pool
+  G->>R: select account and sticky target within assigned pool
   R-->>G: return selection
   G->>P: call upstream adapter
   P->>U: call Copilot upstream
@@ -66,7 +67,7 @@ sequenceDiagram
 flowchart TD
   Operator["Operator"] --> Dashboard["Dashboard"]
   Dashboard --> Admin["Admin API"]
-  Admin -->|"accounts / pools / route policy / settings"| PG[(PostgreSQL)]
+  Admin -->|"accounts / pools / clients / settings"| PG[(PostgreSQL)]
   PG -->|"load on startup + refresh every 30s"| Snapshot["Gateway Router Snapshot"]
   Snapshot --> Router["request routing"]
 
@@ -112,7 +113,7 @@ flowchart LR
 - Receives OpenAI Chat Completions, OpenAI Responses API, and Anthropic Messages requests.
 - Converts requests into a canonical request model.
 - Handles authentication, global budget checks, model catalog mapping, routing, account-level budget checks, streaming proxying, and error mapping.
-- Loads router snapshots at startup and periodically refreshes pools, account memberships, and route policies from PostgreSQL.
+- Loads router snapshots at startup and periodically refreshes pools, account memberships, and active bindings from PostgreSQL.
 - Records traces, latency, token usage, sticky metrics, provider errors, and usage ledger entries.
 
 ### Canonical Protocol Layer
@@ -123,7 +124,7 @@ flowchart LR
 
 ### Router
 
-- Selects accounts based on protocol, model, route policy, pool state, account state, and concurrency limits.
+- Uses the authenticated client profile's required pool and selects an eligible account within that pool.
 - Supports sticky affinity, rebind, and overflow.
 - Filters out inactive pools, inactive accounts, unavailable org/enterprise seats, and over-concurrency accounts.
 - Sorts candidate accounts by risk, current concurrency, pool membership weight, and account priority.

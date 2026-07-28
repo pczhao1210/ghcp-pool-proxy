@@ -8,7 +8,7 @@ This guide is for administrators and operators. It covers account management, mo
 flowchart TD
   A["create account"] --> B["import credential or Device Flow"]
   B --> C["account active"]
-  C --> D["assign to pool with weight"]
+  C --> D["assign to one pool with weight"]
   D --> E["gateway can route requests"]
   E --> F{"failures or manual disable?"}
   F -->|"degraded/quarantined"| G["create recovery task"]
@@ -28,7 +28,7 @@ In the dashboard **Accounts** tab, click **+ Add Account** to create an account.
 | `GitHub Login` | Associated GitHub username |
 | `Max Concurrency` | Maximum concurrent requests, default 6 |
 
-After creation, assign the account to one or more pools before it can receive routed traffic.
+After creation, assign the account to one pool before it can receive routed traffic. Moving it to another pool atomically replaces the existing membership.
 
 ### Credential Import and Login Flow
 
@@ -52,7 +52,7 @@ Manual token import:
 
 Each GitHub Copilot account has its own account row, encrypted credential payload, token cache entry, pool membership, and sticky routing target. The gateway selects an account first, then loads credentials by `account_id`; no global Copilot token is shared.
 
-Use separate pools and route policies to isolate tenants, teams, environments, or risk tiers.
+Use separate pools and assign each client profile to one concrete pool to isolate tenants, teams, environments, or risk tiers. Each account belongs to at most one pool.
 
 ### Delete and Recover
 
@@ -152,7 +152,9 @@ Import credential request:
 | --- | --- | --- |
 | `GET` | `/admin/pools` | List pools |
 | `POST` | `/admin/pools` | Create a pool |
-| `POST` | `/admin/pools/{id}/accounts/{accountId}` | Assign an account to a pool, optionally with weight |
+| `GET` | `/admin/pools/{id}/accounts` | List pool accounts and active binding details |
+| `PUT` | `/admin/pools/{id}` | Update allocation mode and load-balancing strategy |
+| `POST` | `/admin/pools/{id}/account-assignments` | Atomically add or move accounts using `expected_pool_id` stale-state checks |
 | `DELETE` | `/admin/pools/{id}/accounts/{accountId}` | Remove an account from a pool |
 
 ### Settings
@@ -237,14 +239,14 @@ On each request, the gateway resolves the exposed model name and maps it to the 
 1. The client sends an exposed model name.
 2. The gateway resolves exposed to upstream through the model catalog.
 3. If the model is missing or disabled, it returns `400 bad_request` with `invalid_model`.
-4. If resolution succeeds, the request is routed to the provider using route policies and pool/account state.
+4. If resolution succeeds, the authenticated client profile supplies its required pool and the router selects an eligible account only within that pool.
 
 ## Next Steps
 
-- Batch account import, bulk delete, and bulk pool assignment.
-- Route policy CRUD and dashboard editing.
+- Batch account import and bulk delete.
+- Pool membership history, export, and richer account-move audit views.
 - Event-driven router config refresh using PostgreSQL notify or Redis pub/sub.
 - Versioned migration table instead of replaying SQL files.
 - Encrypted org-level metrics tokens instead of a global environment fallback.
 - Separate Prometheus metrics endpoints for admin and worker.
-- Risk scoring, automated quarantine, and more granular route policies.
+- Risk scoring, automated quarantine, and more granular account-health controls.

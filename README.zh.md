@@ -16,10 +16,10 @@ GHCP Pool Proxy 是一个面向受控 GitHub Copilot 账号资源的网关与控
 - Gateway 已提供 OpenAI Chat Completions、OpenAI Responses API、Anthropic Messages 三类入口。
 - 模型目录由 `model_catalog_json` 控制，支持暴露名、上游模型 ID、Copilot `name/vendor` 元数据、`upstream_api` 和 `enabled` 启停。
 - GitHub Copilot 上游 endpoint 采用混合选择：`upstream_api` 可按模型显式覆盖；`vendor=OpenAI` / `Azure OpenAI` 与 `gpt*`/o-series 走上游 Responses；Gemini、Anthropic/Claude/Opus/Haiku/Sonnet、Microsoft MAI、Grok/xAI 等非 OpenAI 家族走上游 Chat Completions；其它模型按下游协议兜底。
-- Router 支持按模型与 route policy 选择池，并执行 sticky 亲和、overflow、pool/account/seat 过滤、并发约束和权重选择。
-- route policy 已支持 `request_format`，可按 `openai_chat`、`openai_responses`、`anthropic_messages` 做协议级分流。
+- API key 鉴权后会得到带必填具体 pool 的 client profile。Router 不会 fallback 到其它 pool，只在该 pool 内执行 sticky 亲和、account/seat 过滤、预算、并发约束和 pool 自身的负载均衡策略。
+- 每个账号最多属于一个 pool。Membership 变更采用原子操作，会拒绝 stale state；账号存在 active user/session binding 时必须先 release 才能移动。
 - Pool 已支持 `allocation_mode=shared/user_binding/session_binding`。`user_binding` 按 `user_id` 独占账号，`session_binding` 按 `session_id` 独占账号；绑定存 PostgreSQL，Redis 缓存热路由状态，支持 pool 级 `binding_max_concurrency` 和 idle TTL，也可在 Dashboard 的 pool 展开详情中手动释放。
-- Gateway 启动时加载路由配置，并每 30 秒从 PostgreSQL 刷新 pool、账号关系和 route policy 快照。
+- Gateway 启动时加载路由配置，并每 30 秒从 PostgreSQL 刷新 pool、账号关系和 active binding 快照。
 - Admin 和 Worker 已拆分为独立命令入口；Admin 提供控制面 API 并服务 Dashboard，Worker 执行探针、指标同步、凭据提醒和恢复任务。
 - Dashboard 面向运维场景，覆盖概览、账号、池、客户端、指标、事件、设置和模型目录；组织相关能力暂保留在后端，当前 UI 暂不展示。
 - Dashboard Overview 支持按 Gateway Public URL 生成 Claude Code、Codex 或 curl 启动脚本，可勾选 custom headers 并自动生成随机 `X-GHCP-Session-ID`。
@@ -72,9 +72,11 @@ deploy/deploy.sh --start
 
 首次运行会生成宿主机文件 `~/ghcp_proxy/.env`，其中包含 `ADMIN_TOKEN`、`PROVIDER=copilot`、`CREDENTIAL_MASTER_KEY` 和数据库密码。请妥善保存该文件，尤其不要在已有数据的情况下随意更换 `CREDENTIAL_MASTER_KEY`。
 
-### Schema 变更后的重建
+### Schema 变更后的升级
 
-近期版本调整了数据库 schema，包括 pool binding、user/session binding、模型目录和路由相关字段。已有旧数据目录不能直接复用；升级到该版本前请先 reset PostgreSQL 和 Redis 数据，再重新启动并在 Dashboard 中重新配置账号、凭据、pool、client profile、route policy 和模型目录。
+Schema v11 引入确定性的 Client-to-Pool ownership。部署脚本会自动执行平滑迁移：优先从 legacy policy data 为已有 client profile 选择 pool，否则确定性选择 active pool；把重复账号 membership 收敛为一个；把 load-balancing strategy 迁移到 pool；最后删除 legacy policy table 与 Pool Priority。升级前请备份 PostgreSQL，升级后复核 Clients 与 Pools 的分配结果。
+
+只有明确需要全新安装，或迁移报告无法恢复的 schema conflict 时才执行 reset：
 
 VM 部署可执行：
 
@@ -90,7 +92,7 @@ deploy/deploy.sh --start
 ./start.sh --reset
 ```
 
-reset 会删除运行数据，但会保留宿主机 `.env`。请在 reset 前确认已记录必要的账号配置、client API key、pool/route policy 和模型映射；reset 后需要重新登录 Copilot 账号并重新配置 Dashboard。
+reset 会删除运行数据，但会保留宿主机 `.env`。请在 reset 前确认已记录必要的账号配置、client API key、Client-to-Pool 分配、pool 设置和模型映射；reset 后需要重新登录 Copilot 账号并重新配置 Dashboard。
 
 查看按小时落盘的服务日志：
 
@@ -129,7 +131,7 @@ deploy/deploy.sh --stop
 
 ## GitHub Copilot 上线
 
-- 多个 GitHub Copilot 账号通过独立 `accounts`、独立加密凭据、独立 token cache、pool membership 和 route policy 隔离。
+- 多个 GitHub Copilot 账号通过独立 `accounts`、独立加密凭据、独立 token cache、唯一 pool membership 和显式 Client-to-Pool 分配实现隔离。
 - Dashboard 的 Accounts 页支持 `Device Flow`，通过 GitHub 官方 device flow 授权账号，再换取并加密保存该账号的 Copilot bearer token。
 - 使用真实 Copilot provider 时设置 `PROVIDER=copilot`。Device Flow 默认使用内置 GitHub OAuth Client ID；只有需要覆盖时才设置 `GITHUB_OAUTH_CLIENT_ID`。
 - 详细流程见 [docs/operations.zh.md](docs/operations.zh.md)。

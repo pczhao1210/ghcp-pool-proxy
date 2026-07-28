@@ -8,7 +8,7 @@
 flowchart TD
   A["创建账号"] --> B["导入凭据或 Device Flow"]
   B --> C["账号 active"]
-  C --> D["加入 pool 并设置权重"]
+  C --> D["加入一个 pool 并设置权重"]
   D --> E["Gateway 可路由请求"]
   E --> F{"失败或人工禁用?"}
   F -->|"degraded/quarantined"| G["创建恢复任务"]
@@ -28,7 +28,7 @@ flowchart TD
 | `GitHub Login` | 关联的 GitHub 用户名 |
 | `Max Concurrency` | 最大并发请求数，默认 1 |
 
-账号创建后需要加入一个或多个 pool，才会进入可路由候选集。
+账号创建后需要加入一个 pool，才会进入可路由候选集；移动到其它 pool 时会原子替换原 membership。
 
 ### 凭据导入与登录流程
 
@@ -52,7 +52,7 @@ Device Flow 步骤
 
 每个 GitHub Copilot 账号都有独立 account row、加密凭据 payload、token cache entry、pool membership 和 sticky routing target。Gateway 先选账号，再按 `account_id` 加载凭据；不会共享全局 Copilot token。
 
-建议用独立 pool 和 route policy 隔离租户、团队、环境或风险等级。
+建议使用独立 pool，并把每个 client profile 分配到一个具体 pool，以隔离租户、团队、环境或风险等级。每个账号最多属于一个 pool。
 
 ### 删除与恢复
 
@@ -152,7 +152,9 @@ flowchart LR
 | --- | --- | --- |
 | `GET` | `/admin/pools` | 列出 pool |
 | `POST` | `/admin/pools` | 创建 pool |
-| `POST` | `/admin/pools/{id}/accounts/{accountId}` | 将账号加入 pool，可设置 weight |
+| `GET` | `/admin/pools/{id}/accounts` | 列出 pool 账号与 active binding 详情 |
+| `PUT` | `/admin/pools/{id}` | 更新 allocation mode 与 load-balancing strategy |
+| `POST` | `/admin/pools/{id}/account-assignments` | 使用 `expected_pool_id` stale-state 检查原子添加或移动账号 |
 | `DELETE` | `/admin/pools/{id}/accounts/{accountId}` | 从 pool 移除账号 |
 
 ### 设置
@@ -237,14 +239,14 @@ Gateway 在每次请求中解析 exposed model，并在发送上游 provider 前
 1. 客户端发送 exposed model。
 2. Gateway 调用模型目录解析 exposed 到 upstream。
 3. 找不到或 disabled 时返回 `400 bad_request` 和 `invalid_model`。
-4. 解析成功后按 route policy 和 pool/account 状态路由到 provider。
+4. 解析成功后，由认证 client profile 提供必填 pool，Router 只在该 pool 内选择可用账号并调用 provider。
 
 ## 8. 后续增强
 
-- 批量账号导入、批量删除和批量 pool 分配。
-- Route policy CRUD 与 Dashboard 编辑。
+- 批量账号导入与批量删除。
+- Pool membership 历史、导出和更完整的账号移动审计视图。
 - 基于 PostgreSQL notify 或 Redis pub/sub 的事件驱动 router config refresh。
 - 迁移版本表，替代重复 replay SQL 文件。
 - org-level metrics token 加密存储，替代全局环境变量 fallback。
 - admin/worker 独立 Prometheus metrics endpoint。
-- 风险评分、自动 quarantine 和更细粒度的 route policy。
+- 风险评分、自动 quarantine 和更细粒度的账号健康控制。

@@ -126,7 +126,7 @@ CREATE TABLE client_profiles (
 );
 
 CREATE TABLE usage_ledger (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    id UUID NOT NULL DEFAULT gen_random_uuid(),
     trace_id TEXT NOT NULL,
     account_id UUID,
     pool_id UUID,
@@ -148,14 +148,43 @@ CREATE TABLE usage_ledger (
     estimated_cost NUMERIC(20,8) NOT NULL DEFAULT 0,
     latency_ms INT,
     error_type TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    ingested_at TIMESTAMPTZ NOT NULL DEFAULT now()
+) PARTITION BY RANGE (created_at);
 
-CREATE INDEX idx_usage_ledger_account ON usage_ledger(account_id, created_at);
-CREATE INDEX idx_usage_ledger_client ON usage_ledger(client_profile_id, created_at);
-CREATE INDEX idx_usage_ledger_trace ON usage_ledger(trace_id);
-CREATE INDEX idx_usage_ledger_model_created ON usage_ledger(model, created_at);
-CREATE INDEX idx_usage_ledger_pool_created ON usage_ledger(pool_id, created_at);
+DO $partitions$
+DECLARE
+    partition_day DATE;
+    partition_name TEXT;
+BEGIN
+    FOR partition_day IN
+        SELECT generate_series(
+            (current_timestamp AT TIME ZONE 'UTC')::date,
+            (current_timestamp AT TIME ZONE 'UTC')::date + 7,
+            interval '1 day'
+        )::date
+    LOOP
+        partition_name := 'usage_ledger_p' || to_char(partition_day, 'YYYYMMDD');
+        EXECUTE format(
+            'CREATE TABLE IF NOT EXISTS %I PARTITION OF usage_ledger FOR VALUES FROM (%L) TO (%L)',
+            partition_name,
+            partition_day::text || ' 00:00:00+00',
+            (partition_day + 1)::text || ' 00:00:00+00'
+        );
+    END LOOP;
+END
+$partitions$;
+
+CREATE TABLE usage_ledger_default PARTITION OF usage_ledger DEFAULT;
+CREATE INDEX idx_usage_ledger_created_brin ON usage_ledger USING BRIN(created_at);
+CREATE INDEX idx_usage_ledger_ingested_brin ON usage_ledger USING BRIN(ingested_at);
+CREATE VIEW usage_ledger_all AS SELECT * FROM usage_ledger;
+
+CREATE TABLE usage_ledger_legacy_state (
+    singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
+    max_created_at TIMESTAMPTZ,
+    truncated_at TIMESTAMPTZ
+);
 
 CREATE TABLE copilot_metrics_snapshots (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -173,6 +202,9 @@ CREATE TABLE copilot_metrics_snapshots (
     source TEXT NOT NULL,
     synced_at TIMESTAMPTZ NOT NULL
 );
+
+CREATE INDEX idx_copilot_metrics_snapshots_org_synced
+    ON copilot_metrics_snapshots(org_id, synced_at DESC);
 
 CREATE TABLE audit_events (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -212,7 +244,7 @@ CREATE TABLE system_settings (
 );
 
 INSERT INTO system_settings (key, value, description) VALUES
-    ('schema_version', '10', 'Installed database schema version'),
+    ('schema_version', '14', 'Installed database schema version'),
     ('copilot_metrics_sync_enabled', 'false', 'Enable GitHub Copilot Metrics sync worker'),
     ('audit_search_enabled', 'false', 'Enable audit log search API endpoint'),
     ('advanced_metrics_enabled', 'false', 'Enable detailed sticky/rebind/overflow metrics'),
@@ -258,11 +290,12 @@ CREATE TABLE usage_rollup_hourly (
     errors BIGINT NOT NULL DEFAULT 0,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (bucket_start, client_profile_id, account_id, pool_id, model, request_format, status)
-);
+) PARTITION BY RANGE (bucket_start);
 
 CREATE INDEX idx_usage_rollup_hourly_bucket ON usage_rollup_hourly(bucket_start);
 CREATE INDEX idx_usage_rollup_hourly_client_bucket ON usage_rollup_hourly(client_profile_id, bucket_start);
 CREATE INDEX idx_usage_rollup_hourly_model_bucket ON usage_rollup_hourly(model, bucket_start);
+CREATE TABLE usage_rollup_hourly_default PARTITION OF usage_rollup_hourly DEFAULT;
 
 CREATE TABLE usage_rollup_daily (
     bucket_date DATE NOT NULL,
@@ -289,15 +322,16 @@ CREATE TABLE usage_rollup_daily (
     errors BIGINT NOT NULL DEFAULT 0,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (bucket_date, client_profile_id, account_id, pool_id, model, request_format, status)
-);
+) PARTITION BY RANGE (bucket_date);
 
 CREATE INDEX idx_usage_rollup_daily_date ON usage_rollup_daily(bucket_date);
 CREATE INDEX idx_usage_rollup_daily_client_date ON usage_rollup_daily(client_profile_id, bucket_date);
 CREATE INDEX idx_usage_rollup_daily_model_date ON usage_rollup_daily(model, bucket_date);
+CREATE TABLE usage_rollup_daily_default PARTITION OF usage_rollup_daily DEFAULT;
 
 INSERT INTO usage_rollup_state (name, last_processed_at, updated_at)
 SELECT 'usage_rollup', COALESCE(MIN(created_at), now()), now()
-FROM usage_ledger
+FROM usage_ledger_all
 ON CONFLICT (name) DO NOTHING;
 
 CREATE TABLE account_user_bindings (

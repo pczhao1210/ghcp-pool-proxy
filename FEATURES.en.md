@@ -1,6 +1,17 @@
 # Features and Usage Guide
 
-This guide is for administrators and operators. It covers account management, model catalog configuration, dashboard usage, Admin APIs, environment variables, security boundaries, and future improvements.
+This guide is for administrators and operators. It covers the implemented account management, model catalog, dashboard, Admin API, configuration, security, and gateway integration behavior.
+
+## Contents
+
+- [Account Management](#account-management)
+- [Model Catalog Configuration](#model-catalog-configuration)
+- [Dashboard Overview](#dashboard-overview)
+- [Admin API Endpoints](#admin-api-endpoints)
+- [Environment Variables](#environment-variables)
+- [Security Notes](#security-notes)
+- [Gateway Integration](#gateway-integration)
+- [Current Limitations](#current-limitations)
 
 ## Account Management
 
@@ -54,6 +65,8 @@ Each GitHub Copilot account has its own account row, encrypted credential payloa
 
 Use separate pools and assign each client profile to one concrete pool to isolate tenants, teams, environments, or risk tiers. Each account belongs to at most one pool.
 
+Pool isolation must also reflect model access. The router does not compare the requested model with per-account entitlements, so accounts in one pool need the same usable upstream model set. If access differs, use separate pools and assign clients to a compatible pool.
+
 ### Delete and Recover
 
 Clicking **Delete** on an account cascades through credentials, routing affinities, pool memberships, recovery tasks, and Copilot seat mappings.
@@ -92,6 +105,8 @@ Models with `enabled=false`, or models absent from the catalog, are not returned
 
 If `model_catalog_json` is not configured, default models are exposed. If it is configured as an empty array, no models are exposed; this is intentional.
 
+The catalog is gateway-wide and does not prove that every account can use every exposed model. If an incompatible account is selected, the provider call fails and the gateway does not retry the request on another account. An upstream `403` is classified as `permission_denied` and may affect that account's risk state.
+
 ## Dashboard Overview
 
 | Tab | Description |
@@ -102,7 +117,6 @@ If `model_catalog_json` is not configured, default models are exposed. If it is 
 | Clients | View client profiles and their defaults |
 | Metrics | View request, token, AI Credit, USD, and cache hit rate statistics over a time window |
 | Events | View audit log entries for admin operations |
-| GitHub Orgs | View organization seat mappings and Copilot plan status |
 | Settings | Manage system settings and feature flags |
 | Models | View and configure exposed/upstream/upstream_api/enabled model catalog entries |
 
@@ -240,13 +254,14 @@ On each request, the gateway resolves the exposed model name and maps it to the 
 2. The gateway resolves exposed to upstream through the model catalog.
 3. If the model is missing or disabled, it returns `400 bad_request` with `invalid_model`.
 4. If resolution succeeds, the authenticated client profile supplies its required pool and the router selects an eligible account only within that pool.
+5. Account eligibility does not include per-account model entitlement; pool membership must keep model access compatible.
 
-## Next Steps
+## Current Limitations
 
-- Batch account import and bulk delete.
-- Pool membership history, export, and richer account-move audit views.
-- Event-driven router config refresh using PostgreSQL notify or Redis pub/sub.
-- Versioned migration table instead of replaying SQL files.
-- Encrypted org-level metrics tokens instead of a global environment fallback.
-- Separate Prometheus metrics endpoints for admin and worker.
-- Risk scoring, automated quarantine, and more granular account-health controls.
+- Account import and deletion operate one account at a time.
+- Pool membership has no history or export view.
+- Router configuration refreshes by polling PostgreSQL every 30 seconds.
+- Per-account model entitlement is not stored or enforced by routing.
+- Organization synchronization exists in the backend but has no Dashboard tab.
+- Admin authentication uses one static bearer token.
+- The repository does not include a Kubernetes deployment package.

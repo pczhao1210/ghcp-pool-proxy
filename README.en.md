@@ -1,144 +1,72 @@
-# GHCP Pool Proxy
+<!-- Runtime release README; links are relative to the staged release root. -->
+# GHCP Pool Proxy VM Release
 
-GHCP Pool Proxy is a gateway and control-plane system for controlled GitHub Copilot account resources.
+This repository is the runtime-only VM release of GHCP Pool Proxy. It deploys prebuilt Docker Hub images and does not include application source or local build tooling.
 
-## Documentation Index
+[中文](README.zh.md) | English
 
-| Description | Link |
-| --- | --- |
-| Architecture | [docs/architecture.en.md](docs/architecture.en.md) |
-| Operations | [docs/operations.en.md](docs/operations.en.md) |
-| Protocol | [docs/protocol.en.md](docs/protocol.en.md) |
-| Routing | [docs/routing.en.md](docs/routing.en.md) |
+## Contents
 
-## Current Capabilities
-
-- The gateway exposes OpenAI Chat Completions, OpenAI Responses API, and Anthropic Messages endpoints.
-- The model catalog is controlled by `model_catalog_json`, including exposed names, upstream model IDs, Copilot `name/vendor` metadata, `upstream_api`, and `enabled` status.
-- GitHub Copilot upstream endpoint selection is mixed: `upstream_api` can override per model; `vendor=OpenAI` / `Azure OpenAI` and `gpt*`/o-series use upstream Responses; Gemini, Anthropic/Claude/Opus/Haiku/Sonnet, Microsoft MAI, Grok/xAI, and other non-OpenAI families use upstream Chat Completions; unknown models fall back to the downstream protocol.
-- Authentication resolves an API key to a client profile with a required concrete pool. The router never falls back to another pool; it applies sticky affinity, account/seat filtering, budgets, concurrency constraints, and the pool's load-balancing strategy within that pool.
-- Each account belongs to at most one pool. Pool membership changes are atomic, reject stale state, and require active user/session bindings to be released before an account can move.
-- Pools support `allocation_mode=shared/user_binding/session_binding`. User-binding pools bind by `user_id`, session-binding pools bind by `session_id`; bindings live in PostgreSQL, are cached in Redis, support pool-level `binding_max_concurrency` and idle TTL, and can be released from expanded pool details in the dashboard.
-- The gateway loads routing configuration on startup and refreshes pool, account membership, and active-binding snapshots from PostgreSQL every 30 seconds.
-- Admin and Worker are separate commands. Admin serves control-plane APIs and the dashboard, while Worker runs probes, metrics sync, credential warnings, and recovery tasks.
-- The dashboard is designed for operations workflows and covers overview, accounts, pools, clients, metrics, events, settings, and the model catalog; organization-related backend capability is retained, but the current UI does not expose it.
+- [Quick Start](#quick-start)
+- [Release Contents](#release-contents)
+- [Configuration](#configuration)
+- [Operations](#operations)
 
 ## Quick Start
 
-```mermaid
-flowchart TD
-  A["deploy/deploy.sh --start"] --> B["pull fixed Docker Hub images"]
-  B --> C["create host ~/ghcp_proxy bind-mount dirs"]
-  C --> D["apply database migrations"]
-  D --> E["Gateway :8000"]
-  D --> F["Admin :8001"]
-  D --> G["Worker"]
-  E --> H["/v1/chat/completions / /v1/responses / /v1/messages"]
-  F --> I["control-plane API"]
-  F --> J["Dashboard /"]
-  G --> K["Probes / Metrics sync / Credential warnings / Recovery tasks"]
-```
-
-Use the deployment script from the release repository [pczhao1210/ghcp-pool-proxy](https://github.com/pczhao1210/ghcp-pool-proxy) to start the stack on a Linux VM. It checks Docker/Docker Compose dependencies, creates host `~/ghcp_proxy` persistent directories and bind-mounts PostgreSQL/Redis data directories into containers, pulls fixed Docker Hub images, starts PostgreSQL/Redis/gateway/admin/worker, and writes hourly logs under `~/ghcp_proxy/logs` with 30-day retention by default. VM deployments use the GitHub Copilot provider by default.
-
-Fetch or update the release package with Git, then start it:
+Run on a supported x86_64 Linux VM:
 
 ```bash
-if [ -d ghcp-pool-proxy/.git ]; then
-  cd ghcp-pool-proxy && git pull --ff-only
-else
-  git clone https://github.com/pczhao1210/ghcp-pool-proxy.git && cd ghcp-pool-proxy
+chmod +x deploy/deploy.sh
+if [ ! -f "$HOME/ghcp_proxy/config.yaml" ]; then
+  deploy/deploy.sh generate-config
 fi
-chmod +x deploy/deploy.sh
-deploy/deploy.sh --start
+# Review ~/ghcp_proxy/config.yaml before starting.
+deploy/deploy.sh start
 ```
 
-Or download only the runtime deployment files with `curl`:
+`generate-config` does not require Docker. It creates `~/ghcp_proxy/config.yaml`, never overwrites an existing file, and `start` refuses to run without one.
 
-```bash
-mkdir -p ghcp-pool-proxy/deploy && cd ghcp-pool-proxy
-curl -fsSL -o deploy/deploy.sh https://raw.githubusercontent.com/pczhao1210/ghcp-pool-proxy/main/deploy/deploy.sh
-curl -fsSL -o deploy/docker-compose.vm.yml https://raw.githubusercontent.com/pczhao1210/ghcp-pool-proxy/main/deploy/docker-compose.vm.yml
-chmod +x deploy/deploy.sh
-deploy/deploy.sh --start
-```
+Open the Dashboard at `http://<server>:8001/` and send model requests to `http://<server>:8000/`.
 
-If you are already inside the release package directory, run:
+## Release Contents
 
-```bash
-deploy/deploy.sh --start
-```
+| Path | Purpose |
+| --- | --- |
+| `deploy/deploy.sh` | VM initialization, config generation, migration, lifecycle, and log commands |
+| `deploy/docker-compose.vm.yml` | PostgreSQL, Redis, Gateway, Admin, and Worker services |
+| `config.example.yaml` | VM startup defaults generated from the same code as `generate-config` |
+| `migrations/` | Current schema baseline, version marker, and numbered migration SQL |
+| `docs/` | Architecture, operations, protocol, and routing documentation |
 
-On first run, the script generates host file `~/ghcp_proxy/.env` containing `ADMIN_TOKEN`, `PROVIDER=copilot`, `CREDENTIAL_MASTER_KEY`, and the database password. Keep this file private, and do not rotate `CREDENTIAL_MASTER_KEY` casually after storing credentials.
-
-### Upgrade After Schema Changes
-
-Schema version 11 introduces deterministic client-to-pool ownership. The deployment scripts apply the smooth migration automatically: existing client profiles are assigned from legacy policy data when possible, otherwise to a deterministic active pool; duplicate account memberships are reduced to one; load-balancing strategy moves onto the pool; then the legacy policy table and Pool Priority are removed. Back up PostgreSQL before upgrading and review Client and Pool assignments afterward.
-
-Use a reset only when you intentionally want a clean installation or the migration reports an unrecoverable schema conflict:
-
-For VM deployments:
-
-```bash
-deploy/deploy.sh --stop
-GHCP_RESET_CONFIRM=reset deploy/deploy.sh --reset
-deploy/deploy.sh --start
-```
-
-For local development:
-
-```bash
-./start.sh --reset
-```
-
-Reset deletes runtime data but preserves the host `.env`. Before resetting, record any required account setup, client API keys, Client-to-Pool assignments, pool settings, and model mappings. After reset, log in Copilot accounts again and reconfigure the dashboard.
-
-Tail hourly file logs:
-
-```bash
-deploy/deploy.sh --logs
-```
-
-Stop VM services while preserving persistent data:
-
-```bash
-deploy/deploy.sh --stop
-```
-
-The deployment script uses fixed images:
+The deployment pulls these images:
 
 - `pczhao1210/ghcp-pool-proxy:gateway-latest`
 - `pczhao1210/ghcp-pool-proxy:admin-latest`
 - `pczhao1210/ghcp-pool-proxy:worker-latest`
 
-## Runtime Entrypoints
+## Configuration
 
-| Entrypoint | Purpose |
-| --- | --- |
-| `cmd/gateway` | Client-facing model protocol gateway. |
-| `cmd/admin` | Control-plane API and dashboard backend. |
-| `cmd/worker` | Health probes, sync jobs, and recovery tasks. |
+- `~/ghcp_proxy/config.yaml`: provider endpoints, timeouts, connection and queue sizing, maintenance fallbacks, and logging.
+- `~/ghcp_proxy/.env`: generated secrets, host paths, ports, and database/Redis addresses.
+- PostgreSQL: Dashboard-managed budgets, feature flags, model catalog, URLs, keys, and retention overrides.
 
-## Access URLs
+Keep `.env` private. Do not casually rotate `CREDENTIAL_MASTER_KEY` after credentials have been stored.
 
-| Service | URL | Notes |
-| --- | --- | --- |
-| Gateway | `http://localhost:8000` | Serves `/v1/chat/completions`, `/v1/responses`, `/v1/messages`, and `/v1/models`. |
-| Admin API | `http://localhost:8001/admin/*` | Requires `Authorization: Bearer <ADMIN_TOKEN>`. |
-| Dashboard | `http://localhost:8001/` | Static assets are served by admin; the page calls Admin API internally. |
-| Metrics | `http://localhost:8000/metrics` | Gateway Prometheus text metrics. |
+## Operations
 
-## GitHub Copilot Onboarding
+```bash
+deploy/deploy.sh logs
+deploy/deploy.sh stop
+deploy/deploy.sh start
+```
 
-- Multiple GitHub Copilot accounts are isolated through separate `accounts`, encrypted credentials, token cache entries, unique pool memberships, and explicit Client-to-Pool assignments.
-- The Accounts page supports `Device Flow`, which authorizes through GitHub's official device flow and stores the resulting Copilot bearer token encrypted under that account.
-- Set `PROVIDER=copilot` for the real Copilot provider. Device Flow defaults to the built-in GitHub OAuth Client ID; set `GITHUB_OAUTH_CLIENT_ID` only when you need an override.
-- See [docs/operations.en.md](docs/operations.en.md) for detailed procedures.
+Release update procedure: update the release files, review the included migrations, back up PostgreSQL, then run `deploy/deploy.sh start`. Existing `.env` and `config.yaml` files under `~/ghcp_proxy` are preserved.
 
-## Metrics Endpoint
+Reset permanently deletes PostgreSQL and Redis runtime data:
 
-Gateway `GET /metrics` exposes internal counters in Prometheus text format.
+```bash
+GHCP_RESET_CONFIRM=reset deploy/deploy.sh reset
+```
 
-After successful requests, the gateway writes a proxy-side usage ledger with input tokens, cached input tokens, cache write tokens, output tokens, reasoning tokens, Copilot `nano_aiu`, estimated AI Credits, and estimated USD. The dashboard Metrics tab shows request volume, AI Credits, USD, cache hit rate, cached input, cache write, output, and reasoning statistics over a selected window.
-
-`/metrics` exposes the same runtime counters, including `ghcp_cache_read_tokens_total`, `ghcp_cache_write_tokens_total`, `ghcp_reasoning_tokens_total`, `ghcp_nano_aiu_total`, `ghcp_ai_credits_micro_total`, `ghcp_estimated_usd_micros_total`, and `ghcp_cache_hit_ratio_permille`. The micro/micros/permille suffixes are integer scaling units so the current text metrics implementation can keep integer output.
+See [Operations](docs/operations.en.md), [Features](FEATURES.en.md), [Protocol](docs/protocol.en.md), and [Routing](docs/routing.en.md) for details.

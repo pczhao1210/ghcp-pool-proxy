@@ -2,6 +2,17 @@
 
 This is the single reference for protocol conversion: how the three client-facing endpoints are parsed, which fields are retained, discarded, or passed through, what the internal `CanonicalRequest` contains, and how the Copilot provider rebuilds a GitHub Copilot upstream Chat Completions or Responses request. Routing, account selection, sticky affinity, user binding, concurrency, and risk rules are documented in [routing.en.md](routing.en.md).
 
+## Contents
+
+- [Data Flow Boundary](#data-flow-boundary)
+- [Upstream API Selection](#upstream-api-selection)
+- [Reasoning Parameter Policy](#reasoning-parameter-policy)
+- [Client Protocol Fields](#client-protocol-fields)
+- [Canonical Layer Fields](#canonical-layer-fields)
+- [GitHub Copilot Upstream Request](#github-copilot-upstream-request)
+- [Response Adaptation](#response-adaptation)
+- [Loss And Distortion Notes](#loss-and-distortion-notes)
+
 ## Data Flow Boundary
 
 The gateway does not forward client requests to Copilot as-is. Each request is parsed into an internal DTO, then rebuilt by the Copilot provider according to the upstream API selected by the model catalog.
@@ -30,6 +41,8 @@ The model catalog maps the client-visible exposed model to an upstream model and
 | 5 | No inference | Leave empty; the provider follows the downstream endpoint: `/v1/responses` uses Responses, other endpoints use Chat Completions |
 
 The current cached Copilot model names include `GPT-5.4`, `GPT-5 mini`, `Gemini 3.1 Pro`, `Claude Opus/Sonnet/Haiku`, and `MAI-Code-1-Flash`, so inference checks the real upstream ID and display name, not only the exposed alias.
+
+Model resolution is gateway-wide. It does not verify whether the account selected by routing can use the model; pools must group accounts with the same model access. See [Candidate Filtering](routing.en.md#candidate-filtering).
 
 ### Claude Code Custom Model Names
 
@@ -92,7 +105,7 @@ Retained and normalized:
 
 | Request field | Canonical result | Notes |
 | --- | --- | --- |
-| `model` | `Model` | Later resolved to the upstream model |
+| `model` | `Model` | Resolved to the upstream model before routing |
 | `stream` | `Stream` | Controls downstream SSE |
 | `messages` | `Messages` | Preserves `role`, `content`, `tool_calls`, and `tool_call_id` |
 | `tools` | `Tools` | OpenAI `function` tools become canonical tools |
@@ -122,7 +135,7 @@ Retained and normalized:
 
 | Request field | Canonical result | Notes |
 | --- | --- | --- |
-| `model` | `Model` | Later resolved to the upstream model |
+| `model` | `Model` | Resolved to the upstream model before routing |
 | `stream` | `Stream` | Controls downstream Responses SSE |
 | `instructions` | `System` | Stringified as system instructions |
 | `input` string | `Messages` | Converts to one user message |
@@ -146,7 +159,7 @@ truncation, include, store, service_tier
 
 For Copilot upstream, `include` drops the unsupported `reasoning.encrypted_content` value; if that leaves the list empty, `include` is omitted.
 
-Tools from OpenAI Responses requests are first retained in the canonical tool record for diagnostics and future adapters. Before calling Copilot, the provider uses a cc-switch-style tools adapter instead of raw-passthrough for non-function tools: `function` tools are kept directly; `custom` tools are wrapped as function tools with a fixed string `input` parameter and the original definition embedded in the description; `tool_search` is wrapped as a proxy function named `tool_search`; and `namespace` expands function children into flattened `<namespace>___<tool>` function names. `tool_choice` is mapped to the converted function name as well, and omitted when it cannot target a valid upstream tool. When upstream returns a tool call, the adapter restores the downstream Responses semantics: `custom_tool_call` uses `response.custom_tool_call_input.*` events, `tool_search` is emitted as a `tool_search_call` item, and namespace child tools restore the original tool name with a `namespace` field on the `function_call` item. The Copilot upstream currently rejects OpenAI Responses remote MCP `type: "mcp"`, so remote MCP tools are still filtered until a gateway-managed MCP discovery/execution adapter is implemented. If no supported tools remain after adaptation/filtering, `tool_choice` and `parallel_tool_calls` are omitted. Use `scripts/probe_stream_mcp.py` to compare the SSE event shape for an MCP request against a no-tool baseline.
+Tools from OpenAI Responses requests are retained in the canonical tool record for diagnostics and conversion metadata. Before calling Copilot, the provider uses a cc-switch-style tools adapter instead of raw-passthrough for non-function tools: `function` tools are kept directly; `custom` tools are wrapped as function tools with a fixed string `input` parameter and the original definition embedded in the description; `tool_search` is wrapped as a proxy function named `tool_search`; and `namespace` expands function children into flattened `<namespace>___<tool>` function names. `tool_choice` is mapped to the converted function name as well, and omitted when it cannot target a valid upstream tool. When upstream returns a tool call, the adapter restores the downstream Responses semantics: `custom_tool_call` uses `response.custom_tool_call_input.*` events, `tool_search` is emitted as a `tool_search_call` item, and namespace child tools restore the original tool name with a `namespace` field on the `function_call` item. OpenAI Responses remote MCP tools with `type: "mcp"` are unsupported and filtered because the gateway has no MCP discovery/execution adapter. If no supported tools remain after adaptation/filtering, `tool_choice` and `parallel_tool_calls` are omitted. Use `scripts/probe_stream_mcp.py` to compare the SSE event shape for an MCP request against a no-tool baseline.
 
 Conversions: direct top-level `input_text`, `input_image`, `text`, and `image_url` input items are grouped into a user message; `function_call` becomes an assistant tool call; `function_call_output` becomes a tool message; `input_text`, `output_text`, and `text` normalize to canonical text parts; `input_image` and `image_url` normalize to canonical `image_url`.
 
@@ -160,7 +173,7 @@ Retained and normalized:
 
 | Request field | Canonical result | Notes |
 | --- | --- | --- |
-| `model` | `Model` | Later resolved to the upstream model |
+| `model` | `Model` | Resolved to the upstream model before routing |
 | `stream` | `Stream` | Controls downstream Anthropic SSE |
 | `system` string / array | `System` | Text blocks are joined with newlines; other blocks are not retained |
 | `messages` | `Messages` / `System` | `text`, `image`, `tool_use`, and `tool_result` are normalized; `role=system` messages are folded into `System` |

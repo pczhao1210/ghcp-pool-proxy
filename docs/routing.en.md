@@ -2,6 +2,20 @@
 
 This is the primary gateway routing document. It covers fixed client-to-pool assignment, pool allocation modes, sticky affinity, load balancing, concurrency, risk score, and sticky metrics. Protocol parsing, conversion, discarded fields, and upstream passthrough parameters are documented in [protocol.en.md](protocol.en.md).
 
+## Contents
+
+- [Execution Order](#execution-order)
+- [Fixed Pool Ownership](#fixed-pool-ownership)
+- [Pool Allocation Modes](#pool-allocation-modes)
+- [Candidate Filtering](#candidate-filtering)
+- [Load Balancing](#load-balancing)
+- [Sticky Affinity](#sticky-affinity)
+- [Sticky Overflow And Concurrency](#sticky-overflow-and-concurrency)
+- [Risk Score And Account State](#risk-score-and-account-state)
+- [Budgets And Limits](#budgets-and-limits)
+- [Metrics](#metrics)
+- [Tuning Guidance](#tuning-guidance)
+
 ## Execution Order
 
 ```mermaid
@@ -76,8 +90,11 @@ All ordinary and required-account selections must pass these filters.
 | Reserved account | Active binding accounts are unavailable to shared pools; binding requests may use only their own required account |
 | Process concurrency | `current_concurrency < effective_max_concurrency`; binding pools prefer pool `binding_max_concurrency`, otherwise account `max_concurrency`; non-positive values are treated as 1 |
 | Exclusion set | Sticky overflow and concurrency rebinding may temporarily exclude the old account |
+| Per-account model access | Not checked; the resolved model does not filter the account candidate set |
 
 An empty candidate set enters gateway error mapping; see [operations.en.md](operations.en.md) for the client-facing status and internal routing reason mapping.
+
+The model catalog controls the models exposed by the gateway, but it does not store or enforce model entitlements for individual accounts. Accounts in one pool therefore need the same usable upstream model set. If a pool mixes accounts with different model access, the router may select an account that cannot serve the requested model; the provider call fails and the gateway does not retry that request on another account. Separate accounts into different pools when their model access differs, and assign each client profile to a compatible pool. An upstream `403` is classified as `permission_denied` and may affect the selected account's risk state.
 
 ## Load Balancing
 
@@ -167,7 +184,7 @@ The current state machine supports `active -> degraded` and `degraded -> quarant
 
 Before routing, the gateway checks global RPM, daily tokens, and daily AI credits. After selecting an account, it checks account-level RPM, tokens, and AI credits. Budget failures return rate-limit or budget errors and do not try another account.
 
-Daily token and AI Credits budgets are disabled by default. Configure them from the Dashboard Config page or set `BUDGET_MAX_DAILY_TOKENS_PER_ACCOUNT`, `BUDGET_MAX_DAILY_TOKENS_GLOBAL`, `BUDGET_MAX_DAILY_NANO_AIU_PER_ACCOUNT`, or `BUDGET_MAX_DAILY_NANO_AIU_GLOBAL` to a value greater than `0` to enable those caps. RPM protection remains enabled by default through `BUDGET_MAX_RPM_PER_ACCOUNT=60` and `BUDGET_MAX_RPM_GLOBAL=600`; set either value to `0` to disable that RPM check. Gateway refreshes Dashboard-saved budget settings periodically, while environment values are startup defaults.
+Daily token and AI Credits budgets are disabled by default. Configure them from the Dashboard Config page or set `BUDGET_MAX_DAILY_TOKENS_PER_ACCOUNT`, `BUDGET_MAX_DAILY_TOKENS_GLOBAL`, `BUDGET_MAX_DAILY_NANO_AIU_PER_ACCOUNT`, or `BUDGET_MAX_DAILY_NANO_AIU_GLOBAL` to a value greater than `0` to enable those caps. RPM protection remains enabled by default through `BUDGET_MAX_RPM_PER_ACCOUNT=60` and `BUDGET_MAX_RPM_GLOBAL=6000`; set either value to `0` to disable that RPM check. Gateway refreshes Dashboard-saved budget settings periodically, while environment values are startup defaults.
 
 The router itself does not read budget ledgers; it handles the assigned pool, account status, seats, reservations, and concurrency.
 

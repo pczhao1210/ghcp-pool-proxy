@@ -2,6 +2,20 @@
 
 本文是 Gateway 路由的唯一主文档，覆盖固定 Client-Pool 归属、pool 分配模式、sticky、负载均衡、并发、risk score 和 sticky 指标。协议字段如何解析、转换、丢弃或透传见 [protocol.zh.md](protocol.zh.md)。
 
+## 目录
+
+- [执行顺序](#执行顺序)
+- [固定 Pool 归属](#固定-pool-归属)
+- [Pool 分配模式](#pool-分配模式)
+- [候选账号过滤](#候选账号过滤)
+- [负载均衡策略](#负载均衡策略)
+- [Sticky 亲和](#sticky-亲和)
+- [Sticky Overflow 与并发](#sticky-overflow-与并发)
+- [Risk Score 与账号状态](#risk-score-与账号状态)
+- [预算与限流](#预算与限流)
+- [指标](#指标)
+- [调优建议](#调优建议)
+
 ## 执行顺序
 
 ```mermaid
@@ -87,8 +101,11 @@ session_binding: client_profile_id + pool_id + lower(trim(session_id))
 | Reserved 账号 | active binding 占用的账号不可被 shared pool 选择；绑定请求只允许自己的 required account |
 | 进程内并发 | `current_concurrency < effective_max_concurrency`；绑定池优先使用 pool 的 `binding_max_concurrency`，否则使用账号 `max_concurrency`；非正数按 1 处理 |
 | 排除列表 | sticky overflow、并发 rebind 时可临时排除旧账号 |
+| 账号级模型权限 | 不检查；解析后的 model 不参与账号候选集过滤 |
 
 候选集为空时会进入 Gateway 错误映射；对外状态码与内部路由原因的对应关系见 [operations.zh.md](operations.zh.md)。
+
+模型目录控制 Gateway 对外暴露的模型，但不保存或校验单个账号的模型权限。同一 pool 中的账号需要具备相同的可用上游模型集合。如果把模型权限不同的账号放入同一 pool，Router 可能选中不支持请求模型的账号；Provider 调用会失败，Gateway 不会把该请求切换到另一个账号重试。模型权限不同时应拆分到不同 pool，并把 client profile 分配到兼容的 pool。上游 `403` 会被分类为 `permission_denied`，可能影响被选账号的 risk 状态。
 
 ## 负载均衡策略
 
@@ -180,7 +197,7 @@ Risk score 是账号级健康分，数值越高风险越高。候选过滤只接
 
 Gateway 在路由前检查全局 RPM、全局 daily tokens 和全局 daily AI credits；选中账号后再检查账号级 RPM、tokens 和 AI credits。预算不通过时请求返回 429 或预算错误，不会继续尝试其它账号。
 
-Daily token 和 AI Credits 预算默认关闭。可在 Dashboard Config 页配置，或将 `BUDGET_MAX_DAILY_TOKENS_PER_ACCOUNT`、`BUDGET_MAX_DAILY_TOKENS_GLOBAL`、`BUDGET_MAX_DAILY_NANO_AIU_PER_ACCOUNT`、`BUDGET_MAX_DAILY_NANO_AIU_GLOBAL` 设置为大于 `0` 的值启用对应上限。RPM 保护默认开启：`BUDGET_MAX_RPM_PER_ACCOUNT=60`、`BUDGET_MAX_RPM_GLOBAL=600`；任一值设为 `0` 可关闭对应 RPM 检查。Gateway 会周期性刷新 Dashboard 保存的预算设置，环境变量只是启动默认值。
+Daily token 和 AI Credits 预算默认关闭。可在 Dashboard Config 页配置，或将 `BUDGET_MAX_DAILY_TOKENS_PER_ACCOUNT`、`BUDGET_MAX_DAILY_TOKENS_GLOBAL`、`BUDGET_MAX_DAILY_NANO_AIU_PER_ACCOUNT`、`BUDGET_MAX_DAILY_NANO_AIU_GLOBAL` 设置为大于 `0` 的值启用对应上限。RPM 保护默认开启：`BUDGET_MAX_RPM_PER_ACCOUNT=60`、`BUDGET_MAX_RPM_GLOBAL=6000`；任一值设为 `0` 可关闭对应 RPM 检查。Gateway 会周期性刷新 Dashboard 保存的预算设置，环境变量只是启动默认值。
 
 Router 本身不读取预算账本；它只处理指定 pool、账号状态、seat、reserved 和并发。
 

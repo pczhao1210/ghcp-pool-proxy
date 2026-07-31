@@ -2,6 +2,18 @@
 
 GHCP Pool Proxy 的核心目标是把下游模型协议入口和上游 Copilot 账号资源解耦。客户端只看到 OpenAI / Anthropic 兼容接口，内部通过 canonical DTO、router、provider adapter 和 control plane 协同完成账号选择、健康管理、预算控制和可观测治理。
 
+## 目录
+
+- [架构目标](#架构目标)
+- [总体结构](#总体结构)
+- [请求路径](#请求路径)
+- [配置刷新与恢复链路](#配置刷新与恢复链路)
+- [模型目录链路](#模型目录链路)
+- [Copilot Metrics 同步链路](#copilot-metrics-同步链路)
+- [分层职责](#分层职责)
+- [存储分工](#存储分工)
+- [关键边界](#关键边界)
+
 ## 架构目标
 
 - 对外暴露模型协议，不暴露通用 GitHub CLI 或 SDK 操作 API。
@@ -128,6 +140,7 @@ flowchart LR
 - 支持 sticky 亲和、重绑定和 overflow。
 - 路由时剔除非 active pool、非 active 账号、不可用 org/enterprise seat 和超并发账号。
 - 候选账号按风险、当前并发、pool membership weight 和账号 priority 排序。
+- 不按账号级模型权限过滤；模型权限不同的账号需要拆分到不同 pool。
 
 ### Copilot Provider 适配层
 
@@ -151,10 +164,10 @@ flowchart TD
   Hot --> Affinity["Sticky affinity map"]
   Hot --> RateLimit["短周期限流计数"]
   Cold --> Accounts["账号与凭据元数据"]
-  Cold --> Policies["池、策略、预算、审计"]
+  Cold --> Policies["池、Client、预算、审计"]
 ```
 
-- PostgreSQL 保存账号、凭据元数据、池、策略、预算、审计和恢复任务。
+- PostgreSQL 保存账号、凭据元数据、池、Client、预算、审计和恢复任务。
 - PostgreSQL 还保存 `system_settings`、模型目录配置、GitHub org 信息、metrics snapshots 和 proxy usage ledger。
 - Redis 保存并发计数、短 TTL 亲和关系、限流计数和分布式锁。
 - 凭据明文不入库，敏感内容必须经过加密和脱敏流程。
@@ -164,4 +177,5 @@ flowchart TD
 - 数据面不直接执行通用 GitHub 操作。
 - 路由决策使用代理侧实时状态，不依赖 Copilot Metrics 做热路径判断。
 - sticky session 是软约束，健康、预算、风险和 seat 有效性始终优先。
-- 单机部署和集群部署共享同一套状态边界设计，便于平滑扩展。
+- 当前交付形态是单机 Docker Compose，仓库不提供 Kubernetes 部署清单。
+- 模型目录是全局配置，不校验单个账号的模型权限。

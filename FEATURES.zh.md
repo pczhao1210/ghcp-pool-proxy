@@ -1,6 +1,17 @@
 # 功能与使用指南
 
-本文面向管理员和运维人员，说明账号管理、模型目录、Dashboard、Admin API、环境变量、安全边界和后续增强项。
+本文面向管理员和运维人员，说明已实现的账号管理、模型目录、Dashboard、Admin API、配置、安全边界和 Gateway 集成行为。
+
+## 目录
+
+- [账号管理](#1-账号管理)
+- [模型目录配置](#2-模型目录配置)
+- [Dashboard 概览](#3-dashboard-概览)
+- [Admin API 端点](#4-admin-api-端点)
+- [环境变量](#5-环境变量)
+- [安全说明](#6-安全说明)
+- [Gateway 集成](#7-gateway-集成)
+- [当前限制](#8-当前限制)
 
 ## 1. 账号管理
 
@@ -26,7 +37,7 @@ flowchart TD
 | `Account Name` | 账号显示名 |
 | `Account Source` | `personal`、`org_business_seat` 或 `enterprise_seat` |
 | `GitHub Login` | 关联的 GitHub 用户名 |
-| `Max Concurrency` | 最大并发请求数，默认 1 |
+| `Max Concurrency` | 最大并发请求数，默认 6 |
 
 账号创建后需要加入一个 pool，才会进入可路由候选集；移动到其它 pool 时会原子替换原 membership。
 
@@ -53,6 +64,8 @@ Device Flow 步骤
 每个 GitHub Copilot 账号都有独立 account row、加密凭据 payload、token cache entry、pool membership 和 sticky routing target。Gateway 先选账号，再按 `account_id` 加载凭据；不会共享全局 Copilot token。
 
 建议使用独立 pool，并把每个 client profile 分配到一个具体 pool，以隔离租户、团队、环境或风险等级。每个账号最多属于一个 pool。
+
+Pool 隔离还需要体现模型权限。Router 不会把请求模型与账号级 entitlement 对比，因此同一 pool 中的账号需要具备相同的可用上游模型集合。权限不同时应拆分 pool，并把 Client 分配到兼容的 pool。
 
 ### 删除与恢复
 
@@ -92,6 +105,8 @@ flowchart LR
 
 如果没有配置 `model_catalog_json`，系统会暴露默认模型；如果配置为空数组，则不暴露任何模型，这是有意行为。
 
+模型目录是 Gateway 全局配置，不代表每个账号都能访问其中每个模型。选中不兼容账号时，Provider 调用会失败，Gateway 不会换另一个账号重试。上游 `403` 会分类为 `permission_denied`，并可能影响该账号的 risk 状态。
+
 ## 3. Dashboard 概览
 
 | 页面 | 说明 |
@@ -102,7 +117,6 @@ flowchart LR
 | Clients | 查看 client profile 和默认策略 |
 | Metrics | 按时间窗口查看请求、token、AI Credits、USD 和 cache 命中率统计 |
 | Events | 查看 admin 操作审计日志 |
-| GitHub Orgs | 查看组织 seat 映射和 Copilot plan 状态 |
 | Settings | 管理系统配置和 feature flags |
 | Models | 查看和配置 exposed/upstream/upstream_api/enabled 模型目录 |
 
@@ -240,13 +254,14 @@ Gateway 在每次请求中解析 exposed model，并在发送上游 provider 前
 2. Gateway 调用模型目录解析 exposed 到 upstream。
 3. 找不到或 disabled 时返回 `400 bad_request` 和 `invalid_model`。
 4. 解析成功后，由认证 client profile 提供必填 pool，Router 只在该 pool 内选择可用账号并调用 provider。
+5. 候选过滤不包含账号级模型权限，pool membership 必须保证模型权限兼容。
 
-## 8. 后续增强
+## 8. 当前限制
 
-- 批量账号导入与批量删除。
-- Pool membership 历史、导出和更完整的账号移动审计视图。
-- 基于 PostgreSQL notify 或 Redis pub/sub 的事件驱动 router config refresh。
-- 迁移版本表，替代重复 replay SQL 文件。
-- org-level metrics token 加密存储，替代全局环境变量 fallback。
-- admin/worker 独立 Prometheus metrics endpoint。
-- 风险评分、自动 quarantine 和更细粒度的账号健康控制。
+- 账号导入与删除按单账号执行。
+- Pool membership 没有历史或导出视图。
+- Router 配置每 30 秒轮询 PostgreSQL 刷新。
+- 路由不保存或校验账号级模型权限。
+- 组织同步能力存在于后端，但 Dashboard 没有对应页面。
+- Admin 使用一个静态 bearer token 认证。
+- 仓库不包含 Kubernetes 部署包。

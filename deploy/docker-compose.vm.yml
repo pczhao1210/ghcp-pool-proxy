@@ -41,32 +41,25 @@ services:
   gateway:
     image: pczhao1210/ghcp-pool-proxy:gateway-latest
     restart: unless-stopped
+    stop_grace_period: 60s
     ports:
       - "${GATEWAY_PORT:-8000}:8000"
     environment:
+      CONFIG_FILE: "/etc/ghcp/config.yaml"
       GATEWAY_ADDR: ":8000"
-      GATEWAY_READ_TIMEOUT: "${GATEWAY_READ_TIMEOUT:-30s}"
-      GATEWAY_READ_HEADER_TIMEOUT: "${GATEWAY_READ_HEADER_TIMEOUT:-5s}"
-      GATEWAY_WRITE_TIMEOUT: "${GATEWAY_WRITE_TIMEOUT:-0s}"
-      GATEWAY_IDLE_TIMEOUT: "${GATEWAY_IDLE_TIMEOUT:-120s}"
       ADMIN_TOKEN: "${ADMIN_TOKEN:?ADMIN_TOKEN is required}"
       POSTGRES_DSN: "postgres://${POSTGRES_USER:-ghcp}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-ghcp}?sslmode=disable"
       REDIS_ADDR: "redis:6379"
-      PROVIDER: "${PROVIDER:-copilot}"
-      LOG_LEVEL: "${LOG_LEVEL:-info}"
-      LOG_FORMAT: "${LOG_FORMAT:-json}"
       BUDGET_MAX_RPM_PER_ACCOUNT: "${BUDGET_MAX_RPM_PER_ACCOUNT:-60}"
-      BUDGET_MAX_RPM_GLOBAL: "${BUDGET_MAX_RPM_GLOBAL:-600}"
+      BUDGET_MAX_RPM_GLOBAL: "${BUDGET_MAX_RPM_GLOBAL:-6000}"
       BUDGET_MAX_DAILY_TOKENS_PER_ACCOUNT: "${BUDGET_MAX_DAILY_TOKENS_PER_ACCOUNT:-0}"
       BUDGET_MAX_DAILY_TOKENS_GLOBAL: "${BUDGET_MAX_DAILY_TOKENS_GLOBAL:-0}"
       BUDGET_MAX_DAILY_NANO_AIU_PER_ACCOUNT: "${BUDGET_MAX_DAILY_NANO_AIU_PER_ACCOUNT:-0}"
       BUDGET_MAX_DAILY_NANO_AIU_GLOBAL: "${BUDGET_MAX_DAILY_NANO_AIU_GLOBAL:-0}"
       CREDENTIAL_KEY_VERSION: "${CREDENTIAL_KEY_VERSION:-vm}"
       CREDENTIAL_MASTER_KEY: "${CREDENTIAL_MASTER_KEY:?CREDENTIAL_MASTER_KEY is required}"
-      GITHUB_API_BASE_URL: "${GITHUB_API_BASE_URL:-https://api.github.com}"
-      COPILOT_BASE_URL: "${COPILOT_BASE_URL:-}"
-      COPILOT_TIMEOUT: "${COPILOT_TIMEOUT:-120s}"
-      COPILOT_TOKEN_URL: "${COPILOT_TOKEN_URL:-}"
+    volumes:
+      - "${APP_CONFIG_FILE:?APP_CONFIG_FILE is required}:/etc/ghcp/config.yaml:ro"
     depends_on:
       postgres:
         condition: service_healthy
@@ -82,19 +75,24 @@ services:
     ports:
       - "${ADMIN_PORT:-8001}:8001"
     environment:
+      CONFIG_FILE: "/etc/ghcp/config.yaml"
       ADMIN_ADDR: ":8001"
+      GATEWAY_ADDR: ":8000"
+      WORKER_METRICS_ADDR: ":8002"
       ADMIN_TOKEN: "${ADMIN_TOKEN:?ADMIN_TOKEN is required}"
       POSTGRES_DSN: "postgres://${POSTGRES_USER:-ghcp}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-ghcp}?sslmode=disable"
       REDIS_ADDR: "redis:6379"
-      LOG_LEVEL: "${LOG_LEVEL:-info}"
-      LOG_FORMAT: "${LOG_FORMAT:-json}"
+      BUDGET_MAX_RPM_PER_ACCOUNT: "${BUDGET_MAX_RPM_PER_ACCOUNT:-60}"
+      BUDGET_MAX_RPM_GLOBAL: "${BUDGET_MAX_RPM_GLOBAL:-6000}"
+      BUDGET_MAX_DAILY_TOKENS_PER_ACCOUNT: "${BUDGET_MAX_DAILY_TOKENS_PER_ACCOUNT:-0}"
+      BUDGET_MAX_DAILY_TOKENS_GLOBAL: "${BUDGET_MAX_DAILY_TOKENS_GLOBAL:-0}"
+      BUDGET_MAX_DAILY_NANO_AIU_PER_ACCOUNT: "${BUDGET_MAX_DAILY_NANO_AIU_PER_ACCOUNT:-0}"
+      BUDGET_MAX_DAILY_NANO_AIU_GLOBAL: "${BUDGET_MAX_DAILY_NANO_AIU_GLOBAL:-0}"
       CREDENTIAL_KEY_VERSION: "${CREDENTIAL_KEY_VERSION:-vm}"
       CREDENTIAL_MASTER_KEY: "${CREDENTIAL_MASTER_KEY:?CREDENTIAL_MASTER_KEY is required}"
-      GITHUB_OAUTH_CLIENT_ID: "${GITHUB_OAUTH_CLIENT_ID:-Iv1.b507a08c87ecfe98}"
-      GITHUB_OAUTH_SCOPES: "${GITHUB_OAUTH_SCOPES:-read:user}"
-      GITHUB_LOGIN_BASE_URL: "${GITHUB_LOGIN_BASE_URL:-https://github.com}"
-      GITHUB_API_BASE_URL: "${GITHUB_API_BASE_URL:-https://api.github.com}"
-      COPILOT_TOKEN_URL: "${COPILOT_TOKEN_URL:-}"
+      GITHUB_TOKEN: "${GITHUB_TOKEN:-}"
+    volumes:
+      - "${APP_CONFIG_FILE:?APP_CONFIG_FILE is required}:/etc/ghcp/config.yaml:ro"
     depends_on:
       postgres:
         condition: service_healthy
@@ -107,25 +105,30 @@ services:
   worker:
     image: pczhao1210/ghcp-pool-proxy:worker-latest
     restart: unless-stopped
+    ports:
+      - "127.0.0.1:${WORKER_METRICS_PORT:-8002}:8002"
     environment:
+      CONFIG_FILE: "/etc/ghcp/config.yaml"
       ADMIN_TOKEN: "${ADMIN_TOKEN:?ADMIN_TOKEN is required}"
       POSTGRES_DSN: "postgres://${POSTGRES_USER:-ghcp}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-ghcp}?sslmode=disable"
       REDIS_ADDR: "redis:6379"
-      LOG_LEVEL: "${LOG_LEVEL:-info}"
-      LOG_FORMAT: "${LOG_FORMAT:-json}"
+      WORKER_METRICS_ADDR: ":8002"
       CREDENTIAL_KEY_VERSION: "${CREDENTIAL_KEY_VERSION:-vm}"
       CREDENTIAL_MASTER_KEY: "${CREDENTIAL_MASTER_KEY:?CREDENTIAL_MASTER_KEY is required}"
-      GITHUB_OAUTH_CLIENT_ID: "${GITHUB_OAUTH_CLIENT_ID:-Iv1.b507a08c87ecfe98}"
-      GITHUB_OAUTH_SCOPES: "${GITHUB_OAUTH_SCOPES:-read:user}"
-      GITHUB_LOGIN_BASE_URL: "${GITHUB_LOGIN_BASE_URL:-https://github.com}"
-      GITHUB_API_BASE_URL: "${GITHUB_API_BASE_URL:-https://api.github.com}"
-      COPILOT_TOKEN_URL: "${COPILOT_TOKEN_URL:-}"
       GITHUB_TOKEN: "${GITHUB_TOKEN:-}"
+    volumes:
+      - "${APP_CONFIG_FILE:?APP_CONFIG_FILE is required}:/etc/ghcp/config.yaml:ro"
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8002/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     networks:
       - ghcp-proxy
     logging: *default-logging

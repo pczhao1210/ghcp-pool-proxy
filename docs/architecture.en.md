@@ -2,6 +2,18 @@
 
 GHCP Pool Proxy decouples downstream model protocol endpoints from upstream Copilot account resources. Clients see OpenAI / Anthropic-compatible APIs, while the system internally coordinates canonical DTOs, router, provider adapter, and control plane for account selection, health management, budget control, and observability.
 
+## Contents
+
+- [Architecture Goals](#architecture-goals)
+- [Overall Structure](#overall-structure)
+- [Request Path](#request-path)
+- [Config Refresh and Recovery Flow](#config-refresh-and-recovery-flow)
+- [Model Catalog Flow](#model-catalog-flow)
+- [Copilot Metrics Sync Flow](#copilot-metrics-sync-flow)
+- [Layer Responsibilities](#layer-responsibilities)
+- [Storage Boundaries](#storage-boundaries)
+- [Key Boundaries](#key-boundaries)
+
 ## Architecture Goals
 
 - Expose model protocols externally, not a general GitHub CLI or SDK operation API.
@@ -128,6 +140,7 @@ flowchart LR
 - Supports sticky affinity, rebind, and overflow.
 - Filters out inactive pools, inactive accounts, unavailable org/enterprise seats, and over-concurrency accounts.
 - Sorts candidate accounts by risk, current concurrency, pool membership weight, and account priority.
+- Does not filter by per-account model entitlement; accounts with different model access require separate pools.
 
 ### Copilot Provider Adapter
 
@@ -151,10 +164,10 @@ flowchart TD
   Hot --> Affinity["Sticky affinity map"]
   Hot --> RateLimit["short-window rate counters"]
   Cold --> Accounts["account and credential metadata"]
-  Cold --> Policies["pools, policies, budgets, audit"]
+  Cold --> Policies["pools, client profiles, budgets, audit"]
 ```
 
-- PostgreSQL stores accounts, credential metadata, pools, policies, budgets, audit events, and recovery tasks.
+- PostgreSQL stores accounts, credential metadata, pools, client profiles, budgets, audit events, and recovery tasks.
 - PostgreSQL also stores `system_settings`, model catalog configuration, GitHub org data, metrics snapshots, and proxy usage ledger entries.
 - Redis stores concurrency counters, short-TTL affinity mappings, rate-limit counters, and distributed locks.
 - Plaintext credentials are never stored; sensitive content must be encrypted and masked.
@@ -164,4 +177,5 @@ flowchart TD
 - The data plane does not directly execute general GitHub operations.
 - Routing decisions use proxy-side real-time state and do not depend on Copilot Metrics in the hot path.
 - Sticky session is a soft constraint; health, budget, risk, and seat validity always take priority.
-- Single-machine and clustered deployments share the same state-boundary design so the system can scale smoothly.
+- The packaged runtime is single-machine Docker Compose; the repository does not ship Kubernetes deployment manifests.
+- The model catalog is global and does not enforce account-specific model access.

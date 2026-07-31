@@ -2,6 +2,17 @@
 
 本文是所有协议转换相关逻辑的唯一主文档：客户端三种入口协议如何解析，哪些字段保留、丢弃或透传，内部 `CanonicalRequest` 由哪些字段组成，以及最终发往 GitHub Copilot 时如何重建为上游 Chat Completions 或 Responses 请求。路由、账号选择、sticky、user-binding、并发和风控规则见 [routing.zh.md](routing.zh.md)。
 
+## 目录
+
+- [数据流边界](#数据流边界)
+- [上游 API 选择](#上游-api-选择)
+- [推理参数策略](#推理参数策略)
+- [入口协议字段](#入口协议字段)
+- [归一化层字段](#归一化层字段)
+- [发往 GitHub Copilot](#发往-github-copilot)
+- [响应适配](#响应适配)
+- [丢失与失真注意事项](#丢失与失真注意事项)
+
 ## 数据流边界
 
 Gateway 不把客户端请求原样转发给 Copilot。所有请求都会先进入协议 parser，归一化为内部 DTO，再由 Copilot provider 根据模型目录选择的上游协议重新组装。
@@ -30,6 +41,8 @@ flowchart LR
 | 5 | 未能推断 | 保持空值，由 provider 按下游入口决定：`/v1/responses` 走 Responses，其它入口走 Chat Completions |
 
 当前缓存的 Copilot 模型名形态包括 `GPT-5.4`、`GPT-5 mini`、`Gemini 3.1 Pro`、`Claude Opus/Sonnet/Haiku` 和 `MAI-Code-1-Flash`，所以推断会同时看真实上游 ID 和展示名，而不是只看 exposed alias。
+
+模型解析是 Gateway 全局行为，不校验 Router 选中账号是否具备该模型权限；pool 必须使用模型权限相同的账号。详见[候选账号过滤](routing.zh.md#候选账号过滤)。
 
 ### Claude Code 自定义模型名
 
@@ -146,7 +159,7 @@ truncation, include, store, service_tier
 
 对于 Copilot 上游，`include` 会丢弃不支持的 `reasoning.encrypted_content`；如果列表因此为空，则省略 `include`。
 
-OpenAI Responses 请求中的工具会先保留在 canonical tool 记录中，便于诊断和后续适配。发往 Copilot 上游时，Provider 使用 cc-switch 风格的 tools adapter，而不是把非 function tool 原样透传：`function` 直接保留；`custom` 包装成带固定 `input` 字符串参数的 function tool，并把原始定义写入 description；`tool_search` 包装成名为 `tool_search` 的 proxy function；`namespace` 会展开其中的 function 子工具，并把名称扁平化为 `<namespace>___<tool>`。`tool_choice` 会同步映射到转换后的 function 名称，无法映射到有效上游工具时会被省略。上游返回 tool call 后，adapter 会把转换后的 function 名称还原为 Responses 下游语义：`custom_tool_call` 使用 `response.custom_tool_call_input.*` 事件，`tool_search` 输出 `tool_search_call` item，namespace 子工具会恢复原始 tool 名称并在 `function_call` item 上带回 `namespace` 字段。当前 Copilot 上游会拒绝 OpenAI Responses remote MCP `type: "mcp"`，所以 remote MCP tool 仍会过滤，直到实现 gateway-managed MCP discovery/执行适配；如果适配/过滤后没有任何支持的 tool，会同时省略 `tool_choice` 和 `parallel_tool_calls`。可用 `scripts/probe_stream_mcp.py` 对比 MCP 请求和无工具 baseline 的 SSE 事件形状。
+OpenAI Responses 请求中的工具会保留在 canonical tool 记录中，用于诊断和转换元数据。发往 Copilot 上游时，Provider 使用 cc-switch 风格的 tools adapter，而不是把非 function tool 原样透传：`function` 直接保留；`custom` 包装成带固定 `input` 字符串参数的 function tool，并把原始定义写入 description；`tool_search` 包装成名为 `tool_search` 的 proxy function；`namespace` 会展开其中的 function 子工具，并把名称扁平化为 `<namespace>___<tool>`。`tool_choice` 会同步映射到转换后的 function 名称，无法映射到有效上游工具时会被省略。上游返回 tool call 后，adapter 会把转换后的 function 名称还原为 Responses 下游语义：`custom_tool_call` 使用 `response.custom_tool_call_input.*` 事件，`tool_search` 输出 `tool_search_call` item，namespace 子工具会恢复原始 tool 名称并在 `function_call` item 上带回 `namespace` 字段。OpenAI Responses remote MCP tool（`type: "mcp"`）不受支持，会被过滤，因为 Gateway 没有 MCP discovery/执行 adapter；如果适配/过滤后没有任何支持的 tool，会同时省略 `tool_choice` 和 `parallel_tool_calls`。可用 `scripts/probe_stream_mcp.py` 对比 MCP 请求和无工具 baseline 的 SSE 事件形状。
 
 转换：顶层直接出现的 `input_text`、`input_image`、`text`、`image_url` input item 会合并成一条 user message；`function_call` 转为 assistant tool call；`function_call_output` 转为 tool message；`input_text`、`output_text`、`text` 统一为 canonical text part；`input_image`、`image_url` 统一为 canonical `image_url`。
 

@@ -1,145 +1,72 @@
-# GHCP Pool Proxy
+<!-- Runtime release README；链接相对于发布包根目录。 -->
+# GHCP Pool Proxy VM 运行包
 
-GHCP Pool Proxy 是一个面向受控 GitHub Copilot 账号资源的网关与控制平面系统。
+这是 GHCP Pool Proxy 的纯运行期 VM 发布仓库，使用预构建 Docker Hub 镜像，不包含应用源码和本地构建工具。
 
-## 文档入口
+中文 | [English](README.en.md)
 
-| 说明 | 链接 |
-| --- | --- |
-| Architecture | [docs/architecture.zh.md](docs/architecture.zh.md) |
-| Operations | [docs/operations.zh.md](docs/operations.zh.md) |
-| Protocol | [docs/protocol.zh.md](docs/protocol.zh.md) |
-| Routing | [docs/routing.zh.md](docs/routing.zh.md) |
+## 目录
 
-## 当前能力
-
-- Gateway 已提供 OpenAI Chat Completions、OpenAI Responses API、Anthropic Messages 三类入口。
-- 模型目录由 `model_catalog_json` 控制，支持暴露名、上游模型 ID、Copilot `name/vendor` 元数据、`upstream_api` 和 `enabled` 启停。
-- GitHub Copilot 上游 endpoint 采用混合选择：`upstream_api` 可按模型显式覆盖；`vendor=OpenAI` / `Azure OpenAI` 与 `gpt*`/o-series 走上游 Responses；Gemini、Anthropic/Claude/Opus/Haiku/Sonnet、Microsoft MAI、Grok/xAI 等非 OpenAI 家族走上游 Chat Completions；其它模型按下游协议兜底。
-- API key 鉴权后会得到带必填具体 pool 的 client profile。Router 不会 fallback 到其它 pool，只在该 pool 内执行 sticky 亲和、account/seat 过滤、预算、并发约束和 pool 自身的负载均衡策略。
-- 每个账号最多属于一个 pool。Membership 变更采用原子操作，会拒绝 stale state；账号存在 active user/session binding 时必须先 release 才能移动。
-- Pool 已支持 `allocation_mode=shared/user_binding/session_binding`。`user_binding` 按 `user_id` 独占账号，`session_binding` 按 `session_id` 独占账号；绑定存 PostgreSQL，Redis 缓存热路由状态，支持 pool 级 `binding_max_concurrency` 和 idle TTL，也可在 Dashboard 的 pool 展开详情中手动释放。
-- Gateway 启动时加载路由配置，并每 30 秒从 PostgreSQL 刷新 pool、账号关系和 active binding 快照。
-- Admin 和 Worker 已拆分为独立命令入口；Admin 提供控制面 API 并服务 Dashboard，Worker 执行探针、指标同步、凭据提醒和恢复任务。
-- Dashboard 面向运维场景，覆盖概览、账号、池、客户端、指标、事件、设置和模型目录；组织相关能力暂保留在后端，当前 UI 暂不展示。
-- Dashboard Overview 支持按 Gateway Public URL 生成 Claude Code、Codex 或 curl 启动脚本，可勾选 custom headers 并自动生成随机 `X-GHCP-Session-ID`。
+- [快速开始](#快速开始)
+- [发布内容](#发布内容)
+- [配置边界](#配置边界)
+- [日常运维](#日常运维)
 
 ## 快速开始
 
-```mermaid
-flowchart TD
-  A["deploy/deploy.sh --start"] --> B["拉取固定 Docker Hub 镜像"]
-  B --> C["创建宿主机 ~/ghcp_proxy bind mount 目录"]
-  C --> D["应用数据库迁移"]
-  D --> E["Gateway :8000"]
-  D --> F["Admin :8001"]
-  D --> G["Worker"]
-  E --> H["/v1/chat/completions / /v1/responses / /v1/messages"]
-  F --> I["/admin/* 控制面 API"]
-  F --> J["Dashboard /"]
-  G --> K["探针 / Metrics 同步 / 凭据提醒 / 恢复任务"]
-```
-
-推荐使用发布仓库 [pczhao1210/ghcp-pool-proxy](https://github.com/pczhao1210/ghcp-pool-proxy) 中的部署脚本在 Linux VM 上启动。脚本会检查 Docker/Docker Compose 等依赖，在宿主机创建 `~/ghcp_proxy` 持久化目录并把 PostgreSQL/Redis 数据目录 bind mount 到容器，拉取固定 Docker Hub 镜像，启动 PostgreSQL/Redis/gateway/admin/worker，并按小时把日志落盘到 `~/ghcp_proxy/logs`，默认保留 30 天。VM 部署默认使用 GitHub Copilot provider。
-
-通过 Git 获取或更新发布包后启动：
+在支持的 x86_64 Linux VM 上执行：
 
 ```bash
-if [ -d ghcp-pool-proxy/.git ]; then
-  cd ghcp-pool-proxy && git pull --ff-only
-else
-  git clone https://github.com/pczhao1210/ghcp-pool-proxy.git && cd ghcp-pool-proxy
+chmod +x deploy/deploy.sh
+if [ ! -f "$HOME/ghcp_proxy/config.yaml" ]; then
+  deploy/deploy.sh generate-config
 fi
-chmod +x deploy/deploy.sh
-deploy/deploy.sh --start
+# 启动前检查 ~/ghcp_proxy/config.yaml。
+deploy/deploy.sh start
 ```
 
-也可以只用 `curl` 下载运行期部署文件后启动：
+`generate-config` 不依赖 Docker。它会创建 `~/ghcp_proxy/config.yaml`，不会覆盖已有文件；缺少该文件时 `start` 会拒绝启动。
 
-```bash
-mkdir -p ghcp-pool-proxy/deploy && cd ghcp-pool-proxy
-curl -fsSL -o deploy/deploy.sh https://raw.githubusercontent.com/pczhao1210/ghcp-pool-proxy/main/deploy/deploy.sh
-curl -fsSL -o deploy/docker-compose.vm.yml https://raw.githubusercontent.com/pczhao1210/ghcp-pool-proxy/main/deploy/docker-compose.vm.yml
-chmod +x deploy/deploy.sh
-deploy/deploy.sh --start
-```
+Dashboard 地址为 `http://<server>:8001/`，模型 API 地址为 `http://<server>:8000/`。
 
-如果已经在发布包目录内，可以直接运行：
+## 发布内容
 
-```bash
-deploy/deploy.sh --start
-```
+| 路径 | 用途 |
+| --- | --- |
+| `deploy/deploy.sh` | VM 初始化、配置生成、迁移、生命周期和日志命令 |
+| `deploy/docker-compose.vm.yml` | PostgreSQL、Redis、Gateway、Admin 和 Worker 服务 |
+| `config.example.yaml` | 与 `generate-config` 使用同一生成逻辑的 VM 启动默认值 |
+| `migrations/` | 当前 schema 基线、版本标记和编号 migration SQL |
+| `docs/` | 架构、运维、协议和路由文档 |
 
-首次运行会生成宿主机文件 `~/ghcp_proxy/.env`，其中包含 `ADMIN_TOKEN`、`PROVIDER=copilot`、`CREDENTIAL_MASTER_KEY` 和数据库密码。请妥善保存该文件，尤其不要在已有数据的情况下随意更换 `CREDENTIAL_MASTER_KEY`。
-
-### Schema 变更后的升级
-
-Schema v11 引入确定性的 Client-to-Pool ownership。部署脚本会自动执行平滑迁移：优先从 legacy policy data 为已有 client profile 选择 pool，否则确定性选择 active pool；把重复账号 membership 收敛为一个；把 load-balancing strategy 迁移到 pool；最后删除 legacy policy table 与 Pool Priority。升级前请备份 PostgreSQL，升级后复核 Clients 与 Pools 的分配结果。
-
-只有明确需要全新安装，或迁移报告无法恢复的 schema conflict 时才执行 reset：
-
-VM 部署可执行：
-
-```bash
-deploy/deploy.sh --stop
-GHCP_RESET_CONFIRM=reset deploy/deploy.sh --reset
-deploy/deploy.sh --start
-```
-
-本地开发环境可执行：
-
-```bash
-./start.sh --reset
-```
-
-reset 会删除运行数据，但会保留宿主机 `.env`。请在 reset 前确认已记录必要的账号配置、client API key、Client-to-Pool 分配、pool 设置和模型映射；reset 后需要重新登录 Copilot 账号并重新配置 Dashboard。
-
-查看按小时落盘的服务日志：
-
-```bash
-deploy/deploy.sh --logs
-```
-
-停止 VM 服务但保留持久化数据：
-
-```bash
-deploy/deploy.sh --stop
-```
-
-部署脚本使用固定镜像：
+部署时会拉取以下镜像：
 
 - `pczhao1210/ghcp-pool-proxy:gateway-latest`
 - `pczhao1210/ghcp-pool-proxy:admin-latest`
 - `pczhao1210/ghcp-pool-proxy:worker-latest`
 
-## 运行入口
+## 配置边界
 
-| 入口 | 说明 |
-| --- | --- |
-| `cmd/gateway` | 对外模型协议网关。 |
-| `cmd/admin` | 控制面 API 与 Dashboard 后端。 |
-| `cmd/worker` | 健康探针、同步与恢复任务。 |
+- `~/ghcp_proxy/config.yaml`：Provider 端点、超时、连接与队列容量、维护 fallback 和日志配置。
+- `~/ghcp_proxy/.env`：自动生成的密钥、宿主机路径、端口以及 PostgreSQL/Redis 地址。
+- PostgreSQL：Dashboard 管理的预算、feature flags、模型目录、URL、key 和 retention override。
 
-## 访问入口
+请保护好 `.env`。已有凭据数据后，不要随意替换 `CREDENTIAL_MASTER_KEY`。
 
-| 服务 | 地址 | 说明 |
-| --- | --- | --- |
-| Gateway | `http://localhost:8000` | 提供 `/v1/chat/completions`、`/v1/responses`、`/v1/messages`、`/v1/models`。 |
-| Admin API | `http://localhost:8001/admin/*` | 需要 `Authorization: Bearer <ADMIN_TOKEN>`。 |
-| Dashboard | `http://localhost:8001/` | 由 admin 服务静态资源，页面内请求 Admin API。 |
-| Metrics | `http://localhost:8000/metrics` | Gateway Prometheus 文本指标。 |
+## 日常运维
 
-## GitHub Copilot 上线
+```bash
+deploy/deploy.sh logs
+deploy/deploy.sh stop
+deploy/deploy.sh start
+```
 
-- 多个 GitHub Copilot 账号通过独立 `accounts`、独立加密凭据、独立 token cache、唯一 pool membership 和显式 Client-to-Pool 分配实现隔离。
-- Dashboard 的 Accounts 页支持 `Device Flow`，通过 GitHub 官方 device flow 授权账号，再换取并加密保存该账号的 Copilot bearer token。
-- 使用真实 Copilot provider 时设置 `PROVIDER=copilot`。Device Flow 默认使用内置 GitHub OAuth Client ID；只有需要覆盖时才设置 `GITHUB_OAUTH_CLIENT_ID`。
-- 详细流程见 [docs/operations.zh.md](docs/operations.zh.md)。
+发布更新流程：更新发布文件、检查随包 migration、备份 PostgreSQL，再运行 `deploy/deploy.sh start`。`~/ghcp_proxy` 下已有的 `.env` 和 `config.yaml` 会被保留。
 
-## 指标端点
+Reset 会永久删除 PostgreSQL 和 Redis 运行数据：
 
-Gateway `GET /metrics` 以 Prometheus 文本格式暴露内部计数器。
+```bash
+GHCP_RESET_CONFIRM=reset deploy/deploy.sh reset
+```
 
-请求成功后，Gateway 会记录 proxy-side usage ledger，包括 input tokens、cached input tokens、cache write tokens、output tokens、reasoning tokens、Copilot `nano_aiu`、估算 AI Credits 和 USD。Dashboard 的 Metrics 页按时间窗口展示请求量、AI Credits、USD、cache 命中率、cached input、cache write、output 和 reasoning 统计。
-
-`/metrics` 也会暴露同一批运行时计数，包括 `ghcp_cache_read_tokens_total`、`ghcp_cache_write_tokens_total`、`ghcp_reasoning_tokens_total`、`ghcp_nano_aiu_total`、`ghcp_ai_credits_micro_total`、`ghcp_estimated_usd_micros_total` 和 `ghcp_cache_hit_ratio_permille`。其中 micro/micros/permille 是整数缩放，便于当前文本指标实现保持整数输出。
+详细说明见[运维文档](docs/operations.zh.md)、[功能说明](FEATURES.zh.md)、[协议文档](docs/protocol.zh.md)和[路由文档](docs/routing.zh.md)。

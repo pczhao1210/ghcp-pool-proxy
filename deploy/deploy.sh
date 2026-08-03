@@ -1171,8 +1171,15 @@ metrics_snapshot_schema_current() {
   [[ "$(db_scalar "SELECT to_regclass('public.idx_copilot_metrics_snapshots_org_synced') IS NOT NULL;")" == "t" ]]
 }
 
+copilot_compatibility_flags_schema_current() {
+  [[ "$(db_scalar "SELECT count(*) FROM system_settings WHERE key IN ('copilot_compat_anthropic_beta_enabled', 'copilot_compat_thinking_tool_choice_enabled', 'copilot_compat_cache_control_enabled', 'copilot_compat_vision_header_enabled');")" == "4" ]]
+}
+
 target_schema_current() {
   case "$(target_schema_version)" in
+    15)
+      pool_user_binding_schema_current && fixed_pool_assignment_schema_current && usage_ledger_partition_schema_current && usage_rollup_partition_schema_current && metrics_snapshot_schema_current && copilot_compatibility_flags_schema_current
+      ;;
     14)
       pool_user_binding_schema_current && fixed_pool_assignment_schema_current && usage_ledger_partition_schema_current && usage_rollup_partition_schema_current && metrics_snapshot_schema_current
       ;;
@@ -1278,7 +1285,7 @@ apply_smooth_schema_upgrade() {
   local current="$1"
   local target="$2"
 
-  if [[ "$target" != "12" && "$target" != "13" && "$target" != "14" ]]; then
+  if [[ "$target" != "12" && "$target" != "13" && "$target" != "14" && "$target" != "15" ]]; then
     schema_conflict "automatic smooth migration to schema version $target is not defined"
   fi
   if (( current > target )); then
@@ -1566,6 +1573,9 @@ SQL
   fi
   if (( target >= 14 )); then
     apply_migration_file "014_metrics_snapshot_retention.sql"
+  fi
+  if (( target >= 15 )); then
+    apply_migration_file "015_copilot_compatibility_flags.sql"
   fi
 
   set_database_schema_version "$target"

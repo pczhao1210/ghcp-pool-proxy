@@ -75,7 +75,7 @@ Use **Recover** in the dashboard or call `POST /admin/accounts/{id}/recover` to 
 
 ## Model Catalog Configuration
 
-The model catalog maps exposed model names seen by clients to real upstream model IDs, controls whether each model is visible, and can select whether a model uses the upstream Chat Completions or Responses API. GitHub Copilot upstream is not globally Responses by default: `upstream_api` wins; `vendor=OpenAI` / `Azure OpenAI` and `gpt*`/o-series use Responses; Gemini, Anthropic/Claude/Opus/Haiku/Sonnet, Microsoft MAI, Grok/xAI, and other non-OpenAI families use Chat Completions; other models follow the downstream request protocol.
+The model catalog maps exposed model names seen by clients to real upstream model IDs, controls whether each model is visible, and can select Chat Completions, Responses, or Anthropic Messages upstream. `upstream_api` wins; `vendor=OpenAI` / `Azure OpenAI` and `gpt*`/o-series use Responses; Anthropic/Claude/Opus/Haiku/Sonnet use Messages; Gemini, Microsoft MAI, and Grok/xAI use Chat Completions; other models follow the downstream request protocol.
 
 ```mermaid
 flowchart LR
@@ -101,7 +101,7 @@ Example configuration:
 ```
 
 Models with `enabled=false`, or models absent from the catalog, are not returned by `/v1/models` and requests for them return `400 bad_request` with `invalid_model`.
-`upstream_api` is optional and supports `chat_completions` and `responses`; when omitted, the gateway normalizes `vendor`, then infers the model family from `upstream`, `name`, and `exposed`: `gpt*`/o-series use Responses, while Gemini, Anthropic/Claude/Opus/Haiku/Sonnet, MAI, and Grok/xAI use Chat Completions. Remaining models follow the downstream request protocol.
+`upstream_api` is optional and supports `chat_completions`, `responses`, and `anthropic_messages`; when omitted, the gateway normalizes `vendor`, then infers the model family from `upstream`, `name`, and `exposed`: `gpt*`/o-series use Responses, Anthropic/Claude/Opus/Haiku/Sonnet use Messages, and Gemini, MAI, and Grok/xAI use Chat Completions. Remaining models follow the downstream request protocol. Set `upstream_api=chat_completions` explicitly to roll back an Anthropic model.
 
 If `model_catalog_json` is not configured, default models are exposed. If it is configured as an empty array, no models are exposed; this is intentional.
 

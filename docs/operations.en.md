@@ -123,6 +123,8 @@ Configuration has two authorities. Local source deployments use the ignored repo
 
 Budgets, feature flags, model catalog, gateway public URL, client/GitHub fallback keys, and usage retention are stored in PostgreSQL and remain editable in Dashboard. For retention, a DB value overrides the YAML or environment startup fallback, which overrides the built-in default. Worker refreshes retention before each maintenance pass, currently every five minutes; no restart is required. Lowering a non-zero window can permanently drop older complete partitions, while `0` disables pruning for that tier.
 
+The recommended Copilot compatibility flags are `copilot_compat_anthropic_beta_enabled`, `copilot_compat_thinking_tool_choice_enabled`, `copilot_compat_cache_control_enabled`, and `copilot_compat_vision_header_enabled`. Migration 015 seeds all four as `true`; Gateway treats missing/unreadable values as enabled and caches a resolved value for up to 60 seconds. These flags control reviewed request compatibility rules, not selection of the upstream wire protocol. Anthropic models use native Messages by default and are rolled back per model with `upstream_api=chat_completions`.
+
 | Variable / Setting | Description |
 | --- | --- |
 | `GATEWAY_ADDR` | Gateway listen address |
@@ -422,12 +424,12 @@ flowchart TD
 | --- | --- |
 | `exposed` | Model name visible to clients |
 | `upstream` | Actual upstream model ID sent to GitHub Copilot |
-| `upstream_api` | Optional upstream endpoint: `chat_completions` or `responses` |
+| `upstream_api` | Optional upstream endpoint: `chat_completions`, `responses`, or `anthropic_messages` |
 | `name` | Optional display name refreshed from Copilot `/models` |
-| `vendor` | Optional model vendor refreshed from Copilot `/models`; `OpenAI` infers Responses |
+| `vendor` | Optional model vendor refreshed from Copilot `/models`; `OpenAI` infers Responses and `Anthropic` infers Messages |
 | `enabled` | Whether the model is returned by `/v1/models` and allowed in requests |
 
-GitHub Copilot upstream endpoint selection is mixed, not globally Responses by default. Selection order is: model catalog `upstream_api` wins; then Copilot `/models` `vendor` is normalized, where `OpenAI` / `Azure OpenAI` use upstream Responses and Google, Anthropic, Microsoft, and xAI use upstream Chat Completions; if vendor is empty, the gateway infers from `upstream`, `name`, and `exposed`: `gpt*`/o-series infer OpenAI, `gemini*` infers Google, `claude*`/`opus*`/`haiku*`/`sonnet*` infer Anthropic, `MAI*` infers Microsoft, and `grok*`/`xai*` infer xAI; other models follow the downstream request protocol.
+GitHub Copilot upstream endpoint selection is mixed, not globally Responses by default. Selection order is: model catalog `upstream_api` wins; then Copilot `/models` `vendor` is normalized, where `OpenAI` / `Azure OpenAI` use upstream Responses, Anthropic uses upstream Messages, and Google, Microsoft, and xAI use upstream Chat Completions; if vendor is empty, the gateway infers from `upstream`, `name`, and `exposed`: `gpt*`/o-series infer OpenAI, `gemini*` infers Google, `claude*`/`opus*`/`haiku*`/`sonnet*` infer Anthropic, `MAI*` infers Microsoft, and `grok*`/`xai*` infer xAI; other models follow the downstream request protocol.
 
 This catalog is global. It does not verify model access for each account, so pools must group accounts by a common usable model set.
 

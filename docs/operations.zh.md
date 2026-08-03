@@ -123,6 +123,8 @@ Azure 上推荐把 PostgreSQL、Redis AOF 和应用日志放到独立数据盘�
 
 预算、Feature Flags、模型目录、Gateway Public URL、Client/GitHub fallback key 和 usage retention 存在 PostgreSQL，可在 Dashboard 热更新。Retention 的优先级为 DB 覆盖值高于 YAML/环境变量启动 fallback，再高于内置默认值。Worker 会在每次 maintenance pass 前刷新 retention，当前周期为 5 分钟，无需重启。缩短非零窗口可能永久删除更老的完整分区；设为 `0` 表示关闭该层清理。
 
+推荐开启的 Copilot 兼容开关是 `copilot_compat_anthropic_beta_enabled`、`copilot_compat_thinking_tool_choice_enabled`、`copilot_compat_cache_control_enabled` 和 `copilot_compat_vision_header_enabled`。Migration 015 会把四项都写为 `true`；Gateway 对缺失/读取失败也按开启处理，并把结果缓存最多 60 秒。这些开关只控制已审查的请求兼容规则，不选择上游 wire protocol。Anthropic 模型默认走原生 Messages；要回滚某个模型，可设置 `upstream_api=chat_completions`。
+
 | Variable / Setting | 说明 |
 | --- | --- |
 | `GATEWAY_ADDR` | gateway 监听地址 |
@@ -422,12 +424,12 @@ flowchart TD
 | --- | --- |
 | `exposed` | 客户端看到的模型名 |
 | `upstream` | 实际发往 GitHub Copilot 的上游模型 ID |
-| `upstream_api` | 可选，上游 endpoint：`chat_completions` 或 `responses` |
+| `upstream_api` | 可选，上游 endpoint：`chat_completions`、`responses` 或 `anthropic_messages` |
 | `name` | 可选，从 Copilot `/models` 刷新的显示名称 |
-| `vendor` | 可选，从 Copilot `/models` 刷新的模型供应商；`OpenAI` 会自动推导为 Responses |
+| `vendor` | 可选，从 Copilot `/models` 刷新的模型供应商；`OpenAI` 自动推导为 Responses，`Anthropic` 自动推导为 Messages |
 | `enabled` | 是否暴露给 `/v1/models`，以及是否允许请求 |
 
-GitHub Copilot 上游 endpoint 采用混合选择，不是全局默认 Responses。选择顺序是：模型目录中的 `upstream_api` 优先；然后归一化 Copilot `/models` 刷新的 `vendor`，其中 `OpenAI` / `Azure OpenAI` 走上游 Responses，Google、Anthropic、Microsoft、xAI 走上游 Chat Completions；如果 vendor 为空，再从 `upstream`、`name`、`exposed` 推断，`gpt*`/o-series 归 OpenAI，`gemini*` 归 Google，`claude*`/`opus*`/`haiku*`/`sonnet*` 归 Anthropic，`MAI*` 归 Microsoft，`grok*`/`xai*` 归 xAI；其他模型按下游请求协议选择。
+GitHub Copilot 上游 endpoint 采用混合选择，不是全局默认 Responses。选择顺序是：模型目录中的 `upstream_api` 优先；然后归一化 Copilot `/models` 刷新的 `vendor`，其中 `OpenAI` / `Azure OpenAI` 走上游 Responses，Anthropic 走上游 Messages，Google、Microsoft、xAI 走上游 Chat Completions；如果 vendor 为空，再从 `upstream`、`name`、`exposed` 推断，`gpt*`/o-series 归 OpenAI，`gemini*` 归 Google，`claude*`/`opus*`/`haiku*`/`sonnet*` 归 Anthropic，`MAI*` 归 Microsoft，`grok*`/`xai*` 归 xAI；其他模型按下游请求协议选择。
 
 该模型目录是全局配置，不校验每个账号的模型权限，因此 pool 必须按共同可用模型集合分组。
 

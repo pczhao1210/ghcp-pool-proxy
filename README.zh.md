@@ -18,14 +18,10 @@
 
 ```bash
 chmod +x deploy/deploy.sh
-if [ ! -f "$HOME/ghcp_proxy/config.yaml" ]; then
-  deploy/deploy.sh generate-config
-fi
-# 启动前检查 ~/ghcp_proxy/config.yaml。
 deploy/deploy.sh start
 ```
 
-`generate-config` 不依赖 Docker。它会创建 `~/ghcp_proxy/config.yaml`，不会覆盖已有文件；缺少该文件时 `start` 会拒绝启动。
+首次 `start` 会自动创建 `~/ghcp_proxy/config.yaml` 和 `~/ghcp_proxy/.env`，且不会覆盖已有文件。可在首次启动前运行 `deploy/deploy.sh generate-config` 以创建并审阅 YAML；若已有持久化目录但 YAML 意外缺失，`start` 会拒绝继续，避免静默恢复默认配置。
 
 Dashboard 地址为 `http://<server>:8001/`，模型 API 地址为 `http://<server>:8000/`。
 

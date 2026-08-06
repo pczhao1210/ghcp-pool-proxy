@@ -118,12 +118,20 @@ sticky:{pool_id}:{model}:{affinity_key_hash} -> account_id
 
 Successful requests write or refresh the target. Redis also keeps a `sticky_account:{account_id}` reverse index so disabling an account can delete its sticky keys.
 
-| Mode | Behavior |
+Sticky policy (`sticky_mode`):
+
+| Policy | Behavior |
 | --- | --- |
 | `none` | Do not build an affinity key and do not use sticky routing |
 | `soft` | Default; prefer sticky target but allow load-ratio overflow |
 | `strict` | Prefer the same account; still cannot bypass account state, seat validity, or hard concurrency |
-| `prefix` | Use a hash of system prompt, first user context, and tool schema for prompt-cache affinity |
+
+Affinity strategy (`affinity_strategy`):
+
+| Strategy | Behavior |
+| --- | --- |
+| `session_then_prefix` | Default; use the first available session key, falling back to a prompt prefix hash |
+| `prefix_only` | Ignore session keys and use a hash of the system prompt, first user context, and tool schema for prompt-cache affinity |
 
 Session key order:
 
@@ -138,7 +146,7 @@ Session key order:
 9. `X-GHCP-Project`
 10. Body metadata keys `session_id`, `conversation_id`, and `user`
 
-When no session key exists, non-`none` modes fallback to a prefix hash. `prefix` mode always uses the prefix hash and ignores session headers. The affinity key includes client profile, protocol, model, and session/prefix material; only hashes are stored.
+With `session_then_prefix`, a missing session key falls back to a prefix hash. `prefix_only` always uses the prefix hash and ignores session headers. The affinity key includes client profile, protocol, model, and session/prefix material; only hashes are stored. For API compatibility, the legacy `sticky_mode=prefix` value is normalized to `sticky_mode=soft` with `affinity_strategy=prefix_only`.
 
 ## Sticky Overflow And Concurrency
 

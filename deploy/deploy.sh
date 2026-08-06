@@ -634,6 +634,13 @@ validate_generated_config_values() {
   config_integer_value USAGE_HOURLY_RETENTION_DAYS 90 >/dev/null
   config_integer_value USAGE_DAILY_RETENTION_MONTHS 13 >/dev/null
   config_integer_value USAGE_PARTITION_AHEAD_DAYS 7 >/dev/null
+  config_integer_value HEALTH_TOKEN_PROBE_CONCURRENCY 10 >/dev/null
+  config_integer_value HEALTH_TOKEN_PROBE_STARTS_PER_SECOND 5 >/dev/null
+  config_integer_value HEALTH_UPSTREAM_PROBE_CONCURRENCY 2 >/dev/null
+  config_integer_value HEALTH_UPSTREAM_PROBE_STARTS_PER_MINUTE 12 >/dev/null
+  config_integer_value HEALTH_DEGRADE_THRESHOLD 70 >/dev/null
+  config_integer_value HEALTH_REACTIVATE_THRESHOLD 60 >/dev/null
+  config_integer_value HEALTH_QUARANTINE_THRESHOLD 90 >/dev/null
   config_decimal_value GATEWAY_SUCCESS_LOG_SAMPLE_RATE 0.01 >/dev/null
 }
 
@@ -677,6 +684,28 @@ github:
   api_base_url: $(config_string_value GITHUB_API_BASE_URL https://api.github.com)
   # Empty derives the token URL from api_base_url.
   copilot_token_url: $(config_string_value COPILOT_TOKEN_URL "")
+
+health:
+  enabled: $(config_string_value HEALTH_ENABLED true)
+  scheduler_poll_interval: $(config_string_value HEALTH_SCHEDULER_POLL_INTERVAL 1s)
+  active_token_probe_interval: $(config_string_value HEALTH_ACTIVE_TOKEN_PROBE_INTERVAL 60m)
+  degraded_token_probe_interval: $(config_string_value HEALTH_DEGRADED_TOKEN_PROBE_INTERVAL 60s)
+  token_probe_timeout: $(config_string_value HEALTH_TOKEN_PROBE_TIMEOUT 5s)
+  token_probe_claim_lease: $(config_string_value HEALTH_TOKEN_PROBE_CLAIM_LEASE 15s)
+  token_probe_concurrency: $(config_integer_value HEALTH_TOKEN_PROBE_CONCURRENCY 10)
+  token_probe_starts_per_second: $(config_integer_value HEALTH_TOKEN_PROBE_STARTS_PER_SECOND 5)
+  re_admission_cooldown: $(config_string_value HEALTH_RE_ADMISSION_COOLDOWN 5m)
+  upstream_probe_timeout: $(config_string_value HEALTH_UPSTREAM_PROBE_TIMEOUT 15s)
+  upstream_probe_claim_lease: $(config_string_value HEALTH_UPSTREAM_PROBE_CLAIM_LEASE 30s)
+  # Covers token validation, upstream probe, and completion writes.
+  recovery_task_claim_lease: $(config_string_value HEALTH_RECOVERY_TASK_CLAIM_LEASE 45s)
+  upstream_probe_concurrency: $(config_integer_value HEALTH_UPSTREAM_PROBE_CONCURRENCY 2)
+  upstream_probe_starts_per_minute: $(config_integer_value HEALTH_UPSTREAM_PROBE_STARTS_PER_MINUTE 12)
+  probe_model: $(config_string_value HEALTH_PROBE_MODEL gpt-4o)
+  probe_upstream_api: $(config_string_value HEALTH_PROBE_UPSTREAM_API chat_completions)
+  degrade_threshold: $(config_integer_value HEALTH_DEGRADE_THRESHOLD 70)
+  reactivate_threshold: $(config_integer_value HEALTH_REACTIVATE_THRESHOLD 60)
+  quarantine_threshold: $(config_integer_value HEALTH_QUARANTINE_THRESHOLD 90)
 
 postgres_pool:
   # Maximum PostgreSQL connections opened by each application process.
@@ -733,6 +762,11 @@ prepare_directories() {
 
 require_config_file() {
   if [[ -f "$APP_CONFIG_FILE" ]]; then
+    return 0
+  fi
+  if [[ ! -e "$DATA_DIR" ]]; then
+    log "Creating default application configuration for first start"
+    generate_config
     return 0
   fi
   cat >&2 <<EOF
@@ -1179,8 +1213,49 @@ copilot_compatibility_flags_schema_current() {
   [[ "$(db_scalar "SELECT count(*) FROM system_settings WHERE key IN ('copilot_compat_anthropic_beta_enabled', 'copilot_compat_thinking_tool_choice_enabled', 'copilot_compat_cache_control_enabled', 'copilot_compat_vision_header_enabled');")" == "4" ]]
 }
 
+account_health_schema_current() {
+  schema_column_exists_with_type accounts next_token_probe_at timestamptz || return 1
+  schema_column_exists_with_type accounts token_probe_claim_id uuid || return 1
+  schema_column_exists_with_type accounts token_probe_claimed_by text || return 1
+  schema_column_exists_with_type accounts token_probe_claimed_until timestamptz || return 1
+  schema_column_exists_with_type accounts last_token_probe_at timestamptz || return 1
+  schema_column_exists_with_type accounts last_token_probe_success_at timestamptz || return 1
+  schema_column_exists_with_type accounts last_token_probe_failure_at timestamptz || return 1
+  schema_column_exists_with_type accounts last_token_probe_failure_reason text || return 1
+  schema_column_exists_with_type accounts next_re_admission_at timestamptz || return 1
+  schema_column_exists_with_type accounts re_admission_claim_id uuid || return 1
+  schema_column_exists_with_type accounts re_admission_claimed_by text || return 1
+  schema_column_exists_with_type accounts re_admission_claimed_until timestamptz || return 1
+  schema_column_exists_with_type accounts last_re_admission_at timestamptz || return 1
+  schema_column_exists_with_type accounts last_re_admission_success_at timestamptz || return 1
+  schema_column_exists_with_type accounts last_re_admission_failure_at timestamptz || return 1
+  schema_column_exists_with_type accounts last_re_admission_failure_reason text || return 1
+  schema_column_exists_with_type accounts re_admission_attempt_count int4 || return 1
+  schema_column_exists_with_type accounts health_version int8 || return 1
+  schema_column_exists_with_type recovery_tasks claim_id uuid || return 1
+  schema_column_exists_with_type recovery_tasks claimed_by text || return 1
+  schema_column_exists_with_type recovery_tasks claimed_until timestamptz || return 1
+  schema_column_exists_with_type recovery_tasks attempt_count int4 || return 1
+  schema_column_exists_with_type recovery_tasks next_attempt_at timestamptz || return 1
+  schema_column_exists_with_type recovery_tasks source_status text || return 1
+  schema_column_exists_with_type recovery_tasks current_step text || return 1
+  schema_column_exists_with_type recovery_tasks failure_reason text || return 1
+  [[ "$(db_scalar "SELECT to_regclass('public.idx_accounts_due_token_probe') IS NOT NULL AND to_regclass('public.idx_accounts_due_re_admission') IS NOT NULL AND to_regclass('public.idx_recovery_tasks_account_nonterminal') IS NOT NULL AND to_regclass('public.idx_recovery_tasks_due') IS NOT NULL;")" == "t" ]]
+}
+
+affinity_strategy_schema_current() {
+  schema_column_exists_with_type client_profiles affinity_strategy text || return 1
+  [[ "$(db_scalar "SELECT NOT EXISTS (SELECT 1 FROM client_profiles WHERE sticky_mode = 'prefix');")" == "t" ]]
+}
+
 target_schema_current() {
   case "$(target_schema_version)" in
+    17)
+      pool_user_binding_schema_current && fixed_pool_assignment_schema_current && usage_ledger_partition_schema_current && usage_rollup_partition_schema_current && metrics_snapshot_schema_current && copilot_compatibility_flags_schema_current && account_health_schema_current && affinity_strategy_schema_current
+      ;;
+    16)
+      pool_user_binding_schema_current && fixed_pool_assignment_schema_current && usage_ledger_partition_schema_current && usage_rollup_partition_schema_current && metrics_snapshot_schema_current && copilot_compatibility_flags_schema_current && account_health_schema_current
+      ;;
     15)
       pool_user_binding_schema_current && fixed_pool_assignment_schema_current && usage_ledger_partition_schema_current && usage_rollup_partition_schema_current && metrics_snapshot_schema_current && copilot_compatibility_flags_schema_current
       ;;
@@ -1254,7 +1329,14 @@ infer_legacy_schema_version() {
   fi
 
 
-  if metrics_snapshot_schema_current && usage_rollup_partition_schema_current && usage_ledger_partition_schema_current; then
+
+  if affinity_strategy_schema_current && account_health_schema_current && copilot_compatibility_flags_schema_current && metrics_snapshot_schema_current && usage_rollup_partition_schema_current && usage_ledger_partition_schema_current; then
+	printf '17\n'
+  elif account_health_schema_current && copilot_compatibility_flags_schema_current && metrics_snapshot_schema_current && usage_rollup_partition_schema_current && usage_ledger_partition_schema_current; then
+	printf '16\n'
+  elif copilot_compatibility_flags_schema_current && metrics_snapshot_schema_current && usage_rollup_partition_schema_current && usage_ledger_partition_schema_current; then
+	printf '15\n'
+  elif metrics_snapshot_schema_current && usage_rollup_partition_schema_current && usage_ledger_partition_schema_current; then
 	printf '14\n'
   elif usage_rollup_partition_schema_current && usage_ledger_partition_schema_current; then
     printf '13\n'
@@ -1289,7 +1371,7 @@ apply_smooth_schema_upgrade() {
   local current="$1"
   local target="$2"
 
-  if [[ "$target" != "12" && "$target" != "13" && "$target" != "14" && "$target" != "15" ]]; then
+  if [[ "$target" != "12" && "$target" != "13" && "$target" != "14" && "$target" != "15" && "$target" != "16" && "$target" != "17" ]]; then
     schema_conflict "automatic smooth migration to schema version $target is not defined"
   fi
   if (( current > target )); then
@@ -1580,6 +1662,12 @@ SQL
   fi
   if (( target >= 15 )); then
     apply_migration_file "015_copilot_compatibility_flags.sql"
+  fi
+  if (( target >= 16 )); then
+    apply_migration_file "016_account_health_state.sql"
+  fi
+  if (( target >= 17 )); then
+    apply_migration_file "017_affinity_strategy.sql"
   fi
 
   set_database_schema_version "$target"

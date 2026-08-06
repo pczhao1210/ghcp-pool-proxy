@@ -18,14 +18,10 @@ Run on a supported x86_64 Linux VM:
 
 ```bash
 chmod +x deploy/deploy.sh
-if [ ! -f "$HOME/ghcp_proxy/config.yaml" ]; then
-  deploy/deploy.sh generate-config
-fi
-# Review ~/ghcp_proxy/config.yaml before starting.
 deploy/deploy.sh start
 ```
 
-`generate-config` does not require Docker. It creates `~/ghcp_proxy/config.yaml`, never overwrites an existing file, and `start` refuses to run without one.
+On its first run, `start` creates `~/ghcp_proxy/config.yaml` and `~/ghcp_proxy/.env` automatically and never overwrites existing files. Run `deploy/deploy.sh generate-config` first when you want to create and review the YAML before starting; if an existing persistent directory is missing its YAML unexpectedly, `start` refuses to continue rather than silently restoring defaults.
 
 Open the Dashboard at `http://<server>:8001/` and send model requests to `http://<server>:8000/`.
 

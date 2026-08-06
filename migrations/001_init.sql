@@ -43,12 +43,36 @@ CREATE TABLE accounts (
     last_success_at TIMESTAMPTZ,
     last_failure_at TIMESTAMPTZ,
     last_failure_reason TEXT,
+    next_token_probe_at TIMESTAMPTZ,
+    token_probe_claim_id UUID,
+    token_probe_claimed_by TEXT,
+    token_probe_claimed_until TIMESTAMPTZ,
+    last_token_probe_at TIMESTAMPTZ,
+    last_token_probe_success_at TIMESTAMPTZ,
+    last_token_probe_failure_at TIMESTAMPTZ,
+    last_token_probe_failure_reason TEXT,
+    next_re_admission_at TIMESTAMPTZ,
+    re_admission_claim_id UUID,
+    re_admission_claimed_by TEXT,
+    re_admission_claimed_until TIMESTAMPTZ,
+    last_re_admission_at TIMESTAMPTZ,
+    last_re_admission_success_at TIMESTAMPTZ,
+    last_re_admission_failure_at TIMESTAMPTZ,
+    last_re_admission_failure_reason TEXT,
+    re_admission_attempt_count INT NOT NULL DEFAULT 0,
+    health_version BIGINT NOT NULL DEFAULT 0,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE INDEX idx_accounts_status ON accounts(status);
 CREATE INDEX idx_accounts_source ON accounts(account_source);
+CREATE INDEX idx_accounts_due_token_probe
+    ON accounts (next_token_probe_at, id)
+    WHERE status IN ('active', 'degraded');
+CREATE INDEX idx_accounts_due_re_admission
+    ON accounts (next_re_admission_at, id)
+    WHERE status = 'degraded';
 
 CREATE TABLE copilot_seats (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -116,6 +140,7 @@ CREATE TABLE client_profiles (
     model_aliases JSONB NOT NULL DEFAULT '{}',
     tool_format TEXT,
     sticky_mode TEXT NOT NULL DEFAULT 'soft',
+    affinity_strategy TEXT NOT NULL DEFAULT 'session_then_prefix',
     sticky_ttl_seconds INT NOT NULL DEFAULT 1800,
     sticky_session_header TEXT,
     cache_affinity_enabled BOOLEAN NOT NULL DEFAULT TRUE,
@@ -227,6 +252,14 @@ CREATE TABLE recovery_tasks (
     reason TEXT NOT NULL,
     assigned_to TEXT,
     notes TEXT,
+    claim_id UUID,
+    claimed_by TEXT,
+    claimed_until TIMESTAMPTZ,
+    attempt_count INT NOT NULL DEFAULT 0,
+    next_attempt_at TIMESTAMPTZ,
+    source_status TEXT,
+    current_step TEXT,
+    failure_reason TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     completed_at TIMESTAMPTZ
@@ -234,6 +267,12 @@ CREATE TABLE recovery_tasks (
 
 CREATE INDEX idx_recovery_tasks_account ON recovery_tasks(account_id);
 CREATE INDEX idx_recovery_tasks_status ON recovery_tasks(status);
+CREATE UNIQUE INDEX idx_recovery_tasks_account_nonterminal
+    ON recovery_tasks (account_id)
+    WHERE status IN ('pending', 'running');
+CREATE INDEX idx_recovery_tasks_due
+    ON recovery_tasks (next_attempt_at, created_at, id)
+    WHERE status IN ('pending', 'running');
 
 CREATE TABLE system_settings (
     key TEXT PRIMARY KEY,
@@ -244,7 +283,7 @@ CREATE TABLE system_settings (
 );
 
 INSERT INTO system_settings (key, value, description) VALUES
-    ('schema_version', '15', 'Installed database schema version'),
+    ('schema_version', '16', 'Installed database schema version'),
     ('copilot_metrics_sync_enabled', 'false', 'Enable GitHub Copilot Metrics sync worker'),
     ('audit_search_enabled', 'false', 'Enable audit log search API endpoint'),
     ('advanced_metrics_enabled', 'false', 'Enable detailed sticky/rebind/overflow metrics'),

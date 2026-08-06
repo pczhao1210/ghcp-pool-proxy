@@ -38,8 +38,6 @@ flowchart TD
 Use `deploy/deploy.sh` from the release package to deploy on a Linux VM. The script consumes fixed Docker Hub images and does not run source builds, tests, or smoke checks.
 
 ```bash
-if [ ! -f "$HOME/ghcp_proxy/config.yaml" ]; then deploy/deploy.sh generate-config; fi
-# Review ~/ghcp_proxy/config.yaml.
 deploy/deploy.sh --start
 ```
 
@@ -47,8 +45,8 @@ Startup flow:
 
 - Checks Linux, Docker, Docker Compose, `curl`, and related dependencies.
 - Creates the default persistent root at host `~/ghcp_proxy` and bind-mounts PostgreSQL/Redis data directories into containers.
-- Requires `~/ghcp_proxy/config.yaml`; create it with `generate-config`. The command does not overwrite an existing YAML file.
-- Generates host file `~/ghcp_proxy/.env` on first start with deployment secrets, paths, ports, and the database password.
+- Creates `~/ghcp_proxy/config.yaml` and `~/ghcp_proxy/.env` automatically on first start; `generate-config` can create the YAML in advance. Neither command overwrites an existing file.
+- Stops when an existing persistent directory is missing its YAML, rather than silently restoring default configuration.
 - Pulls `pczhao1210/ghcp-pool-proxy:gateway-latest`, `admin-latest`, `worker-latest`, plus PostgreSQL and Redis images.
 - Starts PostgreSQL and Redis, then waits for health checks.
 - Reads `migrations/schema_version` and `migrations/001_init.sql` from the release package or published admin image. Empty databases receive the single init schema; existing databases read `system_settings.schema_version` and are upgraded only when the script has an explicit smooth upgrade path.
@@ -269,7 +267,7 @@ The dashboard Metrics tab shows these key indicators over the selected window:
 | Reasoning Tokens | Identifies cost sources from reasoning models or high-reasoning requests |
 | Token Details | Preserves upstream token type, count, and batch cost in ledger `token_details` |
 
-Prometheus text metrics also include cached/cache read tokens, cache write tokens, reasoning tokens, nano AIU, AI Credits micro, estimated USD micros, and cache hit ratio permille. If cache hit rate stays low, check client profile sticky mode, session headers, and rebind/overflow metrics.
+Prometheus text metrics also include cached/cache read tokens, cache write tokens, reasoning tokens, nano AIU, AI Credits micro, estimated USD micros, and cache hit ratio permille. If cache hit rate stays low, check client profile sticky policy, affinity strategy, session headers, and rebind/overflow metrics.
 
 When validating the 3000-IOPS target, also watch the gateway usage-write queue:
 
@@ -325,14 +323,15 @@ stateDiagram-v2
   pending --> active: import valid credential
   active --> degraded: elevated risk or short failures
   active --> revoked: admin offboarding
-  degraded --> active: probe recovery or manual confirmation
+  degraded --> active: successful upstream re-admission probe
   degraded --> recovery: create recovery task
   degraded --> quarantined: risk continues rising
   degraded --> revoked: admin offboarding
   quarantined --> recovery: recover API
   quarantined --> revoked: admin offboarding
-  recovery --> active: credential valid and risk reset
-  recovery --> quarantined: credential missing/expired or recovery failed
+  recovery --> active: token and upstream probes succeed
+  recovery --> degraded: transient probe failure from degraded
+  recovery --> quarantined: credential or quarantined recovery failure
   revoked --> [*]
 ```
 
@@ -346,6 +345,8 @@ State meanings:
 | `recovery` | Recovery task in progress |
 | `quarantined` | Routing paused until recovery or credential reimport |
 | `revoked` | Fully offboarded, no automatic recovery |
+
+Token acquisition alone does not prove that the account can run a model. A successful token probe only lowers risk and may make a degraded account eligible for re-admission; only a successful upstream model probe changes it back to `active`. Probe requests use dedicated Worker paths and do not consume client usage, budget, RPM, sticky affinity, or bindings. PostgreSQL claims and health-version fencing reject stale completions, and Redis enforces global concurrency and start-rate limits across Worker instances. Limiter deferrals update only the next due time, avoiding per-second attempt and audit writes.
 
 Onboarding
 
@@ -411,11 +412,14 @@ Recovery task flow:
 flowchart TD
   A["operator clicks Recover or calls Admin API"] --> B["create recovery_tasks row"]
   B --> C["account enters recovery"]
-  C --> D["scans every 60s"]
-  D --> E{"active credential exists and not expired?"}
-  E -->|"yes"| F["failure count"]
-  F --> G["account active"]
-  E -->|"no"| H["task fails and remains quarantined"]
+  C --> D["Worker claims one due task with a lease"]
+  D --> E{"token acquisition succeeds?"}
+  E -->|"yes"| F{"minimal upstream model probe succeeds?"}
+  F -->|"yes"| G["transactionally reset risk and activate account"]
+  E -->|"account failure"| H["fail task and restore degraded or quarantined"]
+  F -->|"account failure"| H
+  E -->|"system or limiter"| I["release claim and schedule retry"]
+  F -->|"system or limiter"| I
 ```
 
 ### Model ID Mapping, Aliases, and Hidden Models

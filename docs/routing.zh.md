@@ -129,14 +129,20 @@ sticky:{pool_id}:{model}:{affinity_key_hash} -> account_id
 
 请求成功后会写入或刷新 sticky target。Redis 同时维护 `sticky_account:{account_id}` 反向索引，便于账号禁用时删除相关 sticky key。
 
-Sticky mode：
+Sticky policy（`sticky_mode`）：
 
-| 模式 | 行为 |
+| 策略 | 行为 |
 | --- | --- |
 | `none` | 不生成 affinity key，不使用 sticky |
 | `soft` | 默认；优先 sticky target，但允许负载过高时 overflow |
 | `strict` | 尽量保持同一账号；仍不能绕过账号状态、seat 或硬并发限制 |
-| `prefix` | 使用 system prompt、首个 user 上下文和 tools schema 的 hash，适合 prompt cache 亲和 |
+
+Affinity strategy（`affinity_strategy`）：
+
+| 策略 | 行为 |
+| --- | --- |
+| `session_then_prefix` | 默认；优先使用第一个可用的 session key，没有时 fallback 到 prompt prefix hash |
+| `prefix_only` | 忽略 session key，始终使用 system prompt、首个 user 上下文和 tools schema 的 hash，适合 prompt cache 亲和 |
 
 Session key 优先级：
 
@@ -151,7 +157,7 @@ Session key 优先级：
 9. `X-GHCP-Project`
 10. body metadata 中的 `session_id`、`conversation_id`、`user`
 
-没有 session key 时，非 `none` 模式会尝试 fallback 到 prefix hash；`prefix` 模式直接使用 prefix hash 并忽略 session header。Affinity key 默认包含 client profile、协议、模型和 session/prefix 材料，只保存 hash，不保存 prompt 明文。
+`session_then_prefix` 没有 session key 时会 fallback 到 prefix hash；`prefix_only` 始终使用 prefix hash 并忽略 session header。Affinity key 默认包含 client profile、协议、模型和 session/prefix 材料，只保存 hash，不保存 prompt 明文。为了兼容旧 API，历史值 `sticky_mode=prefix` 会归一化为 `sticky_mode=soft` 与 `affinity_strategy=prefix_only`。
 
 ## Sticky Overflow 与并发
 

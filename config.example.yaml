@@ -31,6 +31,28 @@ github:
   # Empty derives the token URL from api_base_url.
   copilot_token_url: ""
 
+health:
+  enabled: "true"
+  scheduler_poll_interval: "1s"
+  active_token_probe_interval: "60m"
+  degraded_token_probe_interval: "60s"
+  token_probe_timeout: "5s"
+  token_probe_claim_lease: "15s"
+  token_probe_concurrency: 10
+  token_probe_starts_per_second: 5
+  re_admission_cooldown: "5m"
+  upstream_probe_timeout: "15s"
+  upstream_probe_claim_lease: "30s"
+  # Covers token validation, upstream probe, and completion writes.
+  recovery_task_claim_lease: "45s"
+  upstream_probe_concurrency: 2
+  upstream_probe_starts_per_minute: 12
+  probe_model: "gpt-4o"
+  probe_upstream_api: "chat_completions"
+  degrade_threshold: 70
+  reactivate_threshold: 60
+  quarantine_threshold: 90
+
 postgres_pool:
   # Maximum PostgreSQL connections opened by each application process.
   max_open_connections: 25

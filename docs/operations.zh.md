@@ -38,8 +38,6 @@ flowchart TD
 推荐使用发布包中的 `deploy/deploy.sh` 在 Linux VM 上部署。脚本使用固定 Docker Hub 镜像，不包含源码构建、测试或 smoke test 流程。
 
 ```bash
-if [ ! -f "$HOME/ghcp_proxy/config.yaml" ]; then deploy/deploy.sh generate-config; fi
-# 检查 ~/ghcp_proxy/config.yaml。
 deploy/deploy.sh --start
 ```
 
@@ -47,8 +45,8 @@ deploy/deploy.sh --start
 
 - 检查 Linux、Docker、Docker Compose、`curl` 等依赖。
 - 在宿主机创建默认持久化目录 `~/ghcp_proxy`，并把 PostgreSQL/Redis 数据目录作为 bind mount 挂入容器。
-- 启动前必须存在 `~/ghcp_proxy/config.yaml`，通过 `generate-config` 创建；该命令不会覆盖已有 YAML。
-- 首次启动生成宿主机文件 `~/ghcp_proxy/.env`，保存部署密钥、路径、端口和数据库密码。
+- 首次启动自动生成 `~/ghcp_proxy/config.yaml` 和 `~/ghcp_proxy/.env`；也可提前通过 `generate-config` 创建 YAML。两者都不会覆盖已有文件。
+- 已有持久化目录中 YAML 缺失时会停止启动，避免静默恢复默认配置。
 - 拉取 `pczhao1210/ghcp-pool-proxy:gateway-latest`、`admin-latest`、`worker-latest` 以及 PostgreSQL/Redis 镜像。
 - 启动 PostgreSQL 和 Redis，等待健康检查通过。
 - 读取发布包或已发布 admin 镜像内的 `migrations/schema_version` 和 `migrations/001_init.sql`。空库直接应用单一 init schema；已有库读取 DB 内 `system_settings.schema_version`，只在脚本内置了平滑升级路径时自动升级。
@@ -269,7 +267,7 @@ Dashboard Metrics 页按窗口展示以下关键指标：
 | Reasoning Tokens | 识别 reasoning 模型或高推理请求的成本来源 |
 | Token Details | 通过 ledger 中的 `token_details` 保留上游 token type、count 和 batch cost |
 
-Prometheus 文本指标中也包含 cached/cache read tokens、cache write tokens、reasoning tokens、nano AIU、AI Credits micro、estimated USD micros 和 cache hit ratio permille。若 cache hit rate 持续偏低，应检查 client profile sticky mode、session header 以及 rebind/overflow 指标。
+Prometheus 文本指标中也包含 cached/cache read tokens、cache write tokens、reasoning tokens、nano AIU、AI Credits micro、estimated USD micros 和 cache hit ratio permille。若 cache hit rate 持续偏低，应检查 client profile sticky policy、affinity strategy、session header 以及 rebind/overflow 指标。
 
 验证 3000 IOPS 目标时，还应同时观察 Gateway 的 usage 写队列：
 
@@ -325,14 +323,15 @@ stateDiagram-v2
   pending --> active: 导入有效凭据 / import valid credential
   active --> degraded: 风险升高或短期失败 / elevated risk or short failures
   active --> revoked: 管理员下线 / admin offboarding
-  degraded --> active: 探针恢复或人工确认 / probe recovery or manual confirmation
+  degraded --> active: 上游回池探针成功 / successful upstream re-admission probe
   degraded --> recovery: 创建恢复任务 / create recovery task
   degraded --> quarantined: 风险继续升高 / risk continues rising
   degraded --> revoked: 管理员下线 / admin offboarding
   quarantined --> recovery: recover API
   quarantined --> revoked: 管理员下线 / admin offboarding
-  recovery --> active: 凭据有效并重置风险 / credential valid and risk reset
-  recovery --> quarantined: 凭据缺失/过期或恢复失败 / credential missing/expired or recovery failed
+  recovery --> active: token 与上游探针均成功 / token and upstream probes succeed
+  recovery --> degraded: degraded 来源发生暂时探针失败 / transient failure from degraded
+  recovery --> quarantined: 凭据失败或隔离来源恢复失败 / credential or quarantined recovery failure
   revoked --> [*]
 ```
 
@@ -346,6 +345,8 @@ stateDiagram-v2
 | `recovery` | 恢复任务处理中 |
 | `quarantined` | 暂停路由，等待恢复或重新导入凭据 |
 | `revoked` | 彻底下线，不再自动恢复 |
+
+仅成功获取 token 不能证明账号可以运行模型。token probe 成功只会降低 risk，并可能让 degraded 账号具备回池资格；只有真实上游模型探针成功才会将账号改回 `active`。探针使用独立 Worker 路径，不消耗客户端 usage、budget、RPM、sticky affinity 或 binding。PostgreSQL claim 与 health version fencing 会拒绝旧结果，Redis 在多个 Worker 实例间执行全局并发和启动速率限制。限流等待只更新下次到期时间，不会每秒增加 attempt 或写 audit。
 
 账号上线:
 
@@ -411,11 +412,14 @@ curl -s http://localhost:8001/admin/accounts/{account_id}/device-flow/complete \
 flowchart TD
   A["管理员点击 Recover 或调用 Admin API"] --> B["创建 recovery_tasks 记录"]
   B --> C["账号状态进入 recovery"]
-  C --> D["Recovery Worker 每 60s 扫描 pending task"]
-  D --> E{"存在 active credential 且未过期?"}
-  E -->|"是"| F["重置 risk score"]
-  F --> G["账号恢复 active"]
-  E -->|"否"| H["任务失败并保持 quarantined"]
+  C --> D["Worker 使用 lease claim 一条到期任务"]
+  D --> E{"token 获取成功?"}
+  E -->|"是"| F{"最小化上游模型探针成功?"}
+  F -->|"是"| G["事务内重置 risk 并恢复 active"]
+  E -->|"账号故障"| H["任务失败并恢复 degraded 或 quarantined"]
+  F -->|"账号故障"| H
+  E -->|"系统错误或限流"| I["释放 claim 并安排重试"]
+  F -->|"系统错误或限流"| I
 ```
 
 ### 2. 模型 ID 映射、别名与隐藏模型

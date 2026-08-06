@@ -283,7 +283,7 @@ CREATE TABLE system_settings (
 );
 
 INSERT INTO system_settings (key, value, description) VALUES
-    ('schema_version', '16', 'Installed database schema version'),
+    ('schema_version', '18', 'Installed database schema version'),
     ('copilot_metrics_sync_enabled', 'false', 'Enable GitHub Copilot Metrics sync worker'),
     ('audit_search_enabled', 'false', 'Enable audit log search API endpoint'),
     ('advanced_metrics_enabled', 'false', 'Enable detailed sticky/rebind/overflow metrics'),

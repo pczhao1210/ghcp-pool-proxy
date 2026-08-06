@@ -88,9 +88,9 @@ VM Docker 持久化：
 
 ### 100 账号单机规格
 
-当前账号表、Admin API 和 Dashboard 没有账号总数硬上限，100 个账号不需要扩大数据库字段或解除批量限制。账号记录本身占用很小；容量应按同时活跃的模型请求和 SSE 流估算，而不是按已录入账号数估算。默认账号并发为 `6`，100 个账号理论上可以产生 600 条活跃请求，但这不是建议的单机工作点。
+当前账号表、Admin API 和 Dashboard 没有账号总数硬上限，100 个账号不需要扩大数据库字段或解除批量限制。账号记录本身占用很小；容量应按同时活跃的模型请求和 SSE 流估算，而不是按已录入账号数估算。新账号默认并发为 `6`，100 个账号理论上有 600 个 shared 账号槽位；绑定池默认并发为 `10`，100 个各自绑定一个账号的用户理论上有 1000 个绑定槽位。这些都是账号侧上限，不是单机推荐工作点。
 
-RPM 默认值按 100 个账号配置为单账号 `60`、全局 `6000`。全局值是防止内部限流过早拦截的容量上限，不代表单机能够持续处理 100 RPS。当前不提供 TPM 分钟限流；Daily token 和 AI Credits 预算仍默认关闭，可按需单独启用。
+单账号 RPM 默认为 `60`，全局为 `6000`，与 100 个账号的账号级上限总和对齐。全局值表示滚动一分钟最多接纳 6000 次启动，若均匀分布最多约 100 次/秒。Redis Lua 脚本会原子完成过期清理、计数和接纳，某个窗口已经拒绝的尝试不会继续占用该窗口额度。Gateway 不在服务端排队等待窗口；窗口满时立即返回 429，由客户端退避并加入抖动后重试，避免等待请求继续占用连接和内存。RPM 只限制启动量，不能限制活跃流；当前客户端流量仍没有 gateway 级全局 active-request lease。Daily token 和 AI Credits 预算默认关闭，可按需单独启用。
 
 以下规格假设 PostgreSQL、Redis、gateway、admin 和 worker 都运行在同一台 VM，流量形态为交互式编程而非持续批处理。它们是压测前的起始建议，不是未经实测的吞吐保证。
 
@@ -101,17 +101,44 @@ RPM 默认值按 100 个账号配置为单账号 `60`、全局 `6000`。全局�
 | 100 RPS 验证规格 | `16 vCPU / 32 GiB` | `256–512 GiB / 3000 IOPS` | 仅在目标负载延迟压测通过时使用；ledger 批量写、增量 rollup、分区保留和日志采样均保持启用 |
 | I/O 受限规格 | `16–32 vCPU / 32–64 GiB` | `>=5000 IOPS` | 仅在实测持续触发磁盘队列或延迟告警时使用；磁盘容量不能替代写路径检查 |
 
+100 账号的默认容量控制：
+
+| 控制项 | 默认值 | 运维意图 |
+| --- | --- | --- |
+| 新账号 `max_concurrency` | `6` | 支持普通 shared 流量中的并行工具和 sub-agent，同时保留账号级保护 |
+| 新绑定池 `binding_max_concurrency` | `10` | 允许同一绑定用户运行一组 sub-agent；绑定账号不可用或满载时仍不会自动换号 |
+| 单账号 / 全局 RPM | `60` / `6000` | 允许 100 个账号各自达到账号级 RPM；滑动窗口原子拒绝超额启动，不提供服务端等待队列 |
+| PostgreSQL pool | 每进程 `12`，gateway/admin/worker 合计最多 `36` | 为 PostgreSQL 常见连接预算留余量，并降低连接内存压力 |
+| Token probe | 并发 `5`、每秒启动 `2` | 约一分钟清空 100 账号启动积压，避免外部 API 突发 |
+| Usage writer | queue `10000`、batch `500`、threshold `100`、interval `250ms` | 现有批处理已经保守；只根据队列年龄、丢弃和 COPY 延迟调整 |
+| 日志 | `info`、成功请求采样 `0.01` | 保留错误信息，同时限制 CPU 与磁盘放大 |
+
+Migration 018 只修改数据库列默认值，不会重写现有账号或 pool 的并发配置。Dashboard 已保存的 `budget_max_rpm_global` 也会继续覆盖新的 `6000` 启动 fallback，因此已有部署若保存过 `600`，需要显式修改。
+
 Azure 上推荐把 PostgreSQL、Redis AOF 和应用日志放到独立数据盘，不与 OS 盘争用。Premium SSD v2 的基线为 `3000 IOPS / 125 MB/s`，容量与性能可分别配置，因此应先在该基线内验证 100 RPS 规格，而不是假定需要 `8000–12000 IOPS`。若使用容量绑定性能的 Premium SSD v1，P20 为 `512 GiB / 2300 IOPS / 150 MB/s`，P30 为 `1 TiB / 5000 IOPS / 200 MB/s`；根据磁盘延迟和队列深度实测选择档位。还需确认所选 VM 的总数据盘 IOPS/吞吐上限不低于磁盘配置。
 
 目标是在稳定压测中让磁盘 IOPS 持续低于配额的 60–70%，并同时满足 PostgreSQL commit latency p95 `<5 ms`、磁盘队列无持续增长。若 3000 IOPS 下无法满足这些指标，应先确认 ledger 是否已批量写入、rollup 是否仍重复扫描和成功日志是否已采样，再考虑提高磁盘档位。生产环境还应预留快照、WAL 和备份空间，不能把整块数据盘都分配给 PostgreSQL。
+
+以 `6000 RPM` 持续跑满、稳定完成 `100 RPS` 为磁盘上界进行估算。2026-08-06 在 PostgreSQL 16 的当前 schema 上用代表性成功记录实测：ledger heap 行约 `360 B`；100 行和 500 行批次分别产生 `40000 B` 和 `196760 B` WAL，即约 `394–400 B/请求`；一次带索引的 user-binding TTL touch 产生约 `568 B` WAL。当前 user-binding 热路径通常在请求进入和结束时各 touch 一次，长流还会每 30 秒续租一次。
+
+| 写入来源 | `100 RPS` 持续估算 | 说明 |
+| --- | --- | --- |
+| Raw ledger heap | 约 `35 KiB/s`、`3.11 GB/天`、7 天约 `21.8 GB` | 每个完成请求一行；BRIN 索引增量很小 |
+| Ledger WAL | 约 `39 KiB/s`、`3.46 GB/天` | threshold 100 时通常约每秒一次 COPY commit，而不是每请求一次事务 |
+| User-binding touch WAL | 约 `111 KiB/s`、`9.81 GB/天` | 按每请求两次 touch；另加 `active_streams / 30` 次续租/秒 |
+| PostgreSQL WAL 合计 | 通常约 `150–170 KiB/s`、`13–15 GB/天` | 包含 256 条活跃长流的续租余量；不含 checkpoint full-page image、vacuum 和 rollup 突发 |
+
+WAL 默认循环复用，`13–15 GB/天` 不等于每天永久增加这些空间；若启用 WAL 归档并保存在同一数据盘，则必须额外按“归档天数 × 每天 WAL”预留，生产上更适合把归档放到独立存储。物理 I/O 还会受到 group commit、页缓存、checkpoint 和 autovacuum 合并影响：该负载的稳态经验预算约 `200–600 IOPS`，rollup、vacuum、checkpoint 和 AOF rewrite 突发预算约 `1500 IOPS`。因此单机共置部署仍以 `3000 IOPS / 125 MB/s` 为推荐下限，目标是持续使用不超过配额的 60–70%；`128 GB` 是最低可运营容量，`256 GB` 更适合保留 WAL、Redis AOF、日志、快照和恢复余量。若请求平均时长使并发或单 gateway 的 256 个上游连接先饱和，实际可持续 RPS 和磁盘写入会低于上述上界。
 
 主要瓶颈及扩展顺序：
 
 1. **磁盘容量和写延迟**：Gateway 通过有界队列和 PostgreSQL `COPY` 批量写 `usage_ledger`，PostgreSQL 仍会产生数据页和 WAL；Redis 使用 AOF `everysec`，Docker JSON 日志和按小时收集的日志也会占盘。Worker 默认保留 7 天 UTC 日分区 raw 数据、90 天 UTC 日分区 hourly rollup，以及当前月加之前 13 个完整自然月的 monthly-partitioned daily rollup；清理只 `DROP` 完整分区。20 GB 仍缺少 WAL、快照和故障恢复余量，应扩到至少 128–256 GiB，并为磁盘使用率设置 70% 告警。持续 100 RPS 的优化目标是压测后稳定运行在 3000 IOPS 基线内，不是未经实测的吞吐承诺。
 2. **RAM**：4 GiB 需要同时容纳宿主机、五个容器、PostgreSQL cache、Redis 数据、连接 buffer 和请求体。长会话、并发流和 Dashboard 聚合会增加峰值。常驻内存持续超过 75%、开始使用 swap 或出现 OOM 时升到 16 GiB；不要依赖 swap 承载正常流量。
 3. **CPU**：账号数量本身几乎不消耗 CPU；JSON 协议转换、SSE 事件转发、日志、数据库查询和后台 rollup 随请求/事件速率增长。2 核容易让 gateway 与 PostgreSQL/worker 相互争抢。CPU 持续超过 70% 或 run queue 持续高于 vCPU 数时，从 4 核升到 8 核，或把数据服务迁出 VM。
-4. **Redis/PostgreSQL 往返与连接**：一次模型请求会经过多次 Redis 路由、并发、sticky/binding 操作；usage 先进入 Gateway 的有界内存队列，积压达到 100 条时立即组批、单批最多 500 条，否则最多等待 250 ms 后 `COPY`。gateway、admin、worker 默认各自最多打开 25 个 PostgreSQL 连接，单机理论合计 75 个；连接获取等待或数据库延迟升高时，优先检查慢查询、队列丢弃、连接池和存储延迟，不能只继续提高 RPM。
-5. **长连接和网络**：SSE 大部分时间不消耗整核 CPU，但会长期占用 socket、内存和账号并发。Copilot HTTP transport 单主机默认最多 256 个连接，所以 600 个账号并发槽不能全部由一个 gateway 进程同时兑现。接近 200 条活跃流时应压测文件描述符、网络带宽和连接上限；继续增长时优先拆分 gateway 与 PostgreSQL/Redis，随后水平扩展 gateway。
+4. **Redis/PostgreSQL 往返与连接**：一次模型请求会经过多次 Redis 路由、并发、sticky/binding 操作，binding 流量还会访问 PostgreSQL 刷新或分配绑定。usage 先进入 Gateway 的有界内存队列，积压达到 100 条时立即组批、单批最多 500 条，否则最多等待 250 ms 后 `COPY`。gateway、admin、worker 默认各自最多打开 12 个 PostgreSQL 连接，单机理论合计 36 个；连接获取等待或数据库延迟升高时，先检查慢查询、binding 流量、队列丢弃和存储延迟，再决定是否增大连接池。
+5. **长连接和网络**：SSE 大部分时间不消耗整核 CPU，但会长期占用 socket、内存和账号并发。Copilot HTTP transport 单主机默认最多 256 个连接，所以 600 个 shared 槽位或 1000 个 binding 槽位都不能由一个 gateway 进程同时兑现。4C8G 上 `ghcp_copilot_active_streams` 持续超过 80 时应开始排查；约 128 条应视为偏保守的扩容边界，而不是先提高 256 的 transport ceiling。继续增长时先拆分 gateway 与 PostgreSQL/Redis，再水平扩展 gateway。
+
+使用持续 10–15 分钟的信号，不按一分钟尖峰扩容：CPU 超过 70%、常驻内存超过 75% 或出现 swap、活跃流超过 80、PostgreSQL pool 接近 12 且出现获取等待、Redis p95 高于约 `5 ms`、usage queue 超过 2000 或最老记录超过一秒、以及任何 usage record 丢弃。这些是排查和压测触发线，不表示只能通过升级 VM 解决。
 
 建议按以下顺序扩展：先把当前 VM 升到 4C8G 并扩盘，观察至少一个工作周；若瓶颈集中在数据库写延迟，先迁移 PostgreSQL 到独立 SSD 或托管实例；若 CPU、活跃 SSE 或单主机连接数成为瓶颈，再增加 gateway 实例。增加 gateway 实例不会增加账号侧容量，且所有实例必须共享 PostgreSQL 和 Redis。
 
@@ -120,6 +147,8 @@ Azure 上推荐把 PostgreSQL、Redis AOF 和应用日志放到独立数据盘�
 配置分为两类权威来源。本地源码部署使用 `start.sh` 创建且被 Git 忽略的仓库 `config.yaml`；VM 部署使用 `deploy.sh generate-config` 创建的 `~/ghcp_proxy/config.yaml`。Provider/OAuth 端点、超时、连接池与队列容量和日志是 YAML 启动配置，Dashboard 只读展示 effective value，修改后必须重启。部署密钥、宿主机路径、端口、监听地址以及 PostgreSQL/Redis 地址保存在 `~/ghcp_proxy/.env`。自定义部署遵循“环境变量 > YAML > 内置默认值”；VM Compose 从 `.env` 注入部署值，并从 YAML 读取应用启动配置。
 
 预算、Feature Flags、模型目录、Gateway Public URL、Client/GitHub fallback key 和 usage retention 存在 PostgreSQL，可在 Dashboard 热更新。Retention 的优先级为 DB 覆盖值高于 YAML/环境变量启动 fallback，再高于内置默认值。Worker 会在每次 maintenance pass 前刷新 retention，当前周期为 5 分钟，无需重启。缩短非零窗口可能永久删除更老的完整分区；设为 `0` 表示关闭该层清理。
+
+Dashboard Events 默认打开聚焦后的 `Changes` 视图，在分页前排除例行的凭据过期通知和自动回池启动通知；`All events` 仍可查看完整审计流水。凭据告警 worker 现在对每个 `credential_id + expires_at` 最多写一条审计事件，凭据续期后会进入新的告警周期。已有重复行会保留，不做删除。
 
 推荐开启的 Copilot 兼容开关是 `copilot_compat_anthropic_beta_enabled`、`copilot_compat_thinking_tool_choice_enabled`、`copilot_compat_cache_control_enabled` 和 `copilot_compat_vision_header_enabled`。Migration 015 会把四项都写为 `true`；Gateway 对缺失/读取失败也按开启处理，并把结果缓存最多 60 秒。这些开关只控制已审查的请求兼容规则，不选择上游 wire protocol。Anthropic 模型默认走原生 Messages；要回滚某个模型，可设置 `upstream_api=chat_completions`。
 
@@ -149,7 +178,7 @@ Azure 上推荐把 PostgreSQL、Redis AOF 和应用日志放到独立数据盘�
 | `logging.success_sample_rate` | 成功 access log 采样率，默认 `0.01`；错误请求始终记录 |
 | `provider.type` | 上游 provider 类型，VM 部署默认 `copilot` |
 | `provider.base_url` / `provider.timeout` | 可选 Copilot 端点覆盖与上游超时 |
-| `postgres_pool.max_open_connections` | 每个应用进程最大 PostgreSQL 连接数，默认 `25` |
+| `postgres_pool.max_open_connections` | 每个应用进程最大 PostgreSQL 连接数，默认 `12` |
 | `CREDENTIAL_MASTER_KEY` | 凭据加密主密钥 |
 | `github.oauth_client_id` | Dashboard Device Flow 登录 Copilot 账号的 GitHub OAuth App client ID，可选覆盖项；默认使用内置 GitHub OAuth Client ID。 |
 | `github.oauth_scopes` | Device Flow scopes，默认 `read:user` |

@@ -84,7 +84,7 @@ session_binding: client_profile_id + pool_id + lower(trim(session_id))
 - 首次绑定只从该 pool 中选择未被 active binding 占用的账号。
 - 首次绑定账号排序：低账号 `priority`、低 `risk_score`、高 pool membership `weight`、低账号 `id`。
 - 每次命中会刷新 `last_used_at` 和 `expires_at`；默认 `user_binding` 7 天不用后过期，`session_binding` 5 分钟不用后过期；pool 的 `binding_ttl_seconds` 可覆盖默认值。
-- 绑定池使用 pool 的 `binding_max_concurrency` 作为有效并发上限，默认建议值是 10，不修改账号原始 `max_concurrency`。
+- 绑定池使用 pool 的 `binding_max_concurrency` 作为有效并发上限，默认值是 10，不修改账号原始 `max_concurrency`。
 - 解除方式只有过期或 Dashboard pool 展开详情中的手动 `Release`。
 - 绑定账号不可用、seat 不可用或达到并发上限时请求失败，不会自动换到其它账号。
 - 普通 `shared` pool 会避开 active binding 占用账号。
@@ -203,7 +203,7 @@ Risk score 是账号级健康分，数值越高风险越高。候选过滤只接
 
 Gateway 在路由前检查全局 RPM、全局 daily tokens 和全局 daily AI credits；选中账号后再检查账号级 RPM、tokens 和 AI credits。预算不通过时请求返回 429 或预算错误，不会继续尝试其它账号。
 
-Daily token 和 AI Credits 预算默认关闭。可在 Dashboard Config 页配置，或将 `BUDGET_MAX_DAILY_TOKENS_PER_ACCOUNT`、`BUDGET_MAX_DAILY_TOKENS_GLOBAL`、`BUDGET_MAX_DAILY_NANO_AIU_PER_ACCOUNT`、`BUDGET_MAX_DAILY_NANO_AIU_GLOBAL` 设置为大于 `0` 的值启用对应上限。RPM 保护默认开启：`BUDGET_MAX_RPM_PER_ACCOUNT=60`、`BUDGET_MAX_RPM_GLOBAL=6000`；任一值设为 `0` 可关闭对应 RPM 检查。Gateway 会周期性刷新 Dashboard 保存的预算设置，环境变量只是启动默认值。
+Daily token 和 AI Credits 预算默认关闭。可在 Dashboard Config 页配置，或将 `BUDGET_MAX_DAILY_TOKENS_PER_ACCOUNT`、`BUDGET_MAX_DAILY_TOKENS_GLOBAL`、`BUDGET_MAX_DAILY_NANO_AIU_PER_ACCOUNT`、`BUDGET_MAX_DAILY_NANO_AIU_GLOBAL` 设置为大于 `0` 的值启用对应上限。RPM 保护默认开启：`BUDGET_MAX_RPM_PER_ACCOUNT=60`，100 账号聚合上限为 `BUDGET_MAX_RPM_GLOBAL=6000`；任一值设为 `0` 可关闭对应 RPM 检查。RPM 使用 Redis 原子滑动窗口；窗口满时直接返回 429，不在 Gateway 内等待，被该窗口拒绝的尝试不会继续占用该窗口额度。Gateway 会周期性刷新 Dashboard 保存的预算设置，环境变量只是启动默认值；数据库中已保存的值仍优先。
 
 Router 本身不读取预算账本；它只处理指定 pool、账号状态、seat、reserved 和并发。
 

@@ -626,7 +626,7 @@ config_decimal_value() {
 }
 
 validate_generated_config_values() {
-  config_integer_value POSTGRES_MAX_OPEN_CONNS 25 >/dev/null
+  config_integer_value POSTGRES_MAX_OPEN_CONNS 12 >/dev/null
   config_integer_value USAGE_WRITER_QUEUE_SIZE 10000 >/dev/null
   config_integer_value USAGE_WRITER_BATCH_SIZE 500 >/dev/null
   config_integer_value USAGE_WRITER_FLUSH_THRESHOLD 100 >/dev/null
@@ -634,8 +634,8 @@ validate_generated_config_values() {
   config_integer_value USAGE_HOURLY_RETENTION_DAYS 90 >/dev/null
   config_integer_value USAGE_DAILY_RETENTION_MONTHS 13 >/dev/null
   config_integer_value USAGE_PARTITION_AHEAD_DAYS 7 >/dev/null
-  config_integer_value HEALTH_TOKEN_PROBE_CONCURRENCY 10 >/dev/null
-  config_integer_value HEALTH_TOKEN_PROBE_STARTS_PER_SECOND 5 >/dev/null
+  config_integer_value HEALTH_TOKEN_PROBE_CONCURRENCY 5 >/dev/null
+  config_integer_value HEALTH_TOKEN_PROBE_STARTS_PER_SECOND 2 >/dev/null
   config_integer_value HEALTH_UPSTREAM_PROBE_CONCURRENCY 2 >/dev/null
   config_integer_value HEALTH_UPSTREAM_PROBE_STARTS_PER_MINUTE 12 >/dev/null
   config_integer_value HEALTH_DEGRADE_THRESHOLD 70 >/dev/null
@@ -692,8 +692,8 @@ health:
   degraded_token_probe_interval: $(config_string_value HEALTH_DEGRADED_TOKEN_PROBE_INTERVAL 60s)
   token_probe_timeout: $(config_string_value HEALTH_TOKEN_PROBE_TIMEOUT 5s)
   token_probe_claim_lease: $(config_string_value HEALTH_TOKEN_PROBE_CLAIM_LEASE 15s)
-  token_probe_concurrency: $(config_integer_value HEALTH_TOKEN_PROBE_CONCURRENCY 10)
-  token_probe_starts_per_second: $(config_integer_value HEALTH_TOKEN_PROBE_STARTS_PER_SECOND 5)
+  token_probe_concurrency: $(config_integer_value HEALTH_TOKEN_PROBE_CONCURRENCY 5)
+  token_probe_starts_per_second: $(config_integer_value HEALTH_TOKEN_PROBE_STARTS_PER_SECOND 2)
   re_admission_cooldown: $(config_string_value HEALTH_RE_ADMISSION_COOLDOWN 5m)
   upstream_probe_timeout: $(config_string_value HEALTH_UPSTREAM_PROBE_TIMEOUT 15s)
   upstream_probe_claim_lease: $(config_string_value HEALTH_UPSTREAM_PROBE_CLAIM_LEASE 30s)
@@ -709,7 +709,7 @@ health:
 
 postgres_pool:
   # Maximum PostgreSQL connections opened by each application process.
-  max_open_connections: $(config_integer_value POSTGRES_MAX_OPEN_CONNS 25)
+  max_open_connections: $(config_integer_value POSTGRES_MAX_OPEN_CONNS 12)
   # Recycle connections periodically and close long-idle connections.
   max_conn_lifetime: $(config_string_value POSTGRES_CONN_MAX_LIFETIME 5m)
   max_conn_idle_time: $(config_string_value POSTGRES_MAX_CONN_IDLE_TIME 5m)
@@ -1248,8 +1248,15 @@ affinity_strategy_schema_current() {
   [[ "$(db_scalar "SELECT NOT EXISTS (SELECT 1 FROM client_profiles WHERE sticky_mode = 'prefix');")" == "t" ]]
 }
 
+conservative_capacity_defaults_schema_current() {
+  [[ "$(db_scalar "SELECT (SELECT column_default FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'accounts' AND column_name = 'max_concurrency') = '6' AND (SELECT column_default FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'backend_pools' AND column_name = 'binding_max_concurrency') = '10';")" == "t" ]]
+}
+
 target_schema_current() {
   case "$(target_schema_version)" in
+    18)
+      pool_user_binding_schema_current && fixed_pool_assignment_schema_current && usage_ledger_partition_schema_current && usage_rollup_partition_schema_current && metrics_snapshot_schema_current && copilot_compatibility_flags_schema_current && account_health_schema_current && affinity_strategy_schema_current && conservative_capacity_defaults_schema_current
+      ;;
     17)
       pool_user_binding_schema_current && fixed_pool_assignment_schema_current && usage_ledger_partition_schema_current && usage_rollup_partition_schema_current && metrics_snapshot_schema_current && copilot_compatibility_flags_schema_current && account_health_schema_current && affinity_strategy_schema_current
       ;;
@@ -1371,7 +1378,7 @@ apply_smooth_schema_upgrade() {
   local current="$1"
   local target="$2"
 
-  if [[ "$target" != "12" && "$target" != "13" && "$target" != "14" && "$target" != "15" && "$target" != "16" && "$target" != "17" ]]; then
+  if [[ "$target" != "12" && "$target" != "13" && "$target" != "14" && "$target" != "15" && "$target" != "16" && "$target" != "17" && "$target" != "18" ]]; then
     schema_conflict "automatic smooth migration to schema version $target is not defined"
   fi
   if (( current > target )); then
@@ -1668,6 +1675,9 @@ SQL
   fi
   if (( target >= 17 )); then
     apply_migration_file "017_affinity_strategy.sql"
+  fi
+  if (( target >= 18 )); then
+    apply_migration_file "018_conservative_capacity_defaults.sql"
   fi
 
   set_database_schema_version "$target"

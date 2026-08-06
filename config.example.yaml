@@ -38,8 +38,8 @@ health:
   degraded_token_probe_interval: "60s"
   token_probe_timeout: "5s"
   token_probe_claim_lease: "15s"
-  token_probe_concurrency: 10
-  token_probe_starts_per_second: 5
+  token_probe_concurrency: 5
+  token_probe_starts_per_second: 2
   re_admission_cooldown: "5m"
   upstream_probe_timeout: "15s"
   upstream_probe_claim_lease: "30s"
@@ -55,7 +55,7 @@ health:
 
 postgres_pool:
   # Maximum PostgreSQL connections opened by each application process.
-  max_open_connections: 25
+  max_open_connections: 12
   # Recycle connections periodically and close long-idle connections.
   max_conn_lifetime: "5m"
   max_conn_idle_time: "5m"

@@ -850,10 +850,14 @@ load_environment() {
 compose() {
   if [[ "$COMPOSE_MODE" == "standalone" ]]; then
     if [[ "$DOCKER_REQUIRES_SUDO" -eq 1 && "$(id -u)" -ne 0 ]]; then
-      run_privileged docker-compose --env-file "$ENV_FILE" -p "$PROJECT_NAME" -f "$COMPOSE_FILE" "$@"
+      run_privileged env APP_CONFIG_FILE="$APP_CONFIG_FILE" docker-compose --env-file "$ENV_FILE" -p "$PROJECT_NAME" -f "$COMPOSE_FILE" "$@"
       return $?
     fi
     docker-compose --env-file "$ENV_FILE" -p "$PROJECT_NAME" -f "$COMPOSE_FILE" "$@"
+    return $?
+  fi
+  if [[ "$DOCKER_REQUIRES_SUDO" -eq 1 && "$(id -u)" -ne 0 ]]; then
+    run_privileged env APP_CONFIG_FILE="$APP_CONFIG_FILE" docker compose --env-file "$ENV_FILE" -p "$PROJECT_NAME" -f "$COMPOSE_FILE" "$@"
     return $?
   fi
   docker_cli compose --env-file "$ENV_FILE" -p "$PROJECT_NAME" -f "$COMPOSE_FILE" "$@"

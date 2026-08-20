@@ -895,6 +895,7 @@ write_env_file_if_missing() {
     add_env_if_missing ADMIN_TOKEN "$(random_hex 32)"
     add_env_if_missing CREDENTIAL_KEY_VERSION "vm"
     add_env_if_missing CREDENTIAL_MASTER_KEY "$(random_hex 32)"
+    add_env_if_missing ORG_SYNC_ENABLED "false"
     add_env_if_missing LOG_RETENTION_DAYS "$LOG_RETENTION_DAYS"
     return 0
   fi
@@ -921,6 +922,7 @@ COMPOSE_NETWORK_NAME=ghcp-proxy-net
 ADMIN_TOKEN=$(random_hex 32)
 CREDENTIAL_KEY_VERSION=vm
 CREDENTIAL_MASTER_KEY=$(random_hex 32)
+ORG_SYNC_ENABLED=false
 
 LOG_RETENTION_DAYS=$LOG_RETENTION_DAYS
 

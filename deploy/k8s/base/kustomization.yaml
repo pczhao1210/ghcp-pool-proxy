@@ -17,6 +17,7 @@ configMapGenerator:
   - name: ghcp-runtime-env
     literals:
       - PROVIDER=fake
+      - ORG_SYNC_ENABLED=false
 generatorOptions:
   labels:
     app.kubernetes.io/name: ghcp-pool-proxy

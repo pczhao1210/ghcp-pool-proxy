@@ -186,6 +186,7 @@ Dashboard Events 默认打开聚焦后的 `Changes` 视图，在分页前排除�
 | `GATEWAY_BIND_ADDR` / `ADMIN_BIND_ADDR` | VM 发布 Gateway/Admin 端口使用的宿主机接口；两者默认均为 `127.0.0.1`。应使用 SSH 转发或终止 TLS 的私有入口，绝不能在不可信网络上明文暴露 Admin。 |
 | `WORKER_METRICS_ADDR` | Worker 健康检查和 retention 指标监听地址，默认 `:8002`；VM Compose 仅映射到宿主机 `127.0.0.1` |
 | `WORKER_ROLES` | 逗号分隔的 Worker 循环：`all`（默认）、`credential-warning`、`health`、`metrics-sync`、`usage-rollup`、`provider-attempts`、`budget-recovery`、`binding-expiry` 或 `capability-sync`。两套 Compose 基线都会透传该变量。Kubernetes 将 `metrics-sync` 放入专用 `ghcp-org-sync-worker`；只有 production Copilot overlay 会在 general Worker 中增加 `capability-sync`，fake-provider overlay 不启用。`budget-recovery` 必须依赖 Redis 就绪；能力 fencing 使用 PostgreSQL，不要求 Redis。 |
+| `ORG_SYNC_ENABLED` | 是否开启 GitHub 组织 Metrics 与 seat 同步，默认 `false`。关闭时 Worker 不会处理同步任务，相关 Admin API 返回 `404`。VM 会补写缺失值但不替换已有 `.env` 值；Kind 和 Azure 也会将同一环境变量传入 Kustomize runtime ConfigMap。 |
 | `CAPABILITY_SYNC_MATRIX_PATH` | `capability-sync` 使用的版本化兼容矩阵；源码默认 `compatibility/matrix.json`，打包 Worker 默认 `/srv/ghcp/compatibility/matrix.json` |
 | `CAPABILITY_SYNC_INTERVAL` / `CAPABILITY_SYNC_RUN_TIMEOUT` / `CAPABILITY_SYNC_LEASE_DURATION` | 能力采集周期和 fencing deadline；默认分别为 `1h`、`10m`、`11m` |
 | `CAPABILITY_EVIDENCE_TTL` | 持久化 account-model evidence 的 freshness 窗口，默认 `24h`，必须长于采集周期 |

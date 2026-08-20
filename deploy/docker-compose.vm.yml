@@ -65,6 +65,7 @@ services:
       CONFIG_FILE: "/etc/ghcp/config.yaml"
       GATEWAY_ADDR: ":8000"
       ADMIN_TOKEN: "${ADMIN_TOKEN:?ADMIN_TOKEN is required}"
+      ORG_SYNC_ENABLED: "${ORG_SYNC_ENABLED:-false}"
       POSTGRES_DSN: "postgres://${POSTGRES_USER:-ghcp}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-ghcp}?sslmode=disable"
       REDIS_ADDR: "redis:6379"
       BUDGET_MAX_RPM_PER_ACCOUNT: "${BUDGET_MAX_RPM_PER_ACCOUNT:-60}"
@@ -126,6 +127,7 @@ services:
     environment:
       CONFIG_FILE: "/etc/ghcp/config.yaml"
       ADMIN_TOKEN: "${ADMIN_TOKEN:?ADMIN_TOKEN is required}"
+      ORG_SYNC_ENABLED: "${ORG_SYNC_ENABLED:-false}"
       POSTGRES_DSN: "postgres://${POSTGRES_USER:-ghcp}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-ghcp}?sslmode=disable"
       REDIS_ADDR: "redis:6379"
       WORKER_METRICS_ADDR: ":8002"

@@ -40,9 +40,11 @@ AZURE_LOCATION="${AZURE_LOCATION:-}"
 AZURE_DEPLOYMENT_NAME="${AZURE_DEPLOYMENT_NAME:-}"
 AZURE_PARAMETERS_FILE=""
 AZURE_APP_OVERLAY_DIR=""
+LOCAL_APP_OVERLAY_DIR=""
 WORK_DIR=""
 SECRET_DIR=""
 NAMESPACE=""
+ORG_SYNC_ENABLED="${ORG_SYNC_ENABLED:-false}"
 
 usage() {
   cat <<'EOF'
@@ -77,6 +79,7 @@ Options:
 Shared environment:
   RELEASE_MANIFEST         Immutable release-set manifest.
   RELEASE_MANIFEST_FILE    Legacy alias used only when RELEASE_MANIFEST is unset.
+  ORG_SYNC_ENABLED         Enable GitHub organization sync. Default: false.
 
 Azure resource choices are prompted as create or reuse. They can also be supplied with:
   AZURE_SUBSCRIPTION_ID, AZURE_RESOURCE_GROUP, AZURE_RESOURCE_GROUP_MODE
@@ -391,6 +394,33 @@ validate_credential_key() {
   die "CREDENTIAL_MASTER_KEY must be 32 characters or 64 hexadecimal characters"
 }
 
+validate_org_sync_enabled() {
+  [[ "$ORG_SYNC_ENABLED" == "true" || "$ORG_SYNC_ENABLED" == "false" ]] || {
+    die "ORG_SYNC_ENABLED must be true or false"
+  }
+}
+
+prepare_local_overlay() {
+  [[ -n "$WORK_DIR" ]] || WORK_DIR="$(mktemp -d)"
+  LOCAL_APP_OVERLAY_DIR="$WORK_DIR/application-overlay"
+  mkdir -p "$LOCAL_APP_OVERLAY_DIR"
+  ln -s "$SCRIPT_DIR/k8s/overlays/$ENVIRONMENT" "$LOCAL_APP_OVERLAY_DIR/base"
+  cat > "$LOCAL_APP_OVERLAY_DIR/runtime.env" <<EOF
+ORG_SYNC_ENABLED=$ORG_SYNC_ENABLED
+EOF
+  cat > "$LOCAL_APP_OVERLAY_DIR/kustomization.yaml" <<EOF
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - base
+configMapGenerator:
+  - name: ghcp-runtime-env
+    behavior: merge
+    envs:
+      - runtime.env
+EOF
+}
+
 prepare_azure_overlay() {
   [[ -n "$WORK_DIR" ]] || WORK_DIR="$(mktemp -d)"
   AZURE_APP_OVERLAY_DIR="$WORK_DIR/application-overlay"
@@ -405,6 +435,7 @@ REDIS_DB=0
 REDIS_TLS=true
 REDIS_TLS_SERVER_NAME=$REDIS_TLS_SERVER_NAME
 CREDENTIAL_KEY_VERSION=$CREDENTIAL_KEY_VERSION
+ORG_SYNC_ENABLED=$ORG_SYNC_ENABLED
 EOF
   cat > "$AZURE_APP_OVERLAY_DIR/kustomization.yaml" <<EOF
 apiVersion: kustomize.config.k8s.io/v1beta1
@@ -479,6 +510,9 @@ run_rollout() {
   if [[ "$MODE" == "azure" ]]; then
     app_overlay="$AZURE_APP_OVERLAY_DIR"
     unrestricted="true"
+  elif [[ "$MODE" == "local" ]]; then
+    app_overlay="$LOCAL_APP_OVERLAY_DIR"
+    unrestricted="true"
   fi
   APP_OVERLAY_DIR="$app_overlay" \
     KUSTOMIZE_LOAD_RESTRICTOR_NONE="$unrestricted" \
@@ -501,6 +535,8 @@ case "$MODE" in
     [[ "$ENVIRONMENT_SET" -eq 0 ]] || die "--environment is only valid for azure mode"
     ENVIRONMENT="test"
     NAMESPACE="ghcp-test"
+    validate_org_sync_enabled
+    prepare_local_overlay
     if [[ "$ACTION" == "apply" ]]; then
       if [[ -n "$KUBE_CONTEXT" ]]; then
         ensure_kubernetes_client_tools
@@ -526,6 +562,7 @@ case "$MODE" in
       staging) NAMESPACE="ghcp-staging" ;;
     esac
     azure_prepare_infrastructure
+    validate_org_sync_enabled
     prompt_default CREDENTIAL_KEY_VERSION "Credential key version" "$(date -u +%Y-%m)"
     validate_azure_values
     prepare_azure_overlay

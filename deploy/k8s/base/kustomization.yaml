@@ -1,0 +1,29 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../common
+  - gateway-deployment.yaml
+  - gateway-service.yaml
+  - admin-deployment.yaml
+  - admin-service.yaml
+  - worker-deployment.yaml
+  - worker-service.yaml
+  - org-sync-worker-deployment.yaml
+  - org-sync-worker-service.yaml
+configMapGenerator:
+  - name: ghcp-app-config
+    files:
+      - config.yaml=app-config.yaml
+  - name: ghcp-runtime-env
+    literals:
+      - PROVIDER=fake
+generatorOptions:
+  labels:
+    app.kubernetes.io/name: ghcp-pool-proxy
+    app.kubernetes.io/part-of: ghcp-pool-proxy
+labels:
+  - pairs:
+      app.kubernetes.io/name: ghcp-pool-proxy
+      app.kubernetes.io/part-of: ghcp-pool-proxy
+    includeSelectors: false
+    includeTemplates: true

@@ -5,6 +5,7 @@ GHCP Pool Proxy decouples downstream model protocol endpoints from upstream Copi
 ## Contents
 
 - [Architecture Goals](#architecture-goals)
+- [Project Scope](#project-scope)
 - [Overall Structure](#overall-structure)
 - [Request Path](#request-path)
 - [Config Refresh and Recovery Flow](#config-refresh-and-recovery-flow)
@@ -20,6 +21,12 @@ GHCP Pool Proxy decouples downstream model protocol endpoints from upstream Copi
 - Keep the gateway stateless; put hot state in Redis and source-of-truth state in PostgreSQL.
 - Routing decisions prioritize health, budget, risk, concurrency, and seat status; sticky affinity is only a soft preference.
 - Account lifecycle, recovery, org/seat sync, and Copilot Metrics sync live in the control plane and worker, outside the request hot path.
+
+## Project Scope
+
+The public surface consists of OpenAI Chat Completions, OpenAI Responses, Anthropic Messages, and model-discovery APIs. Admin provides the authenticated control plane and serves the operations dashboard; Worker owns probes, recovery, retention, and synchronization work.
+
+GitHub Copilot is the only model provider. GitHub CLI, SDK, REST, and GraphQL access are limited to credential bootstrap and control-plane workflows, never exposed as a client operation API or invoked per model request.
 
 ## Overall Structure
 
@@ -106,16 +113,16 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-  Worker["Metrics Sync Worker"] --> Flag{"copilot_metrics_sync_enabled?"}
-  Flag -->|"no"| Skip["skip this run"]
-  Flag -->|"yes"| Orgs["read metrics-enabled orgs"]
-  Orgs --> Token{"org token or GITHUB_TOKEN?"}
-  Token -->|"none"| Warn["warn and skip org"]
-  Token -->|"present"| GitHub["latest 28-day usage report"]
-  GitHub --> Download["signed report downloads"]
-  Download --> Snapshot[(validated metrics snapshots)]
-  Snapshot --> Reconcile["reconcile latest UTC day with same-org proxy usage"]
-  Reconcile --> Dashboard["dashboard sync status"]
+  Admin["Admin manual sync POST"] --> Queue[(org_sync_requests)]
+  Scheduler["Metrics scheduler"] --> Flag{"copilot_metrics_sync_enabled?"}
+  Flag -->|"yes"| Queue
+  Flag -->|"no"| Skip["skip scheduled enqueue"]
+  Queue --> Worker["Metrics Sync Worker claim/lease"]
+  Worker --> Token{"GITHUB_TOKEN_FILE?"}
+  Token -->|"missing"| Retry["release for retry"]
+  Token -->|"available"| GitHub["latest 28-day report or seats"]
+  GitHub --> Commit["fenced snapshot upsert or seat generation write"]
+  Commit --> Dashboard["request status and audit"]
 ```
 
 ## Layer Responsibilities
@@ -139,8 +146,8 @@ flowchart LR
 - Uses the authenticated client profile's required pool and selects an eligible account within that pool.
 - Supports sticky affinity, rebind, and overflow.
 - Filters out inactive pools, inactive accounts, unavailable org/enterprise seats, and over-concurrency accounts.
+- For `require_fresh` profiles, also filters accounts without current complete evidence for the resolved upstream model and API.
 - Sorts candidate accounts by risk, current concurrency, pool membership weight, and account priority.
-- Does not filter by per-account model entitlement; accounts with different model access require separate pools.
 
 ### Copilot Provider Adapter
 
@@ -150,8 +157,8 @@ flowchart LR
 
 ### Admin / Worker
 
-- Admin handles accounts, credential import, pools, client profiles, settings, GitHub org sync entrypoints, audit queries, and dashboard static assets.
-- Worker handles account recovery tasks, credential expiry warnings, health probes, and scheduled Copilot Metrics sync.
+- Admin handles accounts, credential import, pools, client profiles, settings, GitHub org sync request entrypoints, audit queries, and dashboard static assets.
+- Worker handles account recovery tasks, credential expiry warnings, health probes, and claimed metrics/seat synchronization. A dedicated Kubernetes Worker role receives the GitHub sync token file.
 - Admin API requires a bearer token. Dashboard static pages are served by admin at root and call `/admin/*` with the admin token.
 
 ## Storage Boundaries
@@ -167,9 +174,10 @@ flowchart TD
   Cold --> Policies["pools, client profiles, budgets, audit"]
 ```
 
-- PostgreSQL stores accounts, credential metadata, pools, client profiles, budgets, audit events, and recovery tasks.
-- PostgreSQL also stores `system_settings`, model catalog configuration, GitHub org data, metrics snapshots, and proxy usage ledger entries.
-- Redis stores concurrency counters, short-TTL affinity mappings, rate-limit counters, and distributed locks.
+- PostgreSQL stores accounts, credential metadata and versions, pools, client profiles, durable bindings, provider attempts/reservations, budgets, audit events, recovery tasks, organization-sync requests, and usage ledger/rollup entries.
+- PostgreSQL also stores `system_settings`, model catalog configuration, GitHub org data, metrics snapshots, and the durable Redis coordination epoch.
+- Redis protocol v2 stores budget reservations/finalization, concurrency leases, short-TTL affinity and binding mappings, rate-limit counters, distributed locks, invalidation events, and the active coordination manifest.
+- Gateway may lose its local Router snapshot, ordering counters, token cache, or bounded usage materialization queue without losing source-of-truth or cross-instance coordination state.
 - Plaintext credentials are never stored; sensitive content must be encrypted and masked.
 
 ## Key Boundaries
@@ -177,5 +185,6 @@ flowchart TD
 - The data plane does not directly execute general GitHub operations.
 - Routing decisions use proxy-side real-time state and do not depend on Copilot Metrics in the hot path.
 - Sticky session is a soft constraint; health, budget, risk, and seat validity always take priority.
-- The packaged runtime is single-machine Docker Compose; the repository does not ship Kubernetes deployment manifests.
-- The model catalog is global and does not enforce account-specific model access.
+- The runtime package supports single-machine Docker Compose plus a cluster entry point. Kubernetes provides single-replica production, dual-Gateway staging, and an explicitly disposable `test` overlay with in-cluster PostgreSQL/Redis. The Azure Bicep guide is limited to VNet/subnets, AKS, PostgreSQL, and Managed Redis; it is not a complete multi-replica production platform with ingress, monitoring, backup, evidence inventory, or destroy automation.
+- A release manifest binds one public app version, Git SHA, four runtime-role digests, and the migration schema. Compatibility evidence uses that app version; both VM and Kubernetes deploy the manifest digests directly.
+- The model catalog is global; `require_fresh` profiles additionally enforce account-specific model/API evidence from the immutable request snapshot, while `allow_unknown` profiles retain compatibility behavior.

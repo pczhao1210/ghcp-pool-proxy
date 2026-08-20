@@ -11,7 +11,49 @@ CREATE TABLE github_orgs (
     copilot_plan TEXT NOT NULL,
     metrics_enabled BOOLEAN NOT NULL DEFAULT FALSE,
     last_metrics_sync_at TIMESTAMPTZ,
+    seat_generation BIGINT NOT NULL DEFAULT 0,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE org_sync_requests (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    org_id UUID NOT NULL REFERENCES github_orgs(id),
+    sync_type TEXT NOT NULL CHECK (sync_type IN ('metrics', 'seats')),
+    source TEXT NOT NULL CHECK (source IN ('manual', 'scheduled')),
+    idempotency_key TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('pending', 'running', 'completed')),
+    requested_by TEXT NOT NULL,
+    requested_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    claim_id UUID,
+    claimed_by TEXT,
+    claimed_until TIMESTAMPTZ,
+    fence_token BIGINT NOT NULL DEFAULT 0,
+    attempt_count INT NOT NULL DEFAULT 0,
+    last_error TEXT,
+    started_at TIMESTAMPTZ,
+    completed_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX idx_org_sync_requests_due
+    ON org_sync_requests (next_attempt_at, created_at, id)
+    WHERE status = 'pending';
+
+CREATE UNIQUE INDEX idx_org_sync_requests_active
+    ON org_sync_requests (org_id, sync_type)
+    WHERE status IN ('pending', 'running');
+
+CREATE INDEX idx_org_sync_requests_running_lease
+    ON org_sync_requests (claimed_until, created_at, id)
+    WHERE status = 'running';
+
+CREATE TABLE org_sync_maintenance_leases (
+    name TEXT PRIMARY KEY,
+    claimed_by TEXT NOT NULL,
+    claimed_until TIMESTAMPTZ NOT NULL,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -74,6 +116,70 @@ CREATE INDEX idx_accounts_due_re_admission
     ON accounts (next_re_admission_at, id)
     WHERE status = 'degraded';
 
+CREATE TABLE account_model_capabilities (
+    account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    upstream_model_id TEXT NOT NULL CHECK (upstream_model_id = btrim(upstream_model_id) AND upstream_model_id <> ''),
+    upstream_api TEXT NOT NULL CHECK (upstream_api IN ('chat_completions', 'responses', 'anthropic_messages')),
+    discovery_status TEXT NOT NULL CHECK (discovery_status IN ('unknown', 'available', 'unavailable', 'failed')),
+    probe_status TEXT NOT NULL CHECK (probe_status IN ('not_run', 'passed', 'failed')),
+    source TEXT NOT NULL CHECK (source IN ('copilot_models', 'provider_probe', 'copilot_models+provider_probe')),
+    observed_at TIMESTAMPTZ NOT NULL,
+    expires_at TIMESTAMPTZ NOT NULL,
+    evidence_version BIGINT NOT NULL CHECK (evidence_version > 0),
+    probe_run_id UUID,
+    last_error_class TEXT CHECK (last_error_class IS NULL OR last_error_class IN (
+        'auth_expired',
+        'permission_denied',
+        'capability_mismatch',
+        'rate_limited',
+        'quota_exhausted',
+        'invalid_request',
+        'upstream_4xx',
+        'upstream_5xx',
+        'network_timeout',
+        'network_error',
+        'invalid_response',
+        'unknown'
+    )),
+    last_status_code INT CHECK (last_status_code IS NULL OR last_status_code BETWEEN 100 AND 599),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (account_id, upstream_model_id, upstream_api),
+    CHECK (expires_at > observed_at),
+    CHECK ((probe_status = 'not_run') = (probe_run_id IS NULL)),
+    CHECK (probe_status <> 'passed' OR discovery_status = 'available'),
+    CHECK (probe_status <> 'passed' OR last_error_class IS NULL),
+    CHECK (probe_status <> 'passed' OR last_status_code IS NULL OR last_status_code BETWEEN 200 AND 299),
+    CHECK ((discovery_status <> 'failed' AND probe_status <> 'failed') OR last_error_class IS NOT NULL),
+    CHECK (last_error_class IS NULL OR discovery_status = 'failed' OR probe_status = 'failed')
+);
+
+CREATE INDEX idx_account_model_capabilities_route
+    ON account_model_capabilities (upstream_model_id, upstream_api, discovery_status, probe_status, expires_at);
+
+CREATE TABLE account_model_capability_refresh_requests (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    account_id UUID NOT NULL UNIQUE REFERENCES accounts(id) ON DELETE CASCADE,
+    status TEXT NOT NULL CHECK (status IN ('pending', 'completed', 'rejected', 'failed')),
+    requested_by TEXT NOT NULL CHECK (btrim(requested_by) <> ''),
+    requested_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    resolved_at TIMESTAMPTZ,
+    evidence_version BIGINT CHECK (evidence_version > 0),
+    last_error_class TEXT CHECK (last_error_class IS NULL OR last_error_class IN ('account_not_targeted', 'sync_failed')),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CHECK (
+        (status = 'pending' AND resolved_at IS NULL AND evidence_version IS NULL AND last_error_class IS NULL)
+        OR (status = 'completed' AND resolved_at IS NOT NULL AND evidence_version IS NOT NULL AND last_error_class IS NULL)
+        OR (status = 'rejected' AND resolved_at IS NOT NULL AND evidence_version IS NULL AND last_error_class IS NOT NULL AND last_error_class = 'account_not_targeted')
+        OR (status = 'failed' AND resolved_at IS NOT NULL AND evidence_version IS NULL AND last_error_class IS NOT NULL AND last_error_class = 'sync_failed')
+    )
+);
+
+CREATE INDEX idx_account_model_capability_refresh_pending
+    ON account_model_capability_refresh_requests (requested_at, id)
+    WHERE status = 'pending';
+
 CREATE TABLE copilot_seats (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     account_id UUID REFERENCES accounts(id),
@@ -85,6 +191,7 @@ CREATE TABLE copilot_seats (
     assigned_at TIMESTAMPTZ,
     last_activity_at TIMESTAMPTZ,
     last_synced_at TIMESTAMPTZ,
+    sync_generation BIGINT NOT NULL DEFAULT 0,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -96,6 +203,7 @@ CREATE TABLE credentials (
     status TEXT NOT NULL,
     encrypted_payload BYTEA NOT NULL,
     key_version TEXT NOT NULL,
+    version BIGINT NOT NULL DEFAULT 1,
     expires_at TIMESTAMPTZ,
     last_used_at TIMESTAMPTZ,
     last_rotated_at TIMESTAMPTZ,
@@ -134,13 +242,11 @@ CREATE TABLE client_profiles (
     name TEXT NOT NULL,
     api_key_hash TEXT NOT NULL UNIQUE,
     pool_id UUID NOT NULL REFERENCES backend_pools(id) ON DELETE RESTRICT,
-    default_request_format TEXT NOT NULL,
-    default_response_format TEXT NOT NULL,
     default_model TEXT,
     model_aliases JSONB NOT NULL DEFAULT '{}',
-    tool_format TEXT,
-    sticky_mode TEXT NOT NULL DEFAULT 'soft',
-    affinity_strategy TEXT NOT NULL DEFAULT 'session_then_prefix',
+    model_entitlement_policy TEXT NOT NULL DEFAULT 'allow_unknown' CHECK (model_entitlement_policy IN ('allow_unknown', 'require_fresh')),
+    sticky_mode TEXT NOT NULL DEFAULT 'soft' CHECK (sticky_mode IN ('soft', 'strict', 'none')),
+    affinity_strategy TEXT NOT NULL DEFAULT 'session_then_prefix' CHECK (affinity_strategy IN ('session_then_prefix', 'prefix_only')),
     sticky_ttl_seconds INT NOT NULL DEFAULT 1800,
     sticky_session_header TEXT,
     cache_affinity_enabled BOOLEAN NOT NULL DEFAULT TRUE,
@@ -152,6 +258,8 @@ CREATE TABLE client_profiles (
 
 CREATE TABLE usage_ledger (
     id UUID NOT NULL DEFAULT gen_random_uuid(),
+    request_id TEXT,
+	attempt_id UUID,
     trace_id TEXT NOT NULL,
     account_id UUID,
     pool_id UUID,
@@ -162,6 +270,7 @@ CREATE TABLE usage_ledger (
     affinity_key_hash TEXT,
     sticky_hit BOOLEAN,
     status TEXT NOT NULL,
+    usage_source TEXT NOT NULL DEFAULT 'missing' CHECK (usage_source IN ('missing', 'upstream', 'estimated')),
     input_tokens INT NOT NULL DEFAULT 0,
     cached_input_tokens INT NOT NULL DEFAULT 0,
     cache_write_tokens INT NOT NULL DEFAULT 0,
@@ -203,13 +312,112 @@ $partitions$;
 CREATE TABLE usage_ledger_default PARTITION OF usage_ledger DEFAULT;
 CREATE INDEX idx_usage_ledger_created_brin ON usage_ledger USING BRIN(created_at);
 CREATE INDEX idx_usage_ledger_ingested_brin ON usage_ledger USING BRIN(ingested_at);
-CREATE VIEW usage_ledger_all AS SELECT * FROM usage_ledger;
+CREATE INDEX idx_usage_ledger_request_id ON usage_ledger(request_id) WHERE request_id IS NOT NULL;
+CREATE INDEX idx_usage_ledger_attempt_id ON usage_ledger(attempt_id) WHERE attempt_id IS NOT NULL;
 
-CREATE TABLE usage_ledger_legacy_state (
-    singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
-    max_created_at TIMESTAMPTZ,
-    truncated_at TIMESTAMPTZ
+CREATE TABLE provider_attempts (
+    id UUID PRIMARY KEY,
+    request_id TEXT NOT NULL,
+    trace_id TEXT NOT NULL,
+    payload_fingerprint TEXT NOT NULL CHECK (char_length(payload_fingerprint) = 64),
+    account_id UUID NOT NULL REFERENCES accounts(id),
+    pool_id UUID REFERENCES backend_pools(id),
+    client_profile_id UUID REFERENCES client_profiles(id),
+    model TEXT NOT NULL,
+    request_format TEXT NOT NULL,
+    response_format TEXT NOT NULL,
+    affinity_key_hash TEXT,
+    sticky_hit BOOLEAN NOT NULL DEFAULT FALSE,
+    redis_epoch BIGINT NOT NULL DEFAULT 1,
+    reservation_digest TEXT,
+    reservation_input_tokens INT NOT NULL DEFAULT 0,
+    reservation_output_tokens INT NOT NULL DEFAULT 0,
+    reservation_nano_aiu BIGINT NOT NULL DEFAULT 0,
+    reservation_expires_at TIMESTAMPTZ,
+    state_version BIGINT NOT NULL DEFAULT 0,
+    budget_finalization_status TEXT NOT NULL DEFAULT 'pending' CHECK (budget_finalization_status IN ('pending', 'finalized', 'retained')),
+    result_fingerprint TEXT,
+    dispatch_sequence BIGINT NOT NULL DEFAULT 0 CHECK (dispatch_sequence >= 0),
+    status TEXT NOT NULL CHECK (status IN ('preparing', 'reserved', 'dispatching', 'completed', 'rejected', 'cancelling', 'abandoned', 'outcome_unknown')),
+    response_status TEXT,
+    error_type TEXT,
+	ledger_status TEXT NOT NULL DEFAULT 'error' CHECK (ledger_status IN ('success', 'incomplete', 'error', 'canceled')),
+    usage_source TEXT NOT NULL DEFAULT 'missing' CHECK (usage_source IN ('missing', 'upstream', 'estimated')),
+    input_tokens INT NOT NULL DEFAULT 0,
+    cached_input_tokens INT NOT NULL DEFAULT 0,
+    cache_write_tokens INT NOT NULL DEFAULT 0,
+    output_tokens INT NOT NULL DEFAULT 0,
+    reasoning_tokens INT NOT NULL DEFAULT 0,
+    nano_aiu BIGINT NOT NULL DEFAULT 0,
+    estimated_ai_credits NUMERIC(20,9) NOT NULL DEFAULT 0,
+    estimated_cost NUMERIC(20,8) NOT NULL DEFAULT 0,
+    token_details JSONB NOT NULL DEFAULT '[]'::jsonb,
+    latency_ms INT,
+    dispatched_at TIMESTAMPTZ,
+    finalized_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+CREATE INDEX idx_provider_attempts_status_created ON provider_attempts(status, created_at);
+CREATE INDEX idx_provider_attempts_account_created ON provider_attempts(account_id, created_at DESC);
+CREATE INDEX idx_provider_attempts_request ON provider_attempts(request_id, dispatch_sequence);
+CREATE INDEX idx_provider_attempts_reservation_recovery ON provider_attempts(status, reservation_expires_at) WHERE status IN ('preparing', 'reserved', 'dispatching', 'cancelling');
+
+CREATE TABLE usage_materialization_outbox (
+    attempt_id UUID PRIMARY KEY REFERENCES provider_attempts(id) ON DELETE CASCADE,
+    ledger_id UUID NOT NULL UNIQUE,
+    request_id TEXT NOT NULL,
+    trace_id TEXT NOT NULL,
+    account_id UUID NOT NULL,
+    pool_id UUID,
+    client_profile_id UUID,
+    model TEXT NOT NULL,
+    request_format TEXT NOT NULL,
+    response_format TEXT NOT NULL,
+    affinity_key_hash TEXT,
+    sticky_hit BOOLEAN NOT NULL DEFAULT FALSE,
+    ledger_status TEXT NOT NULL CHECK (ledger_status IN ('success', 'incomplete', 'error', 'canceled')),
+    usage_source TEXT NOT NULL CHECK (usage_source IN ('missing', 'upstream', 'estimated')),
+    input_tokens INT NOT NULL DEFAULT 0,
+    cached_input_tokens INT NOT NULL DEFAULT 0,
+    cache_write_tokens INT NOT NULL DEFAULT 0,
+    output_tokens INT NOT NULL DEFAULT 0,
+    reasoning_tokens INT NOT NULL DEFAULT 0,
+    nano_aiu BIGINT NOT NULL DEFAULT 0,
+    estimated_ai_credits NUMERIC(20,9) NOT NULL DEFAULT 0,
+    estimated_cost NUMERIC(20,8) NOT NULL DEFAULT 0,
+    token_details JSONB NOT NULL DEFAULT '[]'::jsonb,
+    latency_ms INT,
+    error_type TEXT,
+    ledger_created_at TIMESTAMPTZ NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'running', 'materialized', 'error', 'conflict')),
+    claim_id UUID,
+    claimed_until TIMESTAMPTZ,
+    fence_token BIGINT NOT NULL DEFAULT 0 CHECK (fence_token >= 0),
+    attempt_count INT NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+    next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_error_class TEXT CHECK (last_error_class IS NULL OR last_error_class IN ('database_error', 'ledger_conflict')),
+    materialized_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CHECK (
+        (status = 'running' AND claim_id IS NOT NULL AND claimed_until IS NOT NULL)
+        OR (status <> 'running' AND claim_id IS NULL AND claimed_until IS NULL)
+    ),
+    CHECK (
+        (status = 'materialized' AND materialized_at IS NOT NULL)
+        OR (status <> 'materialized' AND materialized_at IS NULL)
+    ),
+    CHECK (status <> 'conflict' OR last_error_class = 'ledger_conflict')
+);
+CREATE INDEX idx_usage_materialization_outbox_due
+    ON usage_materialization_outbox (next_attempt_at, created_at, attempt_id)
+    WHERE status IN ('pending', 'error');
+CREATE INDEX idx_usage_materialization_outbox_running_lease
+    ON usage_materialization_outbox (claimed_until, created_at, attempt_id)
+    WHERE status = 'running';
+CREATE INDEX idx_usage_materialization_outbox_status_created
+    ON usage_materialization_outbox (status, created_at, attempt_id);
 
 CREATE TABLE copilot_metrics_snapshots (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -230,6 +438,9 @@ CREATE TABLE copilot_metrics_snapshots (
 
 CREATE INDEX idx_copilot_metrics_snapshots_org_synced
     ON copilot_metrics_snapshots(org_id, synced_at DESC);
+
+CREATE UNIQUE INDEX idx_copilot_metrics_snapshots_org_window_source
+    ON copilot_metrics_snapshots(org_id, window_start, window_end, source);
 
 CREATE TABLE audit_events (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -274,6 +485,18 @@ CREATE INDEX idx_recovery_tasks_due
     ON recovery_tasks (next_attempt_at, created_at, id)
     WHERE status IN ('pending', 'running');
 
+CREATE TABLE migration_history (
+    migration_id INTEGER NOT NULL,
+    checksum TEXT NOT NULL,
+    phase TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('running', 'succeeded', 'failed')),
+    attempt INTEGER NOT NULL CHECK (attempt > 0),
+    started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    completed_at TIMESTAMPTZ,
+    error_text TEXT,
+    PRIMARY KEY (migration_id, attempt)
+);
+
 CREATE TABLE system_settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL DEFAULT 'false',
@@ -283,7 +506,7 @@ CREATE TABLE system_settings (
 );
 
 INSERT INTO system_settings (key, value, description) VALUES
-    ('schema_version', '18', 'Installed database schema version'),
+    ('schema_version', '19', 'Installed database schema version'),
     ('copilot_metrics_sync_enabled', 'false', 'Enable GitHub Copilot Metrics sync worker'),
     ('audit_search_enabled', 'false', 'Enable audit log search API endpoint'),
     ('advanced_metrics_enabled', 'false', 'Enable detailed sticky/rebind/overflow metrics'),
@@ -291,6 +514,8 @@ INSERT INTO system_settings (key, value, description) VALUES
     ('copilot_compat_thinking_tool_choice_enabled', 'true', 'Normalize incompatible Anthropic thinking and forced tool choice combinations'),
     ('copilot_compat_cache_control_enabled', 'true', 'Remove unsupported Anthropic cache control subfields while preserving cache breakpoints'),
     ('copilot_compat_vision_header_enabled', 'true', 'Send the Copilot vision request header when a request contains images'),
+    ('account_model_capability_evidence_version', '0', 'Last allocated account-model capability evidence version'),
+    ('account_model_capability_complete_version', '0', 'Last fully completed account-model capability evidence version'),
     ('model_catalog_json', '[{"exposed":"gpt-4o","upstream":"gpt-4o","enabled":true},{"exposed":"gpt-4o-mini","upstream":"gpt-4o-mini","enabled":true},{"exposed":"gpt-5.5","upstream":"gpt-5.5","upstream_api":"responses","enabled":true},{"exposed":"claude-sonnet-4-20250514","upstream":"claude-sonnet-4-20250514","enabled":true},{"exposed":"claude-3.5-sonnet","upstream":"claude-3.5-sonnet","enabled":true},{"exposed":"o3-mini","upstream":"o3-mini","enabled":true}]', 'Model catalog exposed to downstream clients');
 
 CREATE TABLE secure_settings (
@@ -374,7 +599,7 @@ CREATE TABLE usage_rollup_daily_default PARTITION OF usage_rollup_daily DEFAULT;
 
 INSERT INTO usage_rollup_state (name, last_processed_at, updated_at)
 SELECT 'usage_rollup', COALESCE(MIN(created_at), now()), now()
-FROM usage_ledger_all
+FROM usage_ledger
 ON CONFLICT (name) DO NOTHING;
 
 CREATE TABLE account_user_bindings (

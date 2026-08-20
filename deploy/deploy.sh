@@ -22,7 +22,9 @@ LOG_TAIL_LINES="${LOG_TAIL_LINES:-200}"
 GATEWAY_IMAGE="pczhao1210/ghcp-pool-proxy:gateway-latest"
 ADMIN_IMAGE="pczhao1210/ghcp-pool-proxy:admin-latest"
 WORKER_IMAGE="pczhao1210/ghcp-pool-proxy:worker-latest"
-MIGRATION_IMAGE="$ADMIN_IMAGE"
+MIGRATION_IMAGE="pczhao1210/ghcp-pool-proxy:migration-latest"
+RELEASE_MANIFEST_FILE="${RELEASE_MANIFEST:-${RELEASE_MANIFEST_FILE:-$SCRIPT_DIR/../release-manifest.env}}"
+RELEASE_MANIFEST_TOOL="$SCRIPT_DIR/release_manifest.sh"
 DISTRO_ID=""
 DISTRO_ID_LIKE=""
 DISTRO_NAME=""
@@ -37,6 +39,7 @@ DOCKER_CMD=(docker)
 DOCKER_REQUIRES_SUDO=0
 COMPOSE_MODE=""
 EFFECTIVE_PROVIDER=""
+INSTALL_MISSING=0
 
 usage() {
   cat <<'EOF'
@@ -45,7 +48,8 @@ Usage: deploy/deploy.sh [action] [options]
 Actions:
   --generate-config | generate-config
                      Create config.yaml, migrating startup values from an existing .env. Does not require Docker.
-  --start | start    Pull fixed Docker Hub images, initialize data, migrate, and start the VM stack. Default.
+  --start | start | deploy
+                     Pull fixed Docker Hub images, initialize data, migrate, and start the VM stack. Default.
   --stop  | stop     Stop the VM stack and hourly file log collector.
   --reset | reset    Stop the VM stack and delete PostgreSQL/Redis data. Requires GHCP_RESET_CONFIRM=reset.
   --logs  | logs     Tail the newest hourly file log.
@@ -54,6 +58,9 @@ Options:
   --data-dir DIR     Persistent VM data directory. Default: ~/ghcp_proxy
   --env-file FILE    Deployment environment file. Default: <data-dir>/.env
   --config-file FILE Application YAML file. Default: <data-dir>/config.yaml
+  --release-manifest FILE
+                      Immutable release-set manifest. Default: bundled release-manifest.env
+  --install-missing  Allow non-interactive installation of missing prerequisites.
   --tail-lines N     Lines to show for logs. Default: 200
   -h, --help         Show this help.
 
@@ -61,11 +68,12 @@ Environment:
   GHCP_PROXY_HOME      Alternative default for the persistent data directory.
   LOG_RETENTION_DAYS   Hourly file log retention days. Default: 30
   WAIT_TIMEOUT         Seconds to wait for containers and HTTP endpoints. Default: 120
+  RELEASE_MANIFEST     Immutable release-set manifest. RELEASE_MANIFEST_FILE remains a legacy alias.
   GHCP_RESET_CONFIRM   Must be set to reset before using --reset/reset.
 
 Host setup:
   Automatically validates x86_64 Linux, detects Ubuntu/Debian, Fedora, Red Hat family, or SUSE,
-  installs Docker Engine/Compose when missing, and adds the invoking user to the docker group.
+  asks before installing missing tools, and adds the invoking user to the docker group.
 
 Generated host files and bind-mount directories:
   ~/ghcp_proxy/.env             Private deployment settings and generated secrets.
@@ -87,6 +95,16 @@ warn() {
 die() {
   printf 'ERROR: %s\n' "$*" >&2
   exit 1
+}
+
+confirm_install() {
+  local label="$1"
+  [[ "$INSTALL_MISSING" -eq 1 ]] && return 0
+  [[ -t 0 ]] || die "missing $label; install it first or pass --install-missing to allow automatic installation"
+  local answer
+  printf 'Missing %s. Install it now? [y/N]: ' "$label" >&2
+  IFS= read -r answer
+  [[ "$answer" == "y" || "$answer" == "Y" ]] || die "required component was not installed: $label"
 }
 
 require_cmd() {
@@ -197,6 +215,14 @@ parse_args() {
         APP_CONFIG_FILE="$2"
         shift
         ;;
+      --release-manifest)
+        [[ $# -ge 2 ]] || die "--release-manifest requires a value"
+        RELEASE_MANIFEST_FILE="$2"
+        shift
+        ;;
+      --install-missing)
+        INSTALL_MISSING=1
+        ;;
       --tail-lines)
         [[ $# -ge 2 ]] || die "--tail-lines requires a value"
         LOG_TAIL_LINES="$2"
@@ -223,6 +249,7 @@ refresh_paths() {
   ENV_FILE="$(expand_path "$ENV_FILE")"
   [[ -n "$APP_CONFIG_FILE" ]] || APP_CONFIG_FILE="$DATA_DIR/config.yaml"
   APP_CONFIG_FILE="$(expand_path "$APP_CONFIG_FILE")"
+  RELEASE_MANIFEST_FILE="$(expand_path "$RELEASE_MANIFEST_FILE")"
   export APP_CONFIG_FILE
   COMPOSE_FILE="$(expand_path "$COMPOSE_FILE")"
   LOG_DIR="${LOG_DIR:-$DATA_DIR/logs}"
@@ -352,6 +379,7 @@ ensure_command_package() {
   if command -v "$command_name" >/dev/null 2>&1; then
     return 0
   fi
+  confirm_install "$command_name"
   log "Installing missing host command: $command_name"
   install_host_packages "$package_name"
   command -v "$command_name" >/dev/null 2>&1 || die "failed to install required command: $command_name"
@@ -365,6 +393,36 @@ docker_compose_binary_available() {
     return 0
   fi
   return 1
+}
+
+load_release_manifest() {
+  local schema
+  [[ -x "$RELEASE_MANIFEST_TOOL" ]] || die "release manifest tool is missing: $RELEASE_MANIFEST_TOOL"
+  [[ -r "$RELEASE_MANIFEST_FILE" ]] || die "release manifest is missing: $RELEASE_MANIFEST_FILE"
+  schema="$(source_schema_version)"
+  "$RELEASE_MANIFEST_TOOL" validate "$RELEASE_MANIFEST_FILE" "$schema"
+  GATEWAY_IMAGE="$($RELEASE_MANIFEST_TOOL image-ref "$RELEASE_MANIFEST_FILE" gateway)"
+  ADMIN_IMAGE="$($RELEASE_MANIFEST_TOOL image-ref "$RELEASE_MANIFEST_FILE" admin)"
+  WORKER_IMAGE="$($RELEASE_MANIFEST_TOOL image-ref "$RELEASE_MANIFEST_FILE" worker)"
+  MIGRATION_IMAGE="$($RELEASE_MANIFEST_TOOL image-ref "$RELEASE_MANIFEST_FILE" migration)"
+  export GATEWAY_IMAGE ADMIN_IMAGE WORKER_IMAGE MIGRATION_IMAGE
+}
+
+validate_pulled_release_images() {
+  local role image expected_digest actual_digests
+  for role in gateway admin worker migration; do
+    case "$role" in
+      gateway) image="$GATEWAY_IMAGE" ;;
+      admin) image="$ADMIN_IMAGE" ;;
+      worker) image="$WORKER_IMAGE" ;;
+      migration) image="$MIGRATION_IMAGE" ;;
+    esac
+    expected_digest="$($RELEASE_MANIFEST_TOOL value "$RELEASE_MANIFEST_FILE" "RELEASE_${role^^}_DIGEST")"
+    actual_digests="$(docker_cli image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$image" 2>/dev/null || true)"
+    if ! grep -Fq "@${expected_digest}" <<<"$actual_digests"; then
+      die "pulled $role image $image does not match release manifest digest $expected_digest"
+    fi
+  done
 }
 
 install_docker_debian() {
@@ -548,6 +606,7 @@ ensure_docker_stack() {
   fi
 
   if [[ "$needs_install" -eq 1 ]]; then
+    confirm_install "Docker Engine and Compose"
     install_docker_stack
   fi
 
@@ -821,7 +880,9 @@ write_env_file_if_missing() {
     add_env_if_missing POSTGRES_DB "ghcp"
     add_env_if_missing POSTGRES_DATA_DIR "$POSTGRES_DATA_DIR"
     add_env_if_missing REDIS_DATA_DIR "$REDIS_DATA_DIR"
+    add_env_if_missing GATEWAY_BIND_ADDR "127.0.0.1"
     add_env_if_missing GATEWAY_PORT "8000"
+    add_env_if_missing ADMIN_BIND_ADDR "127.0.0.1"
     add_env_if_missing ADMIN_PORT "8001"
     add_env_if_missing WORKER_METRICS_PORT "8002"
     add_env_if_missing ADMIN_TOKEN "$(random_hex 32)"
@@ -843,7 +904,9 @@ POSTGRES_DB=ghcp
 POSTGRES_DATA_DIR=$POSTGRES_DATA_DIR
 REDIS_DATA_DIR=$REDIS_DATA_DIR
 
+GATEWAY_BIND_ADDR=127.0.0.1
 GATEWAY_PORT=8000
+ADMIN_BIND_ADDR=127.0.0.1
 ADMIN_PORT=8001
 WORKER_METRICS_PORT=8002
 COMPOSE_NETWORK_NAME=ghcp-proxy-net
@@ -855,7 +918,7 @@ CREDENTIAL_MASTER_KEY=$(random_hex 32)
 LOG_RETENTION_DAYS=$LOG_RETENTION_DAYS
 
 # Optional secrets. Application startup settings belong in config.yaml.
-# GITHUB_TOKEN=
+# GITHUB_TOKEN_FILE=/absolute/path/to/github-token
 EOF
   chmod 600 "$ENV_FILE"
 }
@@ -870,7 +933,9 @@ load_environment() {
   PROJECT_NAME="${COMPOSE_PROJECT_NAME:-$PROJECT_NAME}"
   POSTGRES_USER="${POSTGRES_USER:-ghcp}"
   POSTGRES_DB="${POSTGRES_DB:-ghcp}"
+  GATEWAY_BIND_ADDR="${GATEWAY_BIND_ADDR:-127.0.0.1}"
   GATEWAY_PORT="${GATEWAY_PORT:-8000}"
+  ADMIN_BIND_ADDR="${ADMIN_BIND_ADDR:-127.0.0.1}"
   ADMIN_PORT="${ADMIN_PORT:-8001}"
   GATEWAY_URL="${GATEWAY_URL:-http://localhost:$GATEWAY_PORT}"
   ADMIN_URL="${ADMIN_URL:-http://localhost:$ADMIN_PORT}"
@@ -884,22 +949,22 @@ load_environment() {
 compose() {
   if [[ "$COMPOSE_MODE" == "standalone" ]]; then
     if [[ "$DOCKER_REQUIRES_SUDO" -eq 1 && "$(id -u)" -ne 0 ]]; then
-      run_privileged env APP_CONFIG_FILE="$APP_CONFIG_FILE" docker-compose --env-file "$ENV_FILE" -p "$PROJECT_NAME" -f "$COMPOSE_FILE" "$@"
+      run_privileged env APP_CONFIG_FILE="$APP_CONFIG_FILE" GATEWAY_IMAGE="$GATEWAY_IMAGE" ADMIN_IMAGE="$ADMIN_IMAGE" WORKER_IMAGE="$WORKER_IMAGE" MIGRATION_IMAGE="$MIGRATION_IMAGE" SCHEMA_VERSION="${SCHEMA_VERSION:-}" MIGRATION_DSN_HOST_FILE="${MIGRATION_DSN_HOST_FILE:-/dev/null}" docker-compose --env-file "$ENV_FILE" -p "$PROJECT_NAME" -f "$COMPOSE_FILE" "$@"
       return $?
     fi
-    docker-compose --env-file "$ENV_FILE" -p "$PROJECT_NAME" -f "$COMPOSE_FILE" "$@"
+    GATEWAY_IMAGE="$GATEWAY_IMAGE" ADMIN_IMAGE="$ADMIN_IMAGE" WORKER_IMAGE="$WORKER_IMAGE" MIGRATION_IMAGE="$MIGRATION_IMAGE" SCHEMA_VERSION="${SCHEMA_VERSION:-}" MIGRATION_DSN_HOST_FILE="${MIGRATION_DSN_HOST_FILE:-/dev/null}" docker-compose --env-file "$ENV_FILE" -p "$PROJECT_NAME" -f "$COMPOSE_FILE" "$@"
     return $?
   fi
   if [[ "$DOCKER_REQUIRES_SUDO" -eq 1 && "$(id -u)" -ne 0 ]]; then
-    run_privileged env APP_CONFIG_FILE="$APP_CONFIG_FILE" docker compose --env-file "$ENV_FILE" -p "$PROJECT_NAME" -f "$COMPOSE_FILE" "$@"
+    run_privileged env APP_CONFIG_FILE="$APP_CONFIG_FILE" GATEWAY_IMAGE="$GATEWAY_IMAGE" ADMIN_IMAGE="$ADMIN_IMAGE" WORKER_IMAGE="$WORKER_IMAGE" MIGRATION_IMAGE="$MIGRATION_IMAGE" SCHEMA_VERSION="${SCHEMA_VERSION:-}" MIGRATION_DSN_HOST_FILE="${MIGRATION_DSN_HOST_FILE:-/dev/null}" docker compose --env-file "$ENV_FILE" -p "$PROJECT_NAME" -f "$COMPOSE_FILE" "$@"
     return $?
   fi
-  docker_cli compose --env-file "$ENV_FILE" -p "$PROJECT_NAME" -f "$COMPOSE_FILE" "$@"
+  GATEWAY_IMAGE="$GATEWAY_IMAGE" ADMIN_IMAGE="$ADMIN_IMAGE" WORKER_IMAGE="$WORKER_IMAGE" MIGRATION_IMAGE="$MIGRATION_IMAGE" SCHEMA_VERSION="${SCHEMA_VERSION:-}" MIGRATION_DSN_HOST_FILE="${MIGRATION_DSN_HOST_FILE:-/dev/null}" docker_cli compose --env-file "$ENV_FILE" -p "$PROJECT_NAME" -f "$COMPOSE_FILE" "$@"
 }
 
 pull_runtime_images() {
   log "Pulling fixed runtime images from Docker Hub"
-  compose pull postgres redis gateway admin worker
+  compose pull postgres redis migration gateway admin worker
 }
 
 wait_container_healthy() {
@@ -950,350 +1015,27 @@ db_scalar() {
   db_psql -Atc "$1" | tr -d '[:space:]'
 }
 
-database_migrated() {
-  local migrated
-  migrated="$(db_scalar "SELECT to_regclass('public.accounts') IS NOT NULL AND to_regclass('public.system_settings') IS NOT NULL;")"
-  [[ "$migrated" == "t" ]]
+
+run_migration_runner() {
+  local target
+  local dsn_file
+  local status=0
+
+  target="$(target_schema_version)"
+  dsn_file="$(mktemp)"
+  chmod 600 "$dsn_file"
+  printf 'postgres://%s:%s@postgres:5432/%s?sslmode=disable\n' "$POSTGRES_USER" "$POSTGRES_PASSWORD" "$POSTGRES_DB" > "$dsn_file"
+
+  log "Applying manifest-backed database migrations to schema version $target"
+  MIGRATION_DSN_HOST_FILE="$dsn_file" \
+    compose run --rm --no-deps \
+      -e "MIGRATION_TARGET_VERSION=$target" \
+      -e "MIGRATION_PHASE=expand" \
+      migration || status=$?
+  rm -f "$dsn_file"
+  return "$status"
 }
 
-schema_conflict() {
-  cat >&2 <<EOF
-ERROR: Database schema conflict detected: $*
-
-The database contains a GHCP schema that does not match this version and cannot be updated automatically.
-Back up any data you need, then initialize a fresh VM database with a new --data-dir, or stop the stack and move aside the PostgreSQL data directory before starting again.
-
-Current PostgreSQL data directory:
-  $POSTGRES_DATA_DIR
-EOF
-  exit 1
-}
-
-schema_table_exists() {
-  local table="$1"
-  local exists
-  exists="$(db_scalar "SELECT to_regclass('public.$table') IS NOT NULL;")"
-  [[ "$exists" == "t" ]]
-}
-
-schema_require_table() {
-  local table="$1"
-  schema_table_exists "$table" || schema_conflict "required table public.$table is missing"
-}
-
-schema_column_exists_with_type() {
-  local table="$1"
-  local column="$2"
-  local expected_udt="$3"
-  local column_count
-  local type_ok
-
-  column_count="$(db_scalar "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = 'public' AND table_name = '$table' AND column_name = '$column';")"
-  [[ "$column_count" != "0" ]] || return 1
-
-  type_ok="$(db_scalar "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = '$table' AND column_name = '$column' AND udt_name = '$expected_udt');")"
-  [[ "$type_ok" == "t" ]] || schema_conflict "column public.$table.$column has an incompatible type; expected $expected_udt"
-  return 0
-}
-
-schema_require_column() {
-  local table="$1"
-  local column="$2"
-  local expected_udt="$3"
-  schema_column_exists_with_type "$table" "$column" "$expected_udt" || schema_conflict "table public.$table exists but required column $column is missing"
-}
-
-schema_project_objects_exist() {
-  local object_count
-  object_count="$(db_scalar "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name IN ('accounts', 'system_settings', 'backend_pools', 'client_profiles', 'route_policies', 'usage_ledger', 'secure_settings', 'account_user_bindings');")"
-  [[ "$object_count" != "0" ]]
-}
-
-route_policy_request_format_schema_current() {
-  schema_require_table route_policies
-  schema_column_exists_with_type route_policies request_format text
-}
-
-runtime_config_schema_current() {
-  if ! schema_table_exists secure_settings; then
-    return 1
-  fi
-
-  schema_require_column secure_settings key text
-  schema_require_column secure_settings encrypted_value bytea
-  schema_require_column secure_settings key_version text
-  schema_require_column secure_settings description text
-  schema_require_column secure_settings updated_by text
-  schema_require_column secure_settings updated_at timestamptz
-  return 0
-}
-
-route_policy_client_profile_schema_current() {
-  schema_require_table route_policies
-  schema_column_exists_with_type route_policies client_profile_id uuid
-}
-
-schema_cleanup_schema_current() {
-  local cleanup_needed
-  schema_require_table backend_pools
-  schema_require_table usage_ledger
-  cleanup_needed="$(db_scalar "SELECT to_regclass('public.routing_affinities') IS NOT NULL OR to_regclass('public.budget_snapshots') IS NOT NULL OR EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'backend_pools' AND column_name = 'default_model') OR EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'usage_ledger' AND column_name = 'prefix_hash');")"
-  [[ "$cleanup_needed" != "t" ]]
-}
-
-route_policy_load_balance_schema_current() {
-  schema_require_table route_policies
-  schema_column_exists_with_type route_policies load_balance_strategy text
-}
-
-usage_ai_credits_schema_current() {
-  local missing=0
-  schema_require_table usage_ledger
-  schema_column_exists_with_type usage_ledger reasoning_tokens int4 || missing=1
-  schema_column_exists_with_type usage_ledger nano_aiu int8 || missing=1
-  schema_column_exists_with_type usage_ledger estimated_ai_credits numeric || missing=1
-  schema_column_exists_with_type usage_ledger token_details jsonb || missing=1
-  [[ "$missing" -eq 0 ]]
-}
-
-usage_rollups_schema_current() {
-  local missing=0
-  if schema_table_exists usage_rollup_state; then
-    schema_require_column usage_rollup_state name text
-    schema_require_column usage_rollup_state last_processed_at timestamptz
-    schema_require_column usage_rollup_state updated_at timestamptz
-  else
-    missing=1
-  fi
-
-  if schema_table_exists usage_rollup_hourly; then
-    schema_require_column usage_rollup_hourly bucket_start timestamptz
-    schema_require_column usage_rollup_hourly client_profile_id text
-    schema_require_column usage_rollup_hourly client_name text
-    schema_require_column usage_rollup_hourly account_id text
-    schema_require_column usage_rollup_hourly pool_id text
-    schema_require_column usage_rollup_hourly model text
-    schema_require_column usage_rollup_hourly request_format text
-    schema_require_column usage_rollup_hourly status text
-    schema_require_column usage_rollup_hourly requests int8
-    schema_require_column usage_rollup_hourly input_tokens int8
-    schema_require_column usage_rollup_hourly cached_input_tokens int8
-    schema_require_column usage_rollup_hourly cache_write_tokens int8
-    schema_require_column usage_rollup_hourly output_tokens int8
-    schema_require_column usage_rollup_hourly reasoning_tokens int8
-    schema_require_column usage_rollup_hourly nano_aiu int8
-    schema_require_column usage_rollup_hourly estimated_ai_credits numeric
-    schema_require_column usage_rollup_hourly estimated_cost numeric
-    schema_require_column usage_rollup_hourly latency_ms_sum int8
-    schema_require_column usage_rollup_hourly latency_ms_count int8
-    schema_require_column usage_rollup_hourly latency_ms_max int4
-    schema_require_column usage_rollup_hourly sticky_hits int8
-    schema_require_column usage_rollup_hourly errors int8
-    schema_require_column usage_rollup_hourly updated_at timestamptz
-  else
-    missing=1
-  fi
-
-  if schema_table_exists usage_rollup_daily; then
-    schema_require_column usage_rollup_daily bucket_date date
-    schema_require_column usage_rollup_daily client_profile_id text
-    schema_require_column usage_rollup_daily client_name text
-    schema_require_column usage_rollup_daily account_id text
-    schema_require_column usage_rollup_daily pool_id text
-    schema_require_column usage_rollup_daily model text
-    schema_require_column usage_rollup_daily request_format text
-    schema_require_column usage_rollup_daily status text
-    schema_require_column usage_rollup_daily requests int8
-    schema_require_column usage_rollup_daily input_tokens int8
-    schema_require_column usage_rollup_daily cached_input_tokens int8
-    schema_require_column usage_rollup_daily cache_write_tokens int8
-    schema_require_column usage_rollup_daily output_tokens int8
-    schema_require_column usage_rollup_daily reasoning_tokens int8
-    schema_require_column usage_rollup_daily nano_aiu int8
-    schema_require_column usage_rollup_daily estimated_ai_credits numeric
-    schema_require_column usage_rollup_daily estimated_cost numeric
-    schema_require_column usage_rollup_daily latency_ms_sum int8
-    schema_require_column usage_rollup_daily latency_ms_count int8
-    schema_require_column usage_rollup_daily latency_ms_max int4
-    schema_require_column usage_rollup_daily sticky_hits int8
-    schema_require_column usage_rollup_daily errors int8
-    schema_require_column usage_rollup_daily updated_at timestamptz
-  else
-    missing=1
-  fi
-
-  [[ "$missing" -eq 0 ]]
-}
-
-pool_user_binding_schema_current() {
-  local missing=0
-  schema_require_table accounts
-  schema_require_table backend_pools
-  schema_require_table client_profiles
-  schema_column_exists_with_type backend_pools allocation_mode text || missing=1
-  schema_column_exists_with_type backend_pools binding_max_concurrency int4 || missing=1
-  schema_column_exists_with_type backend_pools binding_ttl_seconds int4 || missing=1
-
-  if schema_table_exists account_user_bindings; then
-    schema_require_column account_user_bindings id uuid
-    schema_require_column account_user_bindings client_profile_id uuid
-    schema_require_column account_user_bindings pool_id uuid
-    schema_require_column account_user_bindings account_id uuid
-    schema_require_column account_user_bindings user_id_hash text
-    schema_require_column account_user_bindings user_id_display text
-    schema_require_column account_user_bindings user_id_source text
-    schema_require_column account_user_bindings status text
-    schema_require_column account_user_bindings last_used_at timestamptz
-    schema_require_column account_user_bindings expires_at timestamptz
-    schema_require_column account_user_bindings released_at timestamptz
-    schema_require_column account_user_bindings release_reason text
-    schema_require_column account_user_bindings created_at timestamptz
-    schema_require_column account_user_bindings updated_at timestamptz
-  else
-    missing=1
-  fi
-
-  if schema_table_exists account_session_bindings; then
-    schema_require_column account_session_bindings id uuid
-    schema_require_column account_session_bindings client_profile_id uuid
-    schema_require_column account_session_bindings pool_id uuid
-    schema_require_column account_session_bindings account_id uuid
-    schema_require_column account_session_bindings session_id_hash text
-    schema_require_column account_session_bindings session_id_display text
-    schema_require_column account_session_bindings session_id_source text
-    schema_require_column account_session_bindings status text
-    schema_require_column account_session_bindings last_used_at timestamptz
-    schema_require_column account_session_bindings expires_at timestamptz
-    schema_require_column account_session_bindings released_at timestamptz
-    schema_require_column account_session_bindings release_reason text
-    schema_require_column account_session_bindings created_at timestamptz
-    schema_require_column account_session_bindings updated_at timestamptz
-  else
-    missing=1
-  fi
-
-  [[ "$missing" -eq 0 ]]
-}
-
-fixed_pool_assignment_schema_current() {
-  local invalid
-  schema_require_table backend_pools
-  schema_require_table pool_accounts
-  schema_require_table client_profiles
-  schema_column_exists_with_type backend_pools load_balance_strategy text || return 1
-  schema_column_exists_with_type client_profiles pool_id uuid || return 1
-  invalid="$(db_scalar "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'backend_pools' AND column_name = 'priority') OR EXISTS (SELECT 1 FROM client_profiles WHERE pool_id IS NULL) OR EXISTS (SELECT account_id FROM pool_accounts GROUP BY account_id HAVING COUNT(*) > 1) OR to_regclass('public.idx_pool_accounts_account_unique') IS NULL OR to_regclass('public.route_policies') IS NOT NULL;")"
-  [[ "$invalid" != "t" ]]
-}
-
-usage_ledger_partition_schema_current() {
-  local state
-
-  schema_table_exists usage_ledger || return 1
-  schema_column_exists_with_type usage_ledger ingested_at timestamptz || return 1
-  schema_column_exists_with_type usage_ledger_all ingested_at timestamptz || return 1
-  state="$(db_scalar "SELECT COALESCE((SELECT relkind::text FROM pg_class WHERE oid = to_regclass('public.usage_ledger')), ''), to_regclass('public.usage_ledger_all') IS NOT NULL, EXISTS (SELECT 1 FROM pg_inherits WHERE inhparent = to_regclass('public.usage_ledger') AND inhrelid = to_regclass('public.usage_ledger_default')), to_regclass('public.idx_usage_ledger_created_brin') IS NOT NULL, to_regclass('public.idx_usage_ledger_ingested_brin') IS NOT NULL, to_regclass('public.usage_ledger_legacy_state') IS NOT NULL;")"
-  [[ "$state" == "p|t|t|t|t|t" ]]
-}
-
-usage_rollup_partition_schema_current() {
-  local state
-
-  schema_table_exists usage_rollup_hourly || return 1
-  schema_table_exists usage_rollup_daily || return 1
-  state="$(db_scalar "SELECT COALESCE((SELECT relkind::text FROM pg_class WHERE oid = to_regclass('public.usage_rollup_hourly')), ''), COALESCE((SELECT relkind::text FROM pg_class WHERE oid = to_regclass('public.usage_rollup_daily')), ''), EXISTS (SELECT 1 FROM pg_inherits WHERE inhparent = to_regclass('public.usage_rollup_hourly') AND inhrelid = to_regclass('public.usage_rollup_hourly_default')), EXISTS (SELECT 1 FROM pg_inherits WHERE inhparent = to_regclass('public.usage_rollup_daily') AND inhrelid = to_regclass('public.usage_rollup_daily_default')), to_regclass('public.idx_usage_rollup_hourly_bucket') IS NOT NULL, to_regclass('public.idx_usage_rollup_hourly_client_bucket') IS NOT NULL, to_regclass('public.idx_usage_rollup_hourly_model_bucket') IS NOT NULL, to_regclass('public.idx_usage_rollup_daily_date') IS NOT NULL, to_regclass('public.idx_usage_rollup_daily_client_date') IS NOT NULL, to_regclass('public.idx_usage_rollup_daily_model_date') IS NOT NULL;")"
-  [[ "$state" == "p|p|t|t|t|t|t|t|t|t" ]]
-}
-
-metrics_snapshot_schema_current() {
-  [[ "$(db_scalar "SELECT to_regclass('public.idx_copilot_metrics_snapshots_org_synced') IS NOT NULL;")" == "t" ]]
-}
-
-copilot_compatibility_flags_schema_current() {
-  [[ "$(db_scalar "SELECT count(*) FROM system_settings WHERE key IN ('copilot_compat_anthropic_beta_enabled', 'copilot_compat_thinking_tool_choice_enabled', 'copilot_compat_cache_control_enabled', 'copilot_compat_vision_header_enabled');")" == "4" ]]
-}
-
-account_health_schema_current() {
-  schema_column_exists_with_type accounts next_token_probe_at timestamptz || return 1
-  schema_column_exists_with_type accounts token_probe_claim_id uuid || return 1
-  schema_column_exists_with_type accounts token_probe_claimed_by text || return 1
-  schema_column_exists_with_type accounts token_probe_claimed_until timestamptz || return 1
-  schema_column_exists_with_type accounts last_token_probe_at timestamptz || return 1
-  schema_column_exists_with_type accounts last_token_probe_success_at timestamptz || return 1
-  schema_column_exists_with_type accounts last_token_probe_failure_at timestamptz || return 1
-  schema_column_exists_with_type accounts last_token_probe_failure_reason text || return 1
-  schema_column_exists_with_type accounts next_re_admission_at timestamptz || return 1
-  schema_column_exists_with_type accounts re_admission_claim_id uuid || return 1
-  schema_column_exists_with_type accounts re_admission_claimed_by text || return 1
-  schema_column_exists_with_type accounts re_admission_claimed_until timestamptz || return 1
-  schema_column_exists_with_type accounts last_re_admission_at timestamptz || return 1
-  schema_column_exists_with_type accounts last_re_admission_success_at timestamptz || return 1
-  schema_column_exists_with_type accounts last_re_admission_failure_at timestamptz || return 1
-  schema_column_exists_with_type accounts last_re_admission_failure_reason text || return 1
-  schema_column_exists_with_type accounts re_admission_attempt_count int4 || return 1
-  schema_column_exists_with_type accounts health_version int8 || return 1
-  schema_column_exists_with_type recovery_tasks claim_id uuid || return 1
-  schema_column_exists_with_type recovery_tasks claimed_by text || return 1
-  schema_column_exists_with_type recovery_tasks claimed_until timestamptz || return 1
-  schema_column_exists_with_type recovery_tasks attempt_count int4 || return 1
-  schema_column_exists_with_type recovery_tasks next_attempt_at timestamptz || return 1
-  schema_column_exists_with_type recovery_tasks source_status text || return 1
-  schema_column_exists_with_type recovery_tasks current_step text || return 1
-  schema_column_exists_with_type recovery_tasks failure_reason text || return 1
-  [[ "$(db_scalar "SELECT to_regclass('public.idx_accounts_due_token_probe') IS NOT NULL AND to_regclass('public.idx_accounts_due_re_admission') IS NOT NULL AND to_regclass('public.idx_recovery_tasks_account_nonterminal') IS NOT NULL AND to_regclass('public.idx_recovery_tasks_due') IS NOT NULL;")" == "t" ]]
-}
-
-affinity_strategy_schema_current() {
-  schema_column_exists_with_type client_profiles affinity_strategy text || return 1
-  [[ "$(db_scalar "SELECT NOT EXISTS (SELECT 1 FROM client_profiles WHERE sticky_mode = 'prefix');")" == "t" ]]
-}
-
-conservative_capacity_defaults_schema_current() {
-  [[ "$(db_scalar "SELECT (SELECT column_default FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'accounts' AND column_name = 'max_concurrency') = '6' AND (SELECT column_default FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'backend_pools' AND column_name = 'binding_max_concurrency') = '10';")" == "t" ]]
-}
-
-target_schema_current() {
-  case "$(target_schema_version)" in
-    18)
-      pool_user_binding_schema_current && fixed_pool_assignment_schema_current && usage_ledger_partition_schema_current && usage_rollup_partition_schema_current && metrics_snapshot_schema_current && copilot_compatibility_flags_schema_current && account_health_schema_current && affinity_strategy_schema_current && conservative_capacity_defaults_schema_current
-      ;;
-    17)
-      pool_user_binding_schema_current && fixed_pool_assignment_schema_current && usage_ledger_partition_schema_current && usage_rollup_partition_schema_current && metrics_snapshot_schema_current && copilot_compatibility_flags_schema_current && account_health_schema_current && affinity_strategy_schema_current
-      ;;
-    16)
-      pool_user_binding_schema_current && fixed_pool_assignment_schema_current && usage_ledger_partition_schema_current && usage_rollup_partition_schema_current && metrics_snapshot_schema_current && copilot_compatibility_flags_schema_current && account_health_schema_current
-      ;;
-    15)
-      pool_user_binding_schema_current && fixed_pool_assignment_schema_current && usage_ledger_partition_schema_current && usage_rollup_partition_schema_current && metrics_snapshot_schema_current && copilot_compatibility_flags_schema_current
-      ;;
-    14)
-      pool_user_binding_schema_current && fixed_pool_assignment_schema_current && usage_ledger_partition_schema_current && usage_rollup_partition_schema_current && metrics_snapshot_schema_current
-      ;;
-    13)
-      pool_user_binding_schema_current && fixed_pool_assignment_schema_current && usage_ledger_partition_schema_current && usage_rollup_partition_schema_current
-      ;;
-    12)
-      pool_user_binding_schema_current && fixed_pool_assignment_schema_current && usage_ledger_partition_schema_current
-      ;;
-    *)
-      return 0
-      ;;
-  esac
-}
-
-apply_incremental_migrations() {
-  reconcile_database_schema
-}
-
-apply_migration_file() {
-  local migration_name="$1"
-  if [[ -f "$LOCAL_MIGRATIONS_DIR/$migration_name" ]]; then
-    db_psql -v ON_ERROR_STOP=1 --single-transaction -f - < "$LOCAL_MIGRATIONS_DIR/$migration_name"
-    return 0
-  fi
-
-  docker_cli run --rm --entrypoint sh "$MIGRATION_IMAGE" -c 'cat "/srv/ghcp/migrations/$1"' sh "$migration_name" | db_psql -v ON_ERROR_STOP=1 --single-transaction -f -
-}
 
 target_schema_version() {
   local version="${SCHEMA_VERSION:-}"
@@ -1305,431 +1047,13 @@ target_schema_version() {
   printf '%s\n' "$version"
 }
 
-database_schema_version() {
-  local version
-  if ! schema_table_exists system_settings; then
-    return 0
-  fi
-
-  version="$(db_psql -Atc "SELECT value FROM system_settings WHERE key = 'schema_version' LIMIT 1;" | tr -d '[:space:]')"
-  [[ -n "$version" ]] || return 0
-  [[ "$version" =~ ^[0-9]+$ ]] || schema_conflict "system_settings.schema_version is invalid: $version"
-  printf '%s\n' "$version"
-}
-
-set_database_schema_version() {
-  local version="$1"
-  db_psql -v ON_ERROR_STOP=1 <<SQL
-INSERT INTO system_settings (key, value, description, updated_by, updated_at)
-VALUES ('schema_version', '$version', 'Installed database schema version', 'deploy.sh', now())
-ON CONFLICT (key) DO UPDATE
-SET value = EXCLUDED.value,
-    description = EXCLUDED.description,
-    updated_by = EXCLUDED.updated_by,
-    updated_at = now();
-SQL
-}
-
-infer_legacy_schema_version() {
-  if ! schema_table_exists accounts; then
-    return 0
-  fi
 
 
 
-  if affinity_strategy_schema_current && account_health_schema_current && copilot_compatibility_flags_schema_current && metrics_snapshot_schema_current && usage_rollup_partition_schema_current && usage_ledger_partition_schema_current; then
-	printf '17\n'
-  elif account_health_schema_current && copilot_compatibility_flags_schema_current && metrics_snapshot_schema_current && usage_rollup_partition_schema_current && usage_ledger_partition_schema_current; then
-	printf '16\n'
-  elif copilot_compatibility_flags_schema_current && metrics_snapshot_schema_current && usage_rollup_partition_schema_current && usage_ledger_partition_schema_current; then
-	printf '15\n'
-  elif metrics_snapshot_schema_current && usage_rollup_partition_schema_current && usage_ledger_partition_schema_current; then
-	printf '14\n'
-  elif usage_rollup_partition_schema_current && usage_ledger_partition_schema_current; then
-    printf '13\n'
-  elif usage_ledger_partition_schema_current; then
-    printf '12\n'
-  elif fixed_pool_assignment_schema_current; then
-    printf '11\n'
-  elif pool_user_binding_schema_current; then
-    printf '10\n'
-  elif usage_rollups_schema_current; then
-    printf '9\n'
-  elif usage_ai_credits_schema_current; then
-    printf '8\n'
-  elif route_policy_load_balance_schema_current; then
-    printf '7\n'
-  elif schema_cleanup_schema_current; then
-    printf '6\n'
-  elif route_policy_client_profile_schema_current; then
-    printf '5\n'
-  elif runtime_config_schema_current; then
-    printf '4\n'
-  elif route_policy_request_format_schema_current; then
-    printf '3\n'
-  elif schema_table_exists system_settings; then
-    printf '2\n'
-  else
-    printf '1\n'
-  fi
-}
 
-apply_smooth_schema_upgrade() {
-  local current="$1"
-  local target="$2"
-
-  if [[ "$target" != "12" && "$target" != "13" && "$target" != "14" && "$target" != "15" && "$target" != "16" && "$target" != "17" && "$target" != "18" ]]; then
-    schema_conflict "automatic smooth migration to schema version $target is not defined"
-  fi
-  if (( current > target )); then
-    schema_conflict "database schema version $current is newer than local schema version $target"
-  fi
-
-  log "Applying smooth schema upgrade from version $current to $target"
-  if (( current < 11 )); then
-  db_psql -v ON_ERROR_STOP=1 --single-transaction <<'SQL'
-CREATE TABLE IF NOT EXISTS system_settings (
-    key TEXT PRIMARY KEY,
-    value TEXT NOT NULL DEFAULT 'false',
-    description TEXT,
-    updated_by TEXT,
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-INSERT INTO system_settings (key, value, description) VALUES
-    ('copilot_metrics_sync_enabled', 'false', 'Enable GitHub Copilot Metrics sync worker'),
-    ('audit_search_enabled', 'false', 'Enable audit log search API endpoint'),
-    ('advanced_metrics_enabled', 'false', 'Enable detailed sticky/rebind/overflow metrics'),
-    ('model_catalog_json', '[{"exposed":"gpt-4o","upstream":"gpt-4o","enabled":true},{"exposed":"gpt-4o-mini","upstream":"gpt-4o-mini","enabled":true},{"exposed":"gpt-5.5","upstream":"gpt-5.5","upstream_api":"responses","enabled":true},{"exposed":"claude-sonnet-4-20250514","upstream":"claude-sonnet-4-20250514","enabled":true},{"exposed":"claude-3.5-sonnet","upstream":"claude-3.5-sonnet","enabled":true},{"exposed":"o3-mini","upstream":"o3-mini","enabled":true}]', 'Model catalog exposed to downstream clients')
-ON CONFLICT (key) DO NOTHING;
-
-ALTER TABLE route_policies
-    ADD COLUMN IF NOT EXISTS request_format TEXT NOT NULL DEFAULT '*';
-
-CREATE INDEX IF NOT EXISTS idx_route_policies_request_format
-    ON route_policies(request_format);
-
-CREATE TABLE IF NOT EXISTS secure_settings (
-    key TEXT PRIMARY KEY,
-    encrypted_value BYTEA NOT NULL,
-    key_version TEXT NOT NULL,
-    description TEXT,
-    updated_by TEXT,
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-ALTER TABLE route_policies
-    ADD COLUMN IF NOT EXISTS client_profile_id UUID REFERENCES client_profiles(id);
-
-DROP TABLE IF EXISTS routing_affinities;
-DROP TABLE IF EXISTS budget_snapshots;
-
-ALTER TABLE backend_pools
-    DROP COLUMN IF EXISTS default_model;
-
-ALTER TABLE usage_ledger
-    DROP COLUMN IF EXISTS prefix_hash;
-
-DO $$
-BEGIN
-    IF EXISTS (
-        SELECT 1
-        FROM information_schema.columns
-        WHERE table_schema = 'public'
-          AND table_name = 'route_policies'
-          AND column_name = 'client_profile_id'
-    ) AND NOT EXISTS (
-        SELECT 1
-        FROM pg_constraint
-        WHERE conname = 'route_policies_client_profile_id_fkey'
-    ) THEN
-        ALTER TABLE route_policies
-            ADD CONSTRAINT route_policies_client_profile_id_fkey
-            FOREIGN KEY (client_profile_id) REFERENCES client_profiles(id) ON DELETE CASCADE;
-    END IF;
-END $$;
-
-CREATE INDEX IF NOT EXISTS idx_route_policies_client_profile
-    ON route_policies(client_profile_id);
-
-CREATE INDEX IF NOT EXISTS idx_route_policies_match
-    ON route_policies(client_profile_id, request_format, model_pattern, priority)
-    WHERE enabled = TRUE;
-
-CREATE INDEX IF NOT EXISTS idx_usage_ledger_client
-    ON usage_ledger(client_profile_id, created_at);
-
-ALTER TABLE route_policies
-    ADD COLUMN IF NOT EXISTS load_balance_strategy TEXT NOT NULL DEFAULT 'risk_weighted';
-
-ALTER TABLE route_policies
-    DROP CONSTRAINT IF EXISTS route_policies_load_balance_strategy_check;
-
-ALTER TABLE route_policies
-    ADD CONSTRAINT route_policies_load_balance_strategy_check
-    CHECK (load_balance_strategy IN ('risk_weighted', 'round_robin', 'least_concurrency'));
-
-ALTER TABLE usage_ledger
-  ADD COLUMN IF NOT EXISTS reasoning_tokens INT NOT NULL DEFAULT 0,
-  ADD COLUMN IF NOT EXISTS nano_aiu BIGINT NOT NULL DEFAULT 0,
-  ADD COLUMN IF NOT EXISTS estimated_ai_credits NUMERIC(20,9) NOT NULL DEFAULT 0,
-  ADD COLUMN IF NOT EXISTS token_details JSONB NOT NULL DEFAULT '[]'::jsonb;
-
-CREATE INDEX IF NOT EXISTS idx_usage_ledger_model_created ON usage_ledger(model, created_at);
-CREATE INDEX IF NOT EXISTS idx_usage_ledger_pool_created ON usage_ledger(pool_id, created_at);
-
-CREATE TABLE IF NOT EXISTS usage_rollup_state (
-    name TEXT PRIMARY KEY,
-    last_processed_at TIMESTAMPTZ NOT NULL,
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-CREATE TABLE IF NOT EXISTS usage_rollup_hourly (
-    bucket_start TIMESTAMPTZ NOT NULL,
-    client_profile_id TEXT NOT NULL DEFAULT '',
-    client_name TEXT NOT NULL DEFAULT 'unknown',
-    account_id TEXT NOT NULL DEFAULT '',
-    pool_id TEXT NOT NULL DEFAULT '',
-    model TEXT NOT NULL DEFAULT '',
-    request_format TEXT NOT NULL DEFAULT '',
-    status TEXT NOT NULL,
-    requests BIGINT NOT NULL DEFAULT 0,
-    input_tokens BIGINT NOT NULL DEFAULT 0,
-    cached_input_tokens BIGINT NOT NULL DEFAULT 0,
-    cache_write_tokens BIGINT NOT NULL DEFAULT 0,
-    output_tokens BIGINT NOT NULL DEFAULT 0,
-    reasoning_tokens BIGINT NOT NULL DEFAULT 0,
-    nano_aiu BIGINT NOT NULL DEFAULT 0,
-    estimated_ai_credits NUMERIC(20,9) NOT NULL DEFAULT 0,
-    estimated_cost NUMERIC(20,8) NOT NULL DEFAULT 0,
-    latency_ms_sum BIGINT NOT NULL DEFAULT 0,
-    latency_ms_count BIGINT NOT NULL DEFAULT 0,
-    latency_ms_max INT NOT NULL DEFAULT 0,
-    sticky_hits BIGINT NOT NULL DEFAULT 0,
-    errors BIGINT NOT NULL DEFAULT 0,
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (bucket_start, client_profile_id, account_id, pool_id, model, request_format, status)
-);
-
-CREATE INDEX IF NOT EXISTS idx_usage_rollup_hourly_bucket ON usage_rollup_hourly(bucket_start);
-CREATE INDEX IF NOT EXISTS idx_usage_rollup_hourly_client_bucket ON usage_rollup_hourly(client_profile_id, bucket_start);
-CREATE INDEX IF NOT EXISTS idx_usage_rollup_hourly_model_bucket ON usage_rollup_hourly(model, bucket_start);
-
-CREATE TABLE IF NOT EXISTS usage_rollup_daily (
-    bucket_date DATE NOT NULL,
-    client_profile_id TEXT NOT NULL DEFAULT '',
-    client_name TEXT NOT NULL DEFAULT 'unknown',
-    account_id TEXT NOT NULL DEFAULT '',
-    pool_id TEXT NOT NULL DEFAULT '',
-    model TEXT NOT NULL DEFAULT '',
-    request_format TEXT NOT NULL DEFAULT '',
-    status TEXT NOT NULL,
-    requests BIGINT NOT NULL DEFAULT 0,
-    input_tokens BIGINT NOT NULL DEFAULT 0,
-    cached_input_tokens BIGINT NOT NULL DEFAULT 0,
-    cache_write_tokens BIGINT NOT NULL DEFAULT 0,
-    output_tokens BIGINT NOT NULL DEFAULT 0,
-    reasoning_tokens BIGINT NOT NULL DEFAULT 0,
-    nano_aiu BIGINT NOT NULL DEFAULT 0,
-    estimated_ai_credits NUMERIC(20,9) NOT NULL DEFAULT 0,
-    estimated_cost NUMERIC(20,8) NOT NULL DEFAULT 0,
-    latency_ms_sum BIGINT NOT NULL DEFAULT 0,
-    latency_ms_count BIGINT NOT NULL DEFAULT 0,
-    latency_ms_max INT NOT NULL DEFAULT 0,
-    sticky_hits BIGINT NOT NULL DEFAULT 0,
-    errors BIGINT NOT NULL DEFAULT 0,
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (bucket_date, client_profile_id, account_id, pool_id, model, request_format, status)
-);
-
-CREATE INDEX IF NOT EXISTS idx_usage_rollup_daily_date ON usage_rollup_daily(bucket_date);
-CREATE INDEX IF NOT EXISTS idx_usage_rollup_daily_client_date ON usage_rollup_daily(client_profile_id, bucket_date);
-CREATE INDEX IF NOT EXISTS idx_usage_rollup_daily_model_date ON usage_rollup_daily(model, bucket_date);
-
-INSERT INTO usage_rollup_state (name, last_processed_at, updated_at)
-SELECT 'usage_rollup', COALESCE(MIN(created_at), now()), now()
-FROM usage_ledger
-ON CONFLICT (name) DO NOTHING;
-
-ALTER TABLE backend_pools
-  ADD COLUMN IF NOT EXISTS allocation_mode TEXT NOT NULL DEFAULT 'shared',
-  ADD COLUMN IF NOT EXISTS binding_max_concurrency INT NOT NULL DEFAULT 10,
-  ADD COLUMN IF NOT EXISTS binding_ttl_seconds INT;
-
-ALTER TABLE backend_pools
-  DROP CONSTRAINT IF EXISTS backend_pools_allocation_mode_check;
-
-ALTER TABLE backend_pools
-  ADD CONSTRAINT backend_pools_allocation_mode_check
-  CHECK (allocation_mode IN ('shared', 'user_binding', 'session_binding'));
-
-CREATE TABLE IF NOT EXISTS account_user_bindings (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    client_profile_id UUID NOT NULL REFERENCES client_profiles(id) ON DELETE CASCADE,
-    pool_id UUID NOT NULL REFERENCES backend_pools(id) ON DELETE CASCADE,
-    account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-  user_id_hash TEXT NOT NULL,
-  user_id_display TEXT NOT NULL,
-  user_id_source TEXT,
-    status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'released', 'expired')),
-    last_used_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    expires_at TIMESTAMPTZ NOT NULL,
-    released_at TIMESTAMPTZ,
-    release_reason TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-  DO $$
-  BEGIN
-    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'account_user_bindings' AND column_name = 'owner_key_hash')
-       AND NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'account_user_bindings' AND column_name = 'user_id_hash') THEN
-      ALTER TABLE account_user_bindings RENAME COLUMN owner_key_hash TO user_id_hash;
-    END IF;
-    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'account_user_bindings' AND column_name = 'owner_display')
-       AND NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'account_user_bindings' AND column_name = 'user_id_display') THEN
-      ALTER TABLE account_user_bindings RENAME COLUMN owner_display TO user_id_display;
-    END IF;
-    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'account_user_bindings' AND column_name = 'source_header')
-       AND NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'account_user_bindings' AND column_name = 'user_id_source') THEN
-      ALTER TABLE account_user_bindings RENAME COLUMN source_header TO user_id_source;
-    END IF;
-  END $$;
-
-  ALTER TABLE account_user_bindings
-    ADD COLUMN IF NOT EXISTS user_id_hash TEXT,
-    ADD COLUMN IF NOT EXISTS user_id_display TEXT,
-    ADD COLUMN IF NOT EXISTS user_id_source TEXT;
-
-  UPDATE account_user_bindings
-  SET user_id_hash = COALESCE(user_id_hash, id::text),
-    user_id_display = COALESCE(user_id_display, user_id_hash, id::text)
-  WHERE user_id_hash IS NULL OR user_id_display IS NULL;
-
-  ALTER TABLE account_user_bindings
-    ALTER COLUMN user_id_hash SET NOT NULL,
-    ALTER COLUMN user_id_display SET NOT NULL;
-
-  DROP INDEX IF EXISTS idx_account_user_bindings_active_owner;
-
-CREATE UNIQUE INDEX IF NOT EXISTS idx_account_user_bindings_active_owner
-    ON account_user_bindings(client_profile_id, pool_id, user_id_hash)
-    WHERE status = 'active';
-
-CREATE UNIQUE INDEX IF NOT EXISTS idx_account_user_bindings_active_account
-    ON account_user_bindings(account_id)
-    WHERE status = 'active';
-
-CREATE INDEX IF NOT EXISTS idx_account_user_bindings_pool_status
-    ON account_user_bindings(pool_id, status, expires_at);
-
-CREATE INDEX IF NOT EXISTS idx_account_user_bindings_expires
-    ON account_user_bindings(status, expires_at);
-
-CREATE TABLE IF NOT EXISTS account_session_bindings (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  client_profile_id UUID NOT NULL REFERENCES client_profiles(id) ON DELETE CASCADE,
-  pool_id UUID NOT NULL REFERENCES backend_pools(id) ON DELETE CASCADE,
-  account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-  session_id_hash TEXT NOT NULL,
-  session_id_display TEXT NOT NULL,
-  session_id_source TEXT,
-  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'released', 'expired')),
-  last_used_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  expires_at TIMESTAMPTZ NOT NULL,
-  released_at TIMESTAMPTZ,
-  release_reason TEXT,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-CREATE UNIQUE INDEX IF NOT EXISTS idx_account_session_bindings_active_owner
-  ON account_session_bindings(client_profile_id, pool_id, session_id_hash)
-  WHERE status = 'active';
-
-CREATE UNIQUE INDEX IF NOT EXISTS idx_account_session_bindings_active_account
-  ON account_session_bindings(account_id)
-  WHERE status = 'active';
-
-CREATE INDEX IF NOT EXISTS idx_account_session_bindings_pool_status
-  ON account_session_bindings(pool_id, status, expires_at);
-
-CREATE INDEX IF NOT EXISTS idx_account_session_bindings_expires
-  ON account_session_bindings(status, expires_at);
-SQL
-
-  apply_migration_file "011_fixed_pool_assignment.sql"
-  fi
-  apply_migration_file "012_usage_ledger_partitioning.sql"
-  if (( target >= 13 )); then
-    apply_migration_file "013_usage_rollup_partitioning.sql"
-  fi
-  if (( target >= 14 )); then
-    apply_migration_file "014_metrics_snapshot_retention.sql"
-  fi
-  if (( target >= 15 )); then
-    apply_migration_file "015_copilot_compatibility_flags.sql"
-  fi
-  if (( target >= 16 )); then
-    apply_migration_file "016_account_health_state.sql"
-  fi
-  if (( target >= 17 )); then
-    apply_migration_file "017_affinity_strategy.sql"
-  fi
-  if (( target >= 18 )); then
-    apply_migration_file "018_conservative_capacity_defaults.sql"
-  fi
-
-  set_database_schema_version "$target"
-}
-
-apply_init_schema() {
-  local target="$1"
-  apply_migration_file "$INIT_SCHEMA_SQL_NAME"
-  set_database_schema_version "$target"
-}
-
-reconcile_database_schema() {
-  local target
-  local current
-  target="$(target_schema_version)"
-  current="$(database_schema_version)"
-
-  if [[ -z "$current" ]] && schema_project_objects_exist; then
-    current="$(infer_legacy_schema_version)"
-    [[ -n "$current" ]] || schema_conflict "database contains a partial GHCP schema but the version cannot be inferred"
-    log "Detected legacy database schema version $current"
-  fi
-
-  if [[ -n "$current" ]]; then
-    log "Database schema version: current=$current target=$target"
-    if (( current == target )); then
-      if ! target_schema_current; then
-        warn "Database schema version is $target but required objects are missing; applying idempotent schema repair"
-        apply_smooth_schema_upgrade "$current" "$target"
-        return 0
-      fi
-      set_database_schema_version "$target"
-      log "Database schema is up to date"
-      return 0
-    fi
-    if (( current > target )); then
-      schema_conflict "database schema version $current is newer than local schema version $target"
-    fi
-    apply_smooth_schema_upgrade "$current" "$target"
-    return 0
-  fi
-
-  if schema_project_objects_exist; then
-    schema_conflict "database contains a partial GHCP schema but the required initial schema is incomplete"
-  fi
-
-  log "Database schema is empty; applying consolidated init schema version $target"
-  apply_init_schema "$target"
-}
 
 apply_migrations_if_needed() {
-  reconcile_database_schema
+  run_migration_runner
 }
 
 reset_data_dir_with_container() {
@@ -1752,6 +1076,7 @@ run_start_checks() {
   wait_http "gateway health" "$GATEWAY_URL/healthz"
   wait_http "gateway readiness" "$GATEWAY_URL/readyz"
   wait_http "admin dashboard" "$ADMIN_URL/"
+  wait_container_healthy worker
 }
 
 cleanup_old_logs() {
@@ -1885,8 +1210,10 @@ start_stack() {
   prepare_directories
   write_env_file_if_missing
   load_environment
+  load_release_manifest
   prepare_directories
   pull_runtime_images
+  validate_pulled_release_images
   load_runtime_environment
   start_data_services
   apply_migrations_if_needed
@@ -1939,7 +1266,9 @@ reset_stack() {
   stop_log_collector
   log "Stopping VM stack before reset"
   if [[ -f "$ENV_FILE" ]]; then
-    compose down || true
+    if ! compose down; then
+      die "failed to stop VM stack; persistent data was not deleted"
+    fi
   fi
 
   log "Deleting persistent PostgreSQL and Redis data under $DATA_DIR"

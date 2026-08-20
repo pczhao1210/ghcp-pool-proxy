@@ -1,12 +1,13 @@
 # Protocol
 
-本文是所有协议转换相关逻辑的唯一主文档：客户端三种入口协议如何解析，哪些字段保留、丢弃或透传，内部 canonical DTO 由哪些字段组成，以及最终发往 GitHub Copilot 时如何重建为上游 Chat Completions、Responses 或 Anthropic Messages 请求。路由、账号选择、sticky、user-binding、并发和风控规则见 [routing.zh.md](routing.zh.md)。
+本文是所有协议转换相关逻辑的唯一主文档：客户端三种入口协议如何解析，哪些字段保留、归一化、拒绝或透传，内部 canonical DTO 由哪些字段组成，以及最终发往 GitHub Copilot 时如何重建为上游 Chat Completions、Responses 或 Anthropic Messages 请求。路由、账号选择、sticky、user-binding、并发和风控规则见 [routing.zh.md](routing.zh.md)。
 
 ## 目录
 
 - [数据流边界](#数据流边界)
 - [上游 API 选择](#上游-api-选择)
 - [同协议语义与兼容开关](#同协议语义与兼容开关)
+- [跨协议语义门禁](#跨协议语义门禁)
 - [推理参数策略](#推理参数策略)
 - [入口协议字段](#入口协议字段)
 - [归一化层字段](#归一化层字段)
@@ -94,7 +95,7 @@ Claude Code 侧可通过 `/model <alias|name>`、启动参数 `claude --model <a
 
 | 路径 | 同协议路径保留 | 明确归一化 |
 | --- | --- | --- |
-| Responses → Responses | 结构化 `instructions`；有序 message/reasoning/function/custom/tool-search 输入输出 item；item/call ID、status、namespace、`previous_response_id`；SSE response/item ID 与 index；completed/incomplete/failed 语义 | model ID、认证/Copilot header、过长 call ID、不支持的 include 和 tool 类型 |
+| Responses → Responses | 结构化 `instructions`；有序 message/reasoning/function/custom/tool-search 输入输出 item；item/call ID、status、namespace、`previous_response_id`；SSE response/item ID 与 index；completed/incomplete/failed 语义 | model ID、认证/Copilot header、过长 call ID、明确声明的 Codex Responses Lite encrypted-reasoning 降级，以及 provider 不支持 tool 的前置拒绝 |
 | Messages → Messages | 有序 system/message block；text、image、tool use/result、`is_error`、thinking/signature、redacted thinking、cache breakpoint；原生 stop reason、usage 和严格 `message_stop` 完成 | model ID、认证 header、beta 白名单、thinking/tool-choice 冲突处理和不支持的 cache-control 子字段 |
 
 Gateway 会保留并转发 `previous_response_id`，但 Copilot 可能拒绝有状态续接。出现这种情况时，Responses 工具循环应显式发送有序的 `function_call` 与 `function_call_output` input item。
@@ -110,13 +111,30 @@ Gateway 会保留并转发 `previous_response_id`，但 Copilot 可能拒绝有�
 
 把模型目录 override 改回 `chat_completions` 即可回滚原生 Messages，无需重启或回滚 schema。单个兼容开关关闭后，在 Feature Flag cache 刷新后的新请求生效。
 
+## 跨协议语义门禁
+
+模型目录解析完成后，所有非原生路径必须匹配下面六个显式转换策略之一。公共 text、image、function tool、usage 和可映射终态继续投影；目标协议无法表达的来源协议语义会被拒绝，不再静默删除。
+
+| 方向 | 明确兼容的投影 | Fail-closed 示例 | 明确允许的 shape 归一化 |
+| --- | --- | --- | --- |
+| Chat → Responses | message、image、function tool/result、reasoning text | `message.name` 和无法保真的 typed history 扩展 | 合成 Responses item ID 与 lifecycle |
+| Chat → Messages | message、image、function tool/result、公共 stop reason | `message.name`、Chat-only 参数、reasoning content/delta、非文本 system/developer 内容 | 合成 Anthropic block 与 lifecycle；纯文本 system/developer message 转为顶层 `system` |
+| Responses → Chat | message/text/image、function call/output item | `previous_response_id`、结构化 instructions、reasoning/custom/tool-search/refusal item、Responses-only 参数、message phase、tool namespace | 省略 Responses item/lifecycle identity |
+| Responses → Messages | message/text/image、function call/output item | 上述 Responses-only 语义，以及 Responses Lite/additional tools 和 reasoning/refusal delta | 省略 Responses item/lifecycle identity |
+| Messages → Chat | text/image、普通文本 tool use/result | thinking/redacted block、signature、`is_error`、非文本 tool result、原生 cache/beta/参数语义、来源 stop sequence 和非公共终态 | 省略 Anthropic block/lifecycle identity |
+| Messages → Responses | text/image、普通文本 tool use/result | thinking/redacted block、signature、`is_error`、非文本 tool result、原生 cache/beta/参数语义、来源 stop sequence 和非公共终态 | 省略 Anthropic block/lifecycle identity |
+
+Request validator 在路由、预算 reservation 和 provider dispatch 前执行，不兼容请求返回 `400 invalid_request_error`。非流式 response validator 在 typed 上游解析后、客户端序列化前执行；不兼容时返回 `502`，且不记录 durable success。Stream validator 在每个 canonical event 进入下游 SSE writer 前执行；不兼容时写入对应入口的 stream error shape，并把 provider attempt 保留为 `outcome_unknown`。
+
+Parser 和语义门禁错误会包含转换方向、JSON path 和稳定 reason。未知顶层字段、typed Responses item/content 字段或类型、typed Anthropic block 字段或类型都会在 canonical 边界被拒绝，不再静默跳过。
+
 ## 推理参数策略
 
-`reasoning`、`reasoning_effort`、`thinking` 这类参数不做跨协议归一化，只作为协议原生参数进入 `Params`，再按原字段名写入最终上游请求。Gateway 不把 Anthropic `thinking` 翻译成 OpenAI `reasoning`，也不把 OpenAI `reasoning_effort` 翻译成 Anthropic thinking budget。
+`reasoning`、`reasoning_effort`、`thinking` 这类参数不做跨协议归一化。原生路径会把它们作为协议原生参数放入 `Params`，再按原字段名写入最终上游请求；跨协议路径只有在目标 builder 能保留相同字段语义时才接受，否则由语义门禁拒绝。Gateway 不把 Anthropic `thinking` 翻译成 OpenAI `reasoning`，也不把 OpenAI `reasoning_effort` 翻译成 Anthropic thinking budget。
 
 原因是不同模型和上游 API 对推理控制的 shape、level、budget 语义并不一致。例如 OpenAI Responses 可能使用 `reasoning: { ... }`，OpenAI Chat 兼容入口可能使用 `reasoning_effort`，Claude/Anthropic 常见的是 `thinking`。Gateway 只负责保留客户端显式传入的原生字段；字段是否支持、level 是否有效、budget 上限是否合法，由目标模型和 GitHub Copilot 上游决定。
 
-响应方向会把上游 reasoning/thinking delta 归一化成内部 `StreamEvent.ReasoningDelta`，再按客户端入口重建为 OpenAI Chat 的 `reasoning_content`、Responses 的 reasoning summary 事件，或 Anthropic 的 `thinking` block。这只影响响应事件形状，不代表请求侧有统一 reasoning level。
+响应方向中，Chat reasoning text 可保留到 Chat，或重建为 Responses reasoning item。结构化 Responses reasoning item 不能降级到 Chat/Messages；Anthropic thinking 的 block/signature 合同在其它协议中没有等价表达，因此在 block-start 就会被拒绝，不会先写出 thinking delta。Message phase 以及任何会被目标 writer 丢弃的 reasoning delta 也会被拒绝。这不代表请求侧存在统一 reasoning level。
 
 ## 入口协议字段
 
@@ -130,14 +148,14 @@ Gateway 会保留并转发 `previous_response_id`，但 Copilot 可能拒绝有�
 | --- | --- | --- |
 | `model` | `Model` | 之后由模型目录映射为 upstream model |
 | `stream` | `Stream` | 决定下游是否返回 SSE |
-| `messages` | `Messages` | 保留 `role`、`content`、`tool_calls`、`tool_call_id` |
+| `messages` | `Messages` | 原生 Chat 保留 typed `role`、`name`、`content`、`tool_calls`、`tool_call_id`、reasoning、refusal 和 audio 字段 |
 | `tools` | `Tools` | OpenAI `function` tool 转为 canonical tool |
 | `tool_choice` | `ToolChoice` | 保留并写入上游请求 |
 | `max_tokens` / `max_completion_tokens` | `MaxTokens` | `max_tokens` 优先；没有时使用 `max_completion_tokens` |
 | `user` | `Metadata.user` | sticky 备用输入；`user_binding` pool 会优先把它作为 `user_id`；不写入上游 `user` |
 | `session` / `metadata.session_id` / `metadata.session` / `metadata.conversation_id` | `Metadata` | sticky 备用输入；`session_binding` pool 使用 `session_id` / `session` 作为 `session_id` |
 
-透传到 `Params`，并在上游请求 body 中原名写出：
+保留到 `Params`，并在原生 Chat 路径的上游 body 中原名写出：
 
 ```text
 temperature, top_p, stop, seed, response_format,
@@ -146,9 +164,9 @@ max_completion_tokens, presence_penalty, frequency_penalty, logit_bias,
 logprobs, top_logprobs, service_tier, modalities, audio
 ```
 
-只有客户端使用 `max_completion_tokens` 且没有同时发送 `max_tokens` 时，才会按原字段名透传它，以保留 o-series 等严格 Chat 兼容接口需要的字段名。`reasoning_effort` 只按原名透传；不会转换为 Responses `reasoning` 或 Anthropic `thinking`。
+只有客户端使用 `max_completion_tokens` 且没有同时发送 `max_tokens` 时才保留该字段，以维持原生 Chat 的 o-series 等严格行为。跨协议 builder 使用 canonical `MaxTokens`，并确定性改名为 Responses `max_output_tokens` 或 Messages `max_tokens`。`reasoning_effort` 只按原名透传，不会转换为 Responses `reasoning` 或 Anthropic `thinking`。
 
-丢弃或拒绝：未列出的 body 字段会被丢弃；`metadata` 里除 `session_id`、`conversation_id` 外的键会被丢弃；图片 URL 不是 `http`、`https` 或 `data:image/*;base64,...` 时拒绝请求；图片 part 总数超过 20 或 data URL 超过 20 MiB 时拒绝请求。
+拒绝或归一化：未知顶层 body 字段会被拒绝；`metadata` 里除 `session_id`、`conversation_id` 外的键不会进入路由 metadata；图片 URL 不是 `http`、`https` 或 `data:image/*;base64,...` 时拒绝请求；图片 part 总数超过 20 或 data URL 超过 20 MiB 时拒绝请求。
 
 ### OpenAI Responses API
 
@@ -163,6 +181,7 @@ logprobs, top_logprobs, service_tier, modalities, audio
 | `instructions` | `ResponsesInstructions` / `System` | Responses → Responses 保留结构化值，同时把文本投影到 `System` |
 | `input` string | `SourceResponses` / `Messages` | 保留为 typed user item，并投影为一条 user message |
 | `input` array | `SourceResponses` / `Messages` / `System` | typed item 按顺序保留 ID/status，同时生成跨协议投影 |
+| `input[].type=additional_tools` | `SourceResponses[].Tools` / `Protocol.ResponsesLite` | 保留 Responses Lite 嵌套的 function、custom 和 namespace 工具，并标记 typed 协议模式 |
 | `tools` | `Tools` | OpenAI/Responses tool 转为 canonical tool |
 | `tool_choice` | `ToolChoice` | 保留并写入上游请求 |
 | `max_output_tokens` | `MaxTokens` | 上游 Responses 写为 `max_output_tokens` |
@@ -180,13 +199,17 @@ truncation, include, store, service_tier
 
 `reasoning` 和 `reasoning_effort` 只按原名透传；不会转换为 Anthropic `thinking`。
 
-对于 Copilot 上游，`include` 会丢弃不支持的 `reasoning.encrypted_content`；如果列表因此为空，则省略 `include`。
+普通 Copilot 请求包含 `include=reasoning.encrypted_content` 时会在 dispatch 前拒绝。只有 User-Agent 首 token 精确为 `codex_exec/0.147.0`，且已认证、启用的 client profile 名为 `codex-candidate` 时，才授予显式兼容降级；降级只删除这个不支持的 include 值，列表因此为空时才省略 `include`。仅有 Lite header 或 `additional_tools` item 不能获得该授权。
 
-OpenAI Responses 请求中的工具会保留在 canonical tool 记录中，用于诊断和转换元数据。发往 Copilot 上游时，Provider 使用 cc-switch 风格的 tools adapter，而不是把非 function tool 原样透传：`function` 直接保留；`custom` 包装成带固定 `input` 字符串参数的 function tool，并把原始定义写入 description；`tool_search` 包装成名为 `tool_search` 的 proxy function；`namespace` 会展开其中的 function 子工具，并把名称扁平化为 `<namespace>___<tool>`。`tool_choice` 会同步映射到转换后的 function 名称，无法映射到有效上游工具时会被省略。上游返回 tool call 后，adapter 会把转换后的 function 名称还原为 Responses 下游语义：`custom_tool_call` 使用 `response.custom_tool_call_input.*` 事件，`tool_search` 输出 `tool_search_call` item，namespace 子工具会恢复原始 tool 名称并在 `function_call` item 上带回 `namespace` 字段。OpenAI Responses remote MCP tool（`type: "mcp"`）不受支持，会被过滤，因为 Gateway 没有 MCP discovery/执行 adapter；如果适配/过滤后没有任何支持的 tool，会同时省略 `tool_choice` 和 `parallel_tool_calls`。可用 `scripts/probe_stream_mcp.py` 对比 MCP 请求和无工具 baseline 的 SSE 事件形状。
+Responses Lite 客户端可通过 `X-OpenAI-Internal-Codex-Responses-Lite: true` 标记请求，并把工具放在 `input` 首部的 `additional_tools` developer item 中。Gateway 只保存这个 typed 标记，不保存任意 header map；wire mode 可由该 header、`additional_tools` 或上述固定 Codex User-Agent 识别，但 wire mode 与认证后的降级授权相互独立。目标为上游 Responses 时，嵌套工具在原 item 中重建且标记头继续转发；目标为上游 Chat 时，嵌套工具进入同一兼容 adapter。
 
-转换：上游同为 Responses 时，会按原顺序重建 typed message、reasoning、function/custom/tool-search call/output item，并保留 identity/status；不支持的 custom/tool-search/namespace tool 仍通过兼容 adapter 包装成 function。跨协议时，顶层 text/image item 会合并成 user message，function call 转为 assistant tool call，output 转为 tool message。
+OpenAI Responses 请求中的工具会保留在 canonical tool 记录中，用于诊断和转换元数据。发往 Copilot 上游时，Provider 直接保留 `function`，并对 `custom`、`tool_search`、`namespace` 使用 cc-switch 风格的 adapter：`custom` 包装成带固定 `input` 字符串参数的 function tool，并把原始定义写入 description；`tool_search` 包装成名为 `tool_search` 的 proxy function；`namespace` 展开其中的 function 和 custom 子工具，并把名称扁平化为 `<namespace>___<tool>`。经过严格校验的 `web_search` 只在原生 Responses 路径保留其 typed options；preview、带日期后缀、未知或跨协议的 web-search 类型会明确拒绝，不做猜测性规范化。强制 `tool_choice` 必须能解析到实际投影后的工具，否则在 dispatch 前拒绝；没有有效工具时只会省略中性的控制项。上游返回 tool call 后，adapter 会把转换后的 function 名称还原为 Responses 下游语义：`custom_tool_call` 使用 `response.custom_tool_call_input.*` 事件，`tool_search` 输出 `tool_search_call` item，namespace 子工具恢复原始 tool 名称并带回 `namespace` 字段，原生 `web_search_call` 的 action/lifecycle 则保持 typed Responses 输出。OpenAI Responses remote MCP tool（`type: "mcp"`）不受支持；由于 Gateway 没有 MCP discovery/执行 adapter，请求会在 provider dispatch 前拒绝。Namespace 的 `tools` 与 legacy `children` 集合都会验证；MCP、未知、畸形或其它不可投影 child 会 fail closed，不再被跳过。如果适配后没有有效 tool，会同时省略中性的 `tool_choice` 和 `parallel_tool_calls`。可用 `scripts/probe_stream_mcp.py` 对比 MCP 请求和无工具 baseline 的 SSE 事件形状。
 
-丢弃或拒绝：未列出的 body 字段会被丢弃；`metadata` 除 `session_id`、`conversation_id` 外丢弃；`input` array 里不支持的 content part 会被跳过；图片校验规则与 Chat Completions 相同。
+最终上游 body 在序列化前会递归检查顶层 `tools` 和 Responses Lite `additional_tools.tools`。`function`、`custom`、`tool_search`、`namespace` 的 `description` 缺失、为 `null`、空字符串或纯空白时会补稳定的非空说明；已有非空说明保持不变，MCP、web search 等其它工具类型不改写。
+
+转换：上游同为 Responses 时，会按原顺序重建 typed message、reasoning、function/custom/tool-search call/output item，并保留 identity/status；不支持的 custom/tool-search/namespace tool 仍通过兼容 adapter 包装成 function。跨协议时，顶层 text/image item 会合并成 user message，function call 转为 assistant tool call，output 转为 tool message；其它 item 家族由语义门禁拒绝。
+
+拒绝或归一化：未知顶层、item、content-part 字段或类型会被拒绝；`metadata` 除 `session_id`、`conversation_id` 外不会进入路由 metadata；图片校验规则与 Chat Completions 相同。
 
 ### Anthropic Messages
 
@@ -207,14 +230,14 @@ OpenAI Responses 请求中的工具会保留在 canonical tool 记录中，用�
 透传到 `Params`：
 
 ```text
-temperature, top_p, top_k, stop, thinking, metadata
+temperature, top_p, top_k, stop, thinking, context_management, metadata
 ```
 
-其中 `stop_sequences` 会重命名为 `stop`。`thinking` 只按原名透传；不会转换为 OpenAI `reasoning` 或 `reasoning_effort`。Anthropic `metadata` 仍是上游 body 参数；绑定池也会读取 `metadata.user_id` / `metadata.user` 作为 `user_id`，读取 `metadata.session_id` / `metadata.session` 作为 `session_id`。
+其中 `stop_sequences` 会重命名为 `stop`。`thinking` 和 `context_management` 只在原生 Messages 中按原名透传，不会转换为 OpenAI 等价字段。Anthropic `metadata` 仍是上游 body 参数；绑定池也会读取 `metadata.user_id` / `metadata.user` 作为 `user_id`，读取 `metadata.session_id` / `metadata.session` 作为 `session_id`。
 
-原生保真范围包括 `text`、`image`、`tool_use`、`tool_result`、tool-result `is_error`、带 signature 的 `thinking`、`redacted_thinking` 和 `cache_control`。跨协议仍把 tool use/result 投影成 canonical tool call/message，把图片投影成 OpenAI 风格 `image_url`。
+原生保真范围包括 `text`、`image`、`tool_use`、`tool_result`、tool-result `is_error`、带 signature 的 `thinking`、`redacted_thinking`、`cache_control` 和 `context_management`。跨协议只投影普通 tool use/result、图片和文本；原生 block metadata 会被拒绝。
 
-丢弃或拒绝：未列出的 body 字段和未知 block type 会被丢弃；图片校验规则与 Chat Completions 相同。原生 Messages 不转发任意 header 或 raw JSON 字段。
+拒绝：未知顶层字段以及未知 block 字段/类型都会被拒绝；图片校验规则与 Chat Completions 相同。原生 Messages 不转发任意 header 或 raw JSON 字段。
 
 ## 归一化层字段
 
@@ -235,7 +258,7 @@ temperature, top_p, top_k, stop, thinking, metadata
 | `MaxTokens` | `max_tokens` / `max_completion_tokens` | `max_output_tokens` | `max_tokens` | 写到上游时按目标 API 改名 |
 | `Params` | 白名单透传字段 | 白名单透传字段 | 白名单透传字段 | 不是 arbitrary body；只包含 parser 明确收集的字段；reasoning/thinking 保持协议原生形状 |
 | `Metadata` | `user`、部分 `metadata` | `user`、部分 `metadata`、`previous_response_id` | 无 | 用于 sticky 或 Responses continuation；不会整体发往上游 |
-| `Protocol` / `Compatibility` | 无 | 无 | version/beta token 与已计算开关 | typed policy 输入，不是通用 header map |
+| `Protocol` / `Compatibility` | 无 | Responses Lite 标记 | version/beta token 与已计算开关 | typed policy 输入，不是通用 header map |
 
 `CanonicalResponse` 保留公共 text/tool 投影；原生路径还保留有序 Anthropic content block 或带 identity/status 的 Responses output item。`StreamEvent` 可携带原生 response/message ID、block/item index、signature delta、stop/incomplete reason 和 usage，同时仍可投影到其它下游协议。
 
@@ -251,12 +274,12 @@ Provider 按 `CanonicalRequest.UpstreamAPI` 选择上游路径；为空时，`op
 | --- | --- |
 | `model` | `CanonicalRequest.Model` |
 | `messages` | `System` 前置为 system message，再追加 `Messages` |
-| `tools` | 仅 function `Tools` 重建为 OpenAI function tool shape；Chat 上游会省略非 function tool |
-| `tool_choice` | `ToolChoice`；没有有效 tool 发往上游时省略 |
+| `tools` | Chat 工具直接重建；Responses 的顶层及 `additional_tools` 工具经兼容 adapter 重建为 function tool shape |
+| `tool_choice` | `ToolChoice`；无工具时可省略中性的 `auto`/`none`，`required` 或具名选择必须先通过语义验证并解析到实际工具 |
 | `max_tokens` / `max_completion_tokens` | `MaxTokens`；客户端使用 `max_completion_tokens` 时保留该字段名 |
 | 透传字段 | `Params` 原名复制 |
 
-如果最终有效的上游 tool 列表为空，会同时省略 `tool_choice` 和 `parallel_tool_calls`。一些严格的 Chat 兼容上游会拒绝“没有 tools 但带工具控制参数”的请求。
+如果最终有效的上游 tool 列表为空，会省略中性的 `auto`/`none` 和 `parallel_tool_calls`；没有匹配投影工具的 `required` 或具名选择已由语义验证拒绝。一些严格的 Chat 兼容上游会拒绝“没有 tools 但带工具控制参数”的请求。
 
 ### 上游 Responses
 
@@ -265,10 +288,10 @@ Provider 按 `CanonicalRequest.UpstreamAPI` 选择上游路径；为空时，`op
 | 上游字段 | 来源 |
 | --- | --- |
 | `model` | `CanonicalRequest.Model` |
-| `input` | 同协议请求使用 `SourceResponses`；其它请求把 `Messages` 投影为 Responses item |
+| `input` | 同协议请求使用 `SourceResponses`，包括 Responses Lite `additional_tools`；其它请求把 `Messages` 投影为 Responses item |
 | `instructions` | 同协议请求使用结构化 `ResponsesInstructions`；其它请求使用 `System` |
-| `tools` | `Tools` 重建为 Responses tool shape |
-| `tool_choice` | `ToolChoice`；没有有效 tool 发往上游时省略 |
+| `tools` | 顶层 `Tools` 重建为 Responses tool shape；Responses Lite 工具保留在 `additional_tools.tools` |
+| `tool_choice` | `ToolChoice`；无工具时可省略中性的 `auto`/`none`，`required` 或 typed 选择必须先通过语义验证并解析到实际工具 |
 | `max_output_tokens` | `MaxTokens` |
 | `previous_response_id` | `Metadata.previous_response_id` |
 | 透传字段 | `Params` 原名复制 |
@@ -285,7 +308,7 @@ Provider 按 `CanonicalRequest.UpstreamAPI` 选择上游路径；为空时，`op
 
 对于 Copilot Responses 上游，过长的 `call_id` 会被稳定缩短，以满足上游 64 字符限制；对应的 `function_call_output` 会使用同一个缩短后的 ID。
 
-如果最终有效的上游 tool 列表为空，Responses 上游也会省略 `tool_choice` 和 `parallel_tool_calls`。当前 Copilot Responses 上游会拒绝 remote MCP tool（`type: "mcp"`），因此这类 tool 会在该检查前被过滤。
+如果最终有效的上游 tool 列表为空，Responses 上游也会省略中性的 `auto`/`none` 和 `parallel_tool_calls`；没有匹配投影工具的 `required` 或 typed 选择已由语义验证拒绝。当前 Copilot Responses 上游会拒绝 remote MCP tool（`type: "mcp"`），因此 request validator 会在路由或 provider dispatch 前拒绝这类请求。
 
 ### 上游 Anthropic Messages
 
@@ -303,9 +326,13 @@ Provider 从 `SystemBlocks` 和 `SourceMessages` 重建有序原生 block，并�
 | OpenAI Responses | `response` | `response.created`、`response.output_text.delta`、`response.completed` 等事件 |
 | Anthropic Messages | Anthropic message shape | `message_start`、`content_block_delta`、`message_delta`、`message_stop` 等事件 |
 
-Usage 会统一为 input/output/cached/reasoning tokens、AI credits 和成本估算，并记录 `request_format`、`pool_id`、`account_id`。Responses 流式 usage 会同时包含 OpenAI 风格的 `input_tokens_details.cached_tokens`、`output_tokens_details.reasoning_tokens`，以及网关扩展的 cost/cache 字段。
+Usage 会统一为 input/output/cached/reasoning tokens、AI credits 和成本估算，内部来源明确为 `upstream`、`estimated` 或 `missing`，并同时持久化到 provider-attempt journal 与 usage ledger。上游缺失 usage 时，客户端 JSON 会省略该字段，不再伪造零值对象；上游显式返回的全零对象仍会保留。来源为 `missing` 时保留最大预算 reservation，不会按实际零消耗结算。Responses 流式 usage 会同时包含 OpenAI 风格的 `input_tokens_details.cached_tokens`、`output_tokens_details.reasoning_tokens`，以及网关扩展的 cost/cache 字段。
 
-流式完成语义是显式的：Chat 上游必须以 `[DONE]` 结束；Responses 上游必须出现 `response.completed`、`response.incomplete`，或 Copilot Responses 变体中可接受的 terminal output；原生 Messages 只有收到 `message_stop` 才成功。同协议 Responses 保留上游 response/item ID 与 output/content/summary index；同协议 Messages 保留 block index、thinking signature、tool ID、stop reason 和 usage。Responses incomplete 会返回客户端，并按 `incomplete` 而非 `success` 记账。failed event、读错误和提前 EOF 会形成协议失败，不会伪造成功终态。
+流式完成语义是显式的：Chat 只有在先收到已校验的非空最终 `finish_reason` 后才接受 `[DONE]`，EOF 也只能在已有同一终态证据时完成；Responses 上游必须出现 `response.completed` 或 `response.incomplete`，output/content/item done 事件都不能作为 response 级终态证据；原生 Messages 只有收到 `message_stop` 才成功。畸形 Chat SSE JSON 会立即终止；Messages 在接受 `message_stop` 前会校验每个 content block index 的 start/delta/stop 类型与生命周期。同协议 Responses 保留上游 response/item ID 与 output/content/summary index；同协议 Messages 保留 block index、thinking signature、tool ID、stop reason、`stop_sequence` 和 usage。Chat、Responses、Messages 非流 body 都必须只含一个 JSON 值，随后为 EOF。Responses incomplete 会返回客户端，并按 `incomplete` 而非 `success` 记账。failed event、读错误、畸形 frame、尾随 JSON 和提前 EOF 都会形成协议失败，不会伪造成功终态。
+
+Responses refusal item 保持为原生 Responses 语义。非流式 refusal 如果路由到 Chat 或 Messages，会在序列化前拒绝；流式 refusal event 会成为上游协议失败而不是 text delta，因此不会被伪装成普通跨协议输出。
+
+跨协议终态只在语义等价时归一化：`end_turn`/`stop_sequence` 转为 Chat `stop`，`tool_use` 转为 `tool_calls`，`max_tokens`/`length` 转为 Responses `incomplete: max_output_tokens` 或 Chat `length`。其它来源协议专属终态 fail closed。
 
 本地 gateway 运行后，可用下面的脚本复现 MCP/tool 流式差异：
 
@@ -315,14 +342,15 @@ python3 scripts/probe_stream_mcp.py --models gpt-5.5 gemini-3.5-flash claude-son
 
 ## 丢失与失真注意事项
 
-- 客户端未知 body 字段默认丢弃，不会进入 `Params`，也不会透传给 Copilot。
+- 未知顶层字段和 typed item/block 字段或类型会带方向和 JSON path 被拒绝，不会进入 `Params` 或到达 Copilot。
 - 客户端 header 默认不透传；认证、sticky、account-binding 等输入只影响 Gateway 自身逻辑。
 - `user`、`session`、`metadata.session_id`、`metadata.conversation_id` 不会成为上游 `user`。
 - `user_binding` 使用 OpenAI Chat/Responses 的 `user`、Anthropic `metadata.user_id` / `metadata.user` 或 `X-GHCP-User` 作为 `user_id`；`session_binding` 使用 request/metadata session 字段或 session header 作为 `session_id`。
-- Responses 的 `previous_response_id` 只有在目标上游 API 也是 Responses 时才会保留；如果模型被配置成上游 Chat Completions，该字段会丢失。
+- Responses 的 `previous_response_id` 只有在目标上游 API 也是 Responses 时才会保留；跨协议路由会在 dispatch 前拒绝。
 - 跨协议投影会把 Responses `developer`/`system` input 和 Anthropic system text 合并为一个 `System` 字符串；同协议 typed source 字段仍保留有序 block/item。
+- Chat 的纯文本 `system`/`developer` message 会变成 Anthropic 顶层 `system`；非文本内容会被拒绝，而不是写成非法 Anthropic message role。
 - Anthropic `tool_choice.any` 会变成 OpenAI 风格 `required`；`tool_choice.tool` 会变成 function choice。
 - Anthropic `stop_sequences` 会改名为上游 `stop`。
-- 未知 Responses item/content type 和未知 Anthropic block type 会被跳过，不会作为任意 JSON 透传。
-- 原生非流式 Responses 保留 message、reasoning、function、custom、tool-search output item；其它 item 家族不保留。
-- 跨协议流会重建兼容形状，不能保留来源协议的每个事件字段；原生 Responses/Messages 保留文档列出的 identity 与 lifecycle 语义，而不是 raw SSE 字节。
+- 未知 Responses item/content type 和未知 Anthropic block type 会被拒绝，不会作为任意 JSON 透传。
+- 原生非流式 Responses 保留 message、reasoning、function、custom、tool-search output item；未知上游 item 家族属于协议错误。
+- 跨协议流会重建兼容 shape，并把来源 lifecycle/block/item identity 的省略声明为已知 shape 归一化；refusal、thinking/signature、redacted thinking、message phase、tool namespace/type 等不可表达语义会在 payload 写出前 fail closed。

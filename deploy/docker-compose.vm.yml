@@ -38,12 +38,29 @@ services:
       - ghcp-proxy
     logging: *default-logging
 
+  migration:
+    image: "${MIGRATION_IMAGE:?MIGRATION_IMAGE is required}"
+    user: "0:0"
+    restart: "no"
+    environment:
+      MIGRATION_POSTGRES_DSN_FILE: /run/ghcp/migration-postgres-dsn
+      MIGRATION_TARGET_VERSION: "${SCHEMA_VERSION:?SCHEMA_VERSION is required}"
+      MIGRATION_PHASE: expand
+    volumes:
+      - "${MIGRATION_DSN_HOST_FILE:-/dev/null}:/run/ghcp/migration-postgres-dsn:ro"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - ghcp-proxy
+    logging: *default-logging
+
   gateway:
-    image: pczhao1210/ghcp-pool-proxy:gateway-latest
+    image: "${GATEWAY_IMAGE:?GATEWAY_IMAGE is required}"
     restart: unless-stopped
     stop_grace_period: 60s
     ports:
-      - "${GATEWAY_PORT:-8000}:8000"
+      - "${GATEWAY_BIND_ADDR:-127.0.0.1}:${GATEWAY_PORT:-8000}:8000"
     environment:
       CONFIG_FILE: "/etc/ghcp/config.yaml"
       GATEWAY_ADDR: ":8000"
@@ -70,10 +87,10 @@ services:
     logging: *default-logging
 
   admin:
-    image: pczhao1210/ghcp-pool-proxy:admin-latest
+    image: "${ADMIN_IMAGE:?ADMIN_IMAGE is required}"
     restart: unless-stopped
     ports:
-      - "${ADMIN_PORT:-8001}:8001"
+      - "${ADMIN_BIND_ADDR:-127.0.0.1}:${ADMIN_PORT:-8001}:8001"
     environment:
       CONFIG_FILE: "/etc/ghcp/config.yaml"
       ADMIN_ADDR: ":8001"
@@ -90,7 +107,6 @@ services:
       BUDGET_MAX_DAILY_NANO_AIU_GLOBAL: "${BUDGET_MAX_DAILY_NANO_AIU_GLOBAL:-0}"
       CREDENTIAL_KEY_VERSION: "${CREDENTIAL_KEY_VERSION:-vm}"
       CREDENTIAL_MASTER_KEY: "${CREDENTIAL_MASTER_KEY:?CREDENTIAL_MASTER_KEY is required}"
-      GITHUB_TOKEN: "${GITHUB_TOKEN:-}"
     volumes:
       - "${APP_CONFIG_FILE:?APP_CONFIG_FILE is required}:/etc/ghcp/config.yaml:ro"
     depends_on:
@@ -103,7 +119,7 @@ services:
     logging: *default-logging
 
   worker:
-    image: pczhao1210/ghcp-pool-proxy:worker-latest
+    image: "${WORKER_IMAGE:?WORKER_IMAGE is required}"
     restart: unless-stopped
     ports:
       - "127.0.0.1:${WORKER_METRICS_PORT:-8002}:8002"
@@ -113,11 +129,13 @@ services:
       POSTGRES_DSN: "postgres://${POSTGRES_USER:-ghcp}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-ghcp}?sslmode=disable"
       REDIS_ADDR: "redis:6379"
       WORKER_METRICS_ADDR: ":8002"
+      WORKER_ROLES: "${WORKER_ROLES:-all}"
       CREDENTIAL_KEY_VERSION: "${CREDENTIAL_KEY_VERSION:-vm}"
       CREDENTIAL_MASTER_KEY: "${CREDENTIAL_MASTER_KEY:?CREDENTIAL_MASTER_KEY is required}"
-      GITHUB_TOKEN: "${GITHUB_TOKEN:-}"
+      GITHUB_TOKEN_FILE: "/run/secrets/ghcp/github-token"
     volumes:
       - "${APP_CONFIG_FILE:?APP_CONFIG_FILE is required}:/etc/ghcp/config.yaml:ro"
+      - "${GITHUB_TOKEN_FILE:-/dev/null}:/run/secrets/ghcp/github-token:ro"
     depends_on:
       postgres:
         condition: service_healthy

@@ -90,11 +90,11 @@ All ordinary and required-account selections must pass these filters.
 | Reserved account | Active binding accounts are unavailable to shared pools; binding requests may use only their own required account |
 | Process concurrency | `current_concurrency < effective_max_concurrency`; binding pools prefer pool `binding_max_concurrency`, otherwise account `max_concurrency`; non-positive values are treated as 1 |
 | Exclusion set | Sticky overflow and concurrency rebinding may temporarily exclude the old account |
-| Per-account model access | Not checked; the resolved model does not filter the account candidate set |
+| Per-account model access | `require_fresh` profiles require current complete-version `available/passed` evidence for the resolved upstream model/API; missing, old, expired, failed, or mismatch evidence is rejected |
 
 An empty candidate set enters gateway error mapping; see [operations.en.md](operations.en.md) for the client-facing status and internal routing reason mapping.
 
-The model catalog controls the models exposed by the gateway, but it does not store or enforce model entitlements for individual accounts. Accounts in one pool therefore need the same usable upstream model set. If a pool mixes accounts with different model access, the router may select an account that cannot serve the requested model; the provider call fails and the gateway does not retry that request on another account. Separate accounts into different pools when their model access differs, and assign each client profile to a compatible pool. An upstream `403` is classified as `permission_denied` and may affect the selected account's risk state.
+The model catalog controls the models exposed by the gateway. Schema 19 stores per-account discovery and probe evidence. A client profile explicitly selects `model_entitlement_policy=allow_unknown` or `require_fresh`. Strict requests capture one immutable allowlist from the latest fully completed evidence version; ordinary, sticky, required-account, Redis concurrency rebinding, budget retry, and user/session binding create/restore all reuse it. An existing binding whose account is no longer eligible fails closed without creating a second binding. Evidence expiry is evaluated when the request plan is created. `allow_unknown` is the compatibility default and does not filter by evidence, so those pools should remain model-homogeneous.
 
 ## Load Balancing
 
@@ -146,7 +146,7 @@ Session key order:
 9. `X-GHCP-Project`
 10. Body metadata keys `session_id`, `conversation_id`, and `user`
 
-With `session_then_prefix`, a missing session key falls back to a prefix hash. `prefix_only` always uses the prefix hash and ignores session headers. The affinity key includes client profile, protocol, model, and session/prefix material; only hashes are stored. For API compatibility, the legacy `sticky_mode=prefix` value is normalized to `sticky_mode=soft` with `affinity_strategy=prefix_only`.
+With `session_then_prefix`, a missing session key falls back to a prefix hash. `prefix_only` always uses the prefix hash and ignores session headers. The affinity key includes client profile, protocol, model, and session/prefix material; only hashes are stored. Valid `sticky_mode` values are `soft`, `strict`, and `none`; use `affinity_strategy=prefix_only` to request prefix affinity.
 
 ## Sticky Overflow And Concurrency
 

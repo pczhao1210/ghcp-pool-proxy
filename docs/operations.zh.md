@@ -1,14 +1,16 @@
 # 运维说明
 
-本文档覆盖已交付的单机部署、多进程共享状态、启动、迁移、监控、告警和常见故障处理。
+本文档覆盖已交付的 VM 与 Kubernetes 部署路径、多进程共享状态、启动、迁移、监控、告警和常见故障处理。
 
 ## 目录
 
 - [运行拓扑](#运行拓扑)
 - [VM 部署](#vm-部署)
+- [集群部署](#集群部署)
 - [主要配置](#主要配置)
 - [多账号环境隔离](#多账号环境隔离)
 - [Dashboard 与 Admin 鉴权](#dashboard-与-admin-鉴权)
+- [控制面 API 分组](#控制面-api-分组)
 - [发布与迁移](#发布与迁移)
 - [日常检查](#日常检查)
 - [Gateway 错误映射](#gateway-错误映射)
@@ -37,6 +39,8 @@ flowchart TD
 
 推荐使用发布包中的 `deploy/deploy.sh` 在 Linux VM 上部署。脚本使用固定 Docker Hub 镜像，不包含源码构建、测试或 smoke test 流程。
 
+VM 与集群入口都支持 `--release-manifest FILE`、`--install-missing` 和 `deploy` 动作别名；共享的环境变量形式为 `RELEASE_MANIFEST`，`RELEASE_MANIFEST_FILE` 保留为兼容别名。缺少前置组件时默认先请求确认，只有显式传入 `--install-missing` 才允许非交互安装。集群 `--yes` 只接受部署确认，不代表同意安装；VM 删除数据仍必须设置 `GHCP_RESET_CONFIRM=reset`。
+
 ```bash
 deploy/deploy.sh --start
 ```
@@ -47,9 +51,9 @@ deploy/deploy.sh --start
 - 在宿主机创建默认持久化目录 `~/ghcp_proxy`，并把 PostgreSQL/Redis 数据目录作为 bind mount 挂入容器。
 - 首次启动自动生成 `~/ghcp_proxy/config.yaml` 和 `~/ghcp_proxy/.env`；也可提前通过 `generate-config` 创建 YAML。两者都不会覆盖已有文件。
 - 已有持久化目录中 YAML 缺失时会停止启动，避免静默恢复默认配置。
-- 拉取 `pczhao1210/ghcp-pool-proxy:gateway-latest`、`admin-latest`、`worker-latest` 以及 PostgreSQL/Redis 镜像。
+- 校验随包非敏感 release manifest 与 schema 一致，从 manifest 派生并直接拉取四个 runtime `repository@sha256:...` 引用，同时拉取 PostgreSQL/Redis 镜像。
 - 启动 PostgreSQL 和 Redis，等待健康检查通过。
-- 读取发布包或已发布 admin 镜像内的 `migrations/schema_version` 和 `migrations/001_init.sql`。空库直接应用单一 init schema；已有库读取 DB 内 `system_settings.schema_version`，只在脚本内置了平滑升级路径时自动升级。
+- 使用 file-mounted DSN 运行专用 manifest-backed migration 镜像。空库应用 `001_init.sql`；已识别的 schema 版本 1 到 9 通过 `010_legacy_schema_reconciliation.sql` 修复；版本 10 及以上使用对应编号 migration 路径。部分 schema，以及缺少 marker 但带有版本 10 及以上特征的 schema，会 fail-closed。
 - 启动 gateway、admin 和 worker。
 - 启动日志采集器，把 compose 日志按小时写入 `~/ghcp_proxy/logs/ghcp-proxy-YYYYMMDD-HH.log`，默认保留 30 天。
 
@@ -142,6 +146,25 @@ WAL 默认循环复用，`13–15 GB/天` 不等于每天永久增加这些空�
 
 建议按以下顺序扩展：先把当前 VM 升到 4C8G 并扩盘，观察至少一个工作周；若瓶颈集中在数据库写延迟，先迁移 PostgreSQL 到独立 SSD 或托管实例；若 CPU、活跃 SSE 或单主机连接数成为瓶颈，再增加 gateway 实例。增加 gateway 实例不会增加账号侧容量，且所有实例必须共享 PostgreSQL 和 Redis。
 
+## 集群部署
+
+使用运行包中的集群入口；它与 VM 部署使用同一份不可变 release manifest：
+
+```bash
+deploy/deploy-cluster.sh local apply
+deploy/deploy-cluster.sh azure apply
+```
+
+`local` 会检查 Docker、Kind、kubectl 和 Kustomize；Linux 缺少组件时，它会说明安装内容并请求确认，再使用检测到的包管理器和必要的 `sudo` 安装。随后创建或复用 `ghcp-local` Kind 集群，并应用含集群内 PostgreSQL/Redis 的一次性 `test` overlay。该模式只用于 migration、readiness 和协议验证；删除 Kind 集群会同时删除数据。
+
+`azure` 会检查 Azure CLI、kubectl、Kustomize 和 jq，再交互式为 resource group、VNet、AKS subnet、PostgreSQL delegated subnet、private-endpoint subnet、AKS、PostgreSQL Flexible Server 和 Azure Managed Redis 选择 `create` 或 `reuse`。提示中的方括号值可通过直接回车采用。交互式复用会列出当前可见的 resource group、同区域网络/服务和所选 VNet 内的 subnet，并支持输入编号选择；直接回车选择 `[1]`，输入 `0` 可改为手工填写。非交互复用仍要求通过环境变量提供 resource group 名称和完整 ARM ID。资源类型、subscription、资源区域、状态、subnet 或服务契约不符时会停止，resource group 的元数据 location 只作为默认资源区域。新建资源会编译 `deploy/azure/main.bicep`、执行 Azure what-if，并在 apply 前要求显式确认。退出时脚本会恢复调用者原来的 Azure subscription。
+
+新建 AKS 时，Bicep 会创建 user-assigned control-plane identity，在 node subnet 范围为其 principal 授予内置 Network Contributor，并让 AKS 创建依赖该授权。因此操作者必须能创建 managed identity，并有权在该 subnet 创建 role assignment。复用 Redis 不会改变其 SKU 或数据库策略，但本部署仍会为所选 VNet 创建 private endpoint、private DNS zone/link 与 zone group；操作者必须具备对应网络与 private-link 权限。
+
+基础设施解析完成后，脚本会获取 AKS context，用隐藏输入生成 namespace 级 application/migration Secret，以 release manifest digest 渲染资源，依次执行 migration Job、工作负载 apply、rollout 等待和已配置的 smoke check。临时参数与 Secret 文件权限为 `0600`，退出时删除。不要把凭据放入命令行参数、shell history、已提交的参数文件或日志。
+
+该 Azure 基线只创建 VNet/subnet、AKS、PostgreSQL、Managed Redis 及所需私网连接。Bicep build、fake render 或 what-if 成功不等于真实环境验收。生产 apply 前必须独立批准并验证 subscription/region quota、Azure Policy、subnet 权限、DNS、Ingress/TLS、可观测性、备份恢复、HA、成本与回滚责任；当前入口不提供 destroy 自动化。
+
 ## 主要配置
 
 配置分为两类权威来源。本地源码部署使用 `start.sh` 创建且被 Git 忽略的仓库 `config.yaml`；VM 部署使用 `deploy.sh generate-config` 创建的 `~/ghcp_proxy/config.yaml`。Provider/OAuth 端点、超时、连接池与队列容量和日志是 YAML 启动配置，Dashboard 只读展示 effective value，修改后必须重启。部署密钥、宿主机路径、端口、监听地址以及 PostgreSQL/Redis 地址保存在 `~/ghcp_proxy/.env`。自定义部署遵循“环境变量 > YAML > 内置默认值”；VM Compose 从 `.env` 注入部署值，并从 YAML 读取应用启动配置。
@@ -159,11 +182,24 @@ Dashboard Events 默认打开聚焦后的 `Changes` 视图，在分页前排除�
 | `gateway.read_header_timeout` | 读取请求头的最长时间，默认 `5s` |
 | `gateway.write_timeout` | 整体响应写入超时；默认 `0s`，允许长时间 SSE 流 |
 | `gateway.idle_timeout` | keep-alive 空闲超时，默认 `120s` |
+| `GATEWAY_BIND_ADDR` / `ADMIN_BIND_ADDR` | VM 发布 Gateway/Admin 端口使用的宿主机接口；两者默认均为 `127.0.0.1`。应使用 SSH 转发或终止 TLS 的私有入口，绝不能在不可信网络上明文暴露 Admin。 |
 | `WORKER_METRICS_ADDR` | Worker 健康检查和 retention 指标监听地址，默认 `:8002`；VM Compose 仅映射到宿主机 `127.0.0.1` |
+| `WORKER_ROLES` | 逗号分隔的 Worker 循环：`all`（默认）、`credential-warning`、`health`、`metrics-sync`、`usage-rollup`、`provider-attempts`、`budget-recovery`、`binding-expiry` 或 `capability-sync`。两套 Compose 基线都会透传该变量。Kubernetes 将 `metrics-sync` 放入专用 `ghcp-org-sync-worker`；只有 production Copilot overlay 会在 general Worker 中增加 `capability-sync`，fake-provider overlay 不启用。`budget-recovery` 必须依赖 Redis 就绪；能力 fencing 使用 PostgreSQL，不要求 Redis。 |
+| `CAPABILITY_SYNC_MATRIX_PATH` | `capability-sync` 使用的版本化兼容矩阵；源码默认 `compatibility/matrix.json`，打包 Worker 默认 `/srv/ghcp/compatibility/matrix.json` |
+| `CAPABILITY_SYNC_INTERVAL` / `CAPABILITY_SYNC_RUN_TIMEOUT` / `CAPABILITY_SYNC_LEASE_DURATION` | 能力采集周期和 fencing deadline；默认分别为 `1h`、`10m`、`11m` |
+| `CAPABILITY_EVIDENCE_TTL` | 持久化 account-model evidence 的 freshness 窗口，默认 `24h`，必须长于采集周期 |
 | `ADMIN_ADDR` | admin 监听地址 |
+| `admin.read_timeout` / `ADMIN_READ_TIMEOUT` | 读取完整 Admin 请求的最长时间，默认 `30s` |
+| `admin.read_header_timeout` / `ADMIN_READ_HEADER_TIMEOUT` | 读取 Admin 请求头的最长时间，默认 `5s` |
+| `admin.write_timeout` / `ADMIN_WRITE_TIMEOUT` | Admin 响应写入的最长时间，默认 `60s` |
+| `admin.idle_timeout` / `ADMIN_IDLE_TIMEOUT` | Admin keep-alive 空闲超时，默认 `120s` |
 | `ADMIN_TOKEN` | admin API 鉴权 token |
 | `POSTGRES_DSN` | PostgreSQL 连接串 |
 | `REDIS_ADDR` | Redis 地址 |
+| `REDIS_CLIENT_MODE` | Redis 拓扑：`single`、`sentinel` 或 `cluster` |
+| `REDIS_PROTOCOL_VERSION` | Redis writer protocol：默认 `1`；只能通过已 drain writer 的 Admin cutover 切到 `2` |
+| `REDIS_ADDRS` | Sentinel 或 Cluster seed endpoint；这些 mode 必须使用它而不是 `REDIS_ADDR` |
+| `REDIS_TLS` | 开启 Redis 原生 TLS；非 Cluster mode 还必须设置 `REDIS_TLS_SERVER_NAME` |
 | `SCHEMA_VERSION` | 当前发布包目标 schema 版本；由 `deploy.sh` 写入 `.env`，DB 已安装版本以 `system_settings.schema_version` 为准 |
 | `maintenance.raw_retention_days` | raw ledger 日分区保留 fallback，默认 `7`；设为 `0` 关闭自动清理 |
 | `maintenance.hourly_retention_days` | hourly rollup UTC 日分区保留 fallback，默认 `90`；设为 `0` 关闭自动清理 |
@@ -185,9 +221,9 @@ Dashboard Events 默认打开聚焦后的 `Changes` 视图，在分页前排除�
 | `github.login_base_url` | GitHub 登录域名，默认 `https://github.com` |
 | `github.api_base_url` | GitHub API 域名，默认 `https://api.github.com` |
 | `github.copilot_token_url` | Copilot bearer token 换取端点 |
-| `GITHUB_TOKEN` | worker 同步 GitHub Copilot Metrics 的 fallback token |
+| `GITHUB_TOKEN_FILE` | `metrics-sync` Worker role 使用的只读 GitHub token 文件；不使用 `GITHUB_TOKEN` 或数据库 setting fallback |
 | `DASHBOARD_DIR` | admin 服务 Dashboard 静态资源目录 |
-| `model_catalog_json` | 控制暴露名、上游模型 ID、上游 API 和启停状态 |
+| `model_catalog_json` | 暴露名、上游模型 ID、上游 API 和启停状态的严格目录合同；非法 JSON、未知字段、空 ID、重复 exposed ID 和未知 API 会在落库前被拒绝 |
 | `logging.level` / `logging.format` | 日志级别和格式 |
 
 ## 多账号环境隔离
@@ -213,9 +249,9 @@ flowchart TD
 - pool membership 使用 `pool_accounts` 管理；每个账号最多属于一个 pool，每个 client profile 必须指向一个 pool。
 - Redis sticky key 包含 pool、model、request format 和 affinity hash，sticky 只影响同一 scope 下的账号复用。
 - 组织/企业 seat 账号应填写 `account_source`、`org_id`、`seat_status`，router 会过滤不可用 seat。
-- 路由数据不包含账号级模型权限。同一 pool 必须使用具备相同可用模型集合的账号。
+- 账号级模型证据会发布到 Router 快照。把 client profile 设为 `require_fresh` 可对账号/model/API 执行 fail-closed 过滤；`allow_unknown` 保持为兼容默认值。
 
-如果同一 pool 内模型权限不同，Router 可能选中无法使用目标模型的账号。Provider 请求随后失败，不会换另一个账号重试。Copilot `403` 会分类为 `permission_denied`，并可能增加该账号的 risk。
+使用 `require_fresh` 时，Dashboard Capabilities 页必须显示至少一个 active 账号具有 fresh 证据；unknown、stale 或 mismatch 可能让 route 不可用。使用 `allow_unknown` 时，模型权限差异仍可能到达 Provider，因此这类 pool 应保持同质。Copilot `403` 会分类为 `permission_denied`，并可能增加该账号的 risk。
 
 建议隔离做法
 
@@ -227,10 +263,22 @@ flowchart TD
 
 ## Dashboard 与 Admin 鉴权
 
-- Dashboard 静态页面由 admin 服务根路径提供，默认访问 `http://localhost:8001/`。
+- Dashboard 静态页面由 admin 服务根路径提供，默认访问 `http://localhost:8001/`。VM 运行包仅在宿主机回环接口发布该端口，请使用文档中的 SSH 隧道或私有 TLS 入口。
 - `/admin/*` API 统一要求 `Authorization: Bearer <ADMIN_TOKEN>`。
 - Dashboard 会把管理员 token 附加到 API 请求；静态页面本身不应承载敏感数据。
 - 容器镜像中 Dashboard dist 会复制到 `/srv/dashboard`，也可通过 `DASHBOARD_DIR` 指向自定义构建产物。
+
+## 控制面 API 分组
+
+下列端点都需要 Admin bearer token。精确请求和响应合同以 handler 与测试为准；此处只提供运维导航索引。
+
+| 区域 | 端点 |
+| --- | --- |
+| 账号与凭据 | `/admin/accounts`、账号状态操作、凭据导入和 Device Flow |
+| Pool 与 binding | `/admin/pools`、账号 assignment、pool-account 详情和 binding release |
+| Client 与设置 | `/admin/client-profiles`、`/admin/settings` 和模型目录配置 |
+| GitHub 组织数据 | org、seat、metrics 与同步请求端点 |
+| 运维视图 | usage 汇总、按 client 用量、兼容性、模型能力和审计事件 |
 
 ## 发布与迁移
 
@@ -256,8 +304,16 @@ flowchart TD
 | --- | --- |
 | `GET /healthz` | 存活检查 |
 | `GET /readyz` | 就绪检查 |
+| `GET /version` | 公开的 Gateway `version` 与 `build_time`，不包含 commit、配置或凭据 |
 | `GET /metrics` | 携带 `Authorization: Bearer <ADMIN_TOKEN>` 的 Gateway 指标检查 |
 | Dashboard | 查看账号状态、池状态、错误事件、用量、费用、cache 命中率和同步状态 |
+
+每个 Gateway 响应都会返回 `X-Request-ID`。访问日志和 `provider request dispatch` 事件使用同一 `request_id`；后者还包含 `request_format`、`model`、`upstream_api`、`pool_id`、`account_id`、`client_profile_id`、`client_version`、`runtime_version`、`responses_lite` 和 `stream`，但不记录请求 body、credential、Authorization 或配置内容。可先确认运行版本，再按客户端看到的 request ID 检索 VM 小时日志：
+
+```bash
+curl -fsS http://127.0.0.1:8000/version
+grep -R --fixed-strings '<request-id>' ~/ghcp_proxy/logs
+```
 
 ## Gateway 错误映射
 
@@ -278,7 +334,7 @@ flowchart TD
 | `500 stream_error` | SSE writer 或流式响应初始化失败 | `500 stream_error` | `stream response unavailable` | 检查响应写出、代理和客户端连接状态 |
 | 未显式映射的 internal code | 其它走映射函数的错误 | 与 internal 相同 | 与 internal 相同 | 默认透传；新增错误类型时应评估是否需要中性化 |
 
-上游 Copilot 4xx 响应会先分类，再决定是否影响账号健康。认证、权限、限流、配额、网络和 5xx 失败仍可能增加 risk；`invalid_request` 和通用 `upstream_4xx` 会记录到指标和 usage，但不会增加账号 risk，因为它们通常来自请求形态、模型兼容性或客户端参数，而不是账号健康问题。模型权限拒绝可能表现为 `403 permission_denied`；Gateway 会把它记录到被选账号且不会换号。流式请求中，上游 SSE 读取错误，或在完成标记前提前 EOF，都会按失败请求处理，不能伪装成成功的 `[DONE]` 结束事件。客户端取消会中断阻塞的流事件发送、关闭上游响应，并释放本地和 Redis 并发占用。对于上游 Responses API 流，如果 EOF 前已经收到 `response.output_text.done` 或 `response.output_item.done` 这类终止输出事件，则按完成处理，以兼容省略 `response.completed` 的模型变体。
+上游 Copilot 4xx 响应会先分类，再决定是否影响账号健康。认证、权限、限流、配额、网络和 5xx 失败仍可能增加 risk；`invalid_request` 和通用 `upstream_4xx` 会记录到指标和 usage，但不会增加账号 risk，因为它们通常来自请求形态、模型兼容性或客户端参数，而不是账号健康问题。模型权限拒绝可能表现为 `403 permission_denied`；Gateway 会把它记录到被选账号且不会换号。流式请求中，上游 SSE 读取错误，或在完成标记前提前 EOF，都会按失败请求处理，不能伪装成成功的 `[DONE]` 结束事件。客户端取消会中断阻塞的流事件发送、关闭上游响应，并释放本地和 Redis 并发占用。Chat 接受 `[DONE]`，或在已校验的非空最终 `finish_reason` 后以 EOF 完成。Responses 必须收到 `response.completed` 或 `response.incomplete`；`response.output_text.done`、`response.content_part.done` 和 `response.output_item.done` 都不能单独证明 response 已完成。
 
 如果客户端收到 `budget_exhausted`，先看 gateway 日志里的 `internal_code`、`account_id` 和 `pool_id`，再检查 Redis 计数，例如 `budget:daily:account:<account_id>:<yyyymmdd>` 和 `budget:daily:global:<yyyymmdd>`。Daily token 和 AI Credits 上限只有在 Dashboard Config 值或对应 `BUDGET_MAX_DAILY_*` 环境变量大于 `0` 时才会启用。
 
@@ -333,12 +389,12 @@ Retention 指标从 Worker 的 `http://127.0.0.1:8002/metrics` 抓取；Usage Wr
 
 | Granularity | 说明 |
 | --- | --- |
-| `raw` | 查询兼容视图 `usage_ledger_all`，精确到每次请求，适合默认 7 天保留窗口内的短时间范围 |
+| `raw` | 查询已分区的 `usage_ledger` 主表，精确到每次请求，适合默认 7 天保留窗口内的短时间范围 |
 | `hourly` | 查询 UTC 日分区的 `usage_rollup_hourly`，默认保留 90 天，适合中期趋势和多天查询 |
 | `daily` | 查询 UTC 月分区的 `usage_rollup_daily`，默认保留当前月和之前 13 个完整自然月，适合长期趋势和账务对账 |
 | `auto` | 1h 内使用 raw，90 天内使用 hourly，超过 90 天使用 daily；默认 24h Dashboard 不扫描整日 raw ledger |
 
-Admin API 支持绝对日期范围：`/admin/usage/summary?from=2026-06-01&to=2026-06-23&granularity=auto`。日期格式的 `to` 会按闭开区间处理为下一天 00:00 UTC，因此 `to=2026-06-23` 会包含 6 月 23 日整天。Usage Rollup Worker 每 5 分钟处理到 `now()-2m`，避免刚写入的请求产生边界抖动；raw 清理使用 `min(now-retention, rollup watermark)` 作为安全边界，hourly/daily 则只删除完整 UTC 日/月分区。`usage_ledger_all` 兼容视图暴露当前 schema 中的全部 raw ledger 存储；辅助非分区存储只有在完整保留窗口过期后才会清空。
+Admin API 支持绝对日期范围：`/admin/usage/summary?from=2026-06-01&to=2026-06-23&granularity=auto`。日期格式的 `to` 会按闭开区间处理为下一天 00:00 UTC，因此 `to=2026-06-23` 会包含 6 月 23 日整天。Usage Rollup Worker 每 5 分钟处理到 `now()-2m`，避免刚写入的请求产生边界抖动；raw 清理使用 `min(now-retention, rollup watermark)` 作为安全边界，hourly/daily 则只删除完整 UTC 日/月分区。schema `19` 不再保留辅助 legacy ledger 或兼容 view；若升级前 legacy ledger 尚未被前一保留窗口清空，migration 会拒绝继续执行。
 
 Retention 可在 Dashboard Config 中直接修改，无需重启。若新的非零值缩短当前窗口，界面会要求二次确认，因为下一轮 maintenance 执行后的分区删除不可恢复。
 
@@ -422,6 +478,22 @@ curl -s http://localhost:8001/admin/accounts/{account_id}/device-flow/complete \
 
 如果 complete 返回 `202` 且 `error=authorization_pending`，表示用户还没有在 GitHub 页面完成授权；稍后再次调用 complete。若返回 `409 expired_token`，重新 start。
 
+账号模型能力证据：
+
+```bash
+curl -s "http://localhost:8001/admin/accounts/{account_id}/model-capabilities?model=gpt-5.5&upstream_api=responses" \
+  -H "Authorization: Bearer dev-admin-token"
+
+curl -s "http://localhost:8001/admin/pools/{pool_id}/model-capabilities?model=gpt-5.5&upstream_api=responses" \
+  -H "Authorization: Bearer dev-admin-token"
+
+curl -s http://localhost:8001/admin/accounts/{account_id}/model-capabilities/refresh \
+  -H "Authorization: Bearer dev-admin-token" \
+  -X POST
+```
+
+能力查询把证据分为 `fresh`、`stale`、`unknown` 和 `mismatch`。`fresh` 要求模型可见、probe 通过、证据未过期，并且 evidence version 等于最近一次完整 Worker run。刷新接口返回 `202`；Admin 只持久化请求，由 `capability-sync` Worker 在既有 PostgreSQL lease 和 credential generation fencing 下消费，Admin 请求路径不会直接探测 Copilot。完成的刷新会引用对应 evidence version；不完整 run 只记录 `failed/sync_failed`，不暴露上游错误。只有 active membership 中每个 active 账号对指定 model/API 都有 `fresh` 证据时，pool consistency 才为 true。响应与 audit 不包含 credential generation 或原始上游正文。
+
 账号分组:
 
 1. 创建 pool，并选择 allocation mode 与 load-balancing strategy。
@@ -457,19 +529,22 @@ flowchart TD
 | --- | --- |
 | `exposed` | 客户端看到的模型名 |
 | `upstream` | 实际发往 GitHub Copilot 的上游模型 ID |
-| `upstream_api` | 可选，上游 endpoint：`chat_completions`、`responses` 或 `anthropic_messages` |
+| `upstream_api` | 可选，上游 endpoint：`chat_completions`、`responses` 或 `anthropic_messages`；release matrix 条目必须显式设置 |
 | `name` | 可选，从 Copilot `/models` 刷新的显示名称 |
 | `vendor` | 可选，从 Copilot `/models` 刷新的模型供应商；`OpenAI` 自动推导为 Responses，`Anthropic` 自动推导为 Messages |
 | `enabled` | 是否暴露给 `/v1/models`，以及是否允许请求 |
 
-GitHub Copilot 上游 endpoint 采用混合选择，不是全局默认 Responses。选择顺序是：模型目录中的 `upstream_api` 优先；然后归一化 Copilot `/models` 刷新的 `vendor`，其中 `OpenAI` / `Azure OpenAI` 走上游 Responses，Anthropic 走上游 Messages，Google、Microsoft、xAI 走上游 Chat Completions；如果 vendor 为空，再从 `upstream`、`name`、`exposed` 推断，`gpt*`/o-series 归 OpenAI，`gemini*` 归 Google，`claude*`/`opus*`/`haiku*`/`sonnet*` 归 Anthropic，`MAI*` 归 Microsoft，`grok*`/`xai*` 归 xAI；其他模型按下游请求协议选择。
+GitHub Copilot 上游 endpoint 采用混合选择，不是全局默认 Responses。服务端会规范化显式 `upstream_api`；非发布条目省略该字段时，由唯一的服务端目录合同根据 `vendor`、`upstream`、`name` 和 `exposed` 推断。Admin GET 返回规范化目录和 `upstream_api_explicit`，Dashboard 只消费该 DTO，不再维护自己的 vendor 或 API 推断规则。
 
-该模型目录是全局配置，不校验每个账号的模型权限，因此 pool 必须按共同可用模型集合分组。
+模型目录是全局配置。对于 `require_fresh` client profile，Router 和 binding 路径还会要求逐账号的新鲜模型证据；`allow_unknown` profile 保留旧的宽松策略。发布校验要求 matrix/profile/pool 引用精确匹配，并覆盖每个 active 或 binding-reserved 账号的新鲜证据。
 
 ```mermaid
 flowchart LR
   A["Dashboard Models / Settings"] --> B["PATCH /admin/settings/model_catalog_json"]
-  B --> C[(system_settings)]
+  B --> V["服务端严格校验"]
+  V --> C[(system_settings)]
+  C --> I["Admin 规范化目录 DTO"]
+  I --> A
   C --> D["GET /v1/models"]
   C --> E["请求模型解析"]
   E --> F{"exposed 是否启用?"}
@@ -531,28 +606,28 @@ flowchart TD
 
 ### Copilot Metrics 同步延迟
 
-1. 检查 worker 是否存活。
-2. 检查 `copilot_metrics_sync_enabled` 是否启用。
-3. 检查 org access token 或 `GITHUB_TOKEN` 是否可用。
-4. 检查 usage report 元数据请求和所有签名下载；无效或不完整的报告会被拒绝，不会覆盖最新快照。
-5. 检查 Postgres 写入是否受阻。
+1. 检查 `ghcp-org-sync-worker` 是否存活且 ready。
+2. 调用 `/admin/github/orgs/{id}/sync-requests` 检查 pending 请求、lease retry 或 last error。
+3. 检查定时任务的 `copilot_metrics_sync_enabled`，以及 sync Worker 是否挂载 `GITHUB_TOKEN_FILE`。
+4. 检查 usage report 元数据请求和所有签名下载；无效或不完整的报告会被 retry，不会覆盖最新快照。
+5. 检查 PostgreSQL request claim、snapshot upsert 和 maintenance lease 错误。
 
 Metrics 同步路径
 
 ```mermaid
 flowchart TD
-  A["Metrics Sync Worker 每小时触发"] --> B{"copilot_metrics_sync_enabled?"}
-  B -->|"否"| C["跳过"]
-  B -->|"是"| D["读取启用 metrics 的 org"]
-  D --> E{"org access_token 或 GITHUB_TOKEN?"}
-  E -->|"无"| F["记录 warning 并跳过 org"]
-  E -->|"有"| G["请求最新 28 天报告"]
-  G --> H["下载并校验全部报告文件"]
-  H --> I[(原子保存快照和同步时间)]
-  I --> J["将报告最新 UTC 日与同 org 的 proxy 请求对账"]
+  A["每小时触发"] --> B{"copilot_metrics_sync_enabled?"}
+  B -->|"是"| Q[(org_sync_requests)]
+  B -->|"否"| C["跳过定时入队"]
+  D["Admin 手动 POST"] --> Q
+  Q --> E["Worker 以 lease 领取"]
+  E --> F{"GITHUB_TOKEN_FILE 可用?"}
+  F -->|"否"| G["释放并等待 retry"]
+  F -->|"是"| H["请求并校验 28 天报告"]
+  H --> I["带 fence 的 snapshot upsert 与 completion audit"]
+  I --> J["singleton maintenance 对账"]
   J --> K{"漂移 > 10%?"}
-  K -->|"是"| L["记录 audit event"]
-  K -->|"否"| M["仅更新指标"]
+  K -->|"是"| L["去重 audit event"]
 ```
 
 ## 回滚原则

@@ -5,6 +5,7 @@ GHCP Pool Proxy 的核心目标是把下游模型协议入口和上游 Copilot �
 ## 目录
 
 - [架构目标](#架构目标)
+- [项目范围](#项目范围)
 - [总体结构](#总体结构)
 - [请求路径](#请求路径)
 - [配置刷新与恢复链路](#配置刷新与恢复链路)
@@ -20,6 +21,12 @@ GHCP Pool Proxy 的核心目标是把下游模型协议入口和上游 Copilot �
 - Gateway 保持无状态，热状态进入 Redis，冷状态进入 PostgreSQL。
 - 路由决策优先考虑健康、预算、风险、并发和 seat 状态，sticky 亲和只是软优先级。
 - 账号生命周期、恢复、org/seat 同步和 Copilot Metrics 同步放在控制面和 worker，避免进入请求热路径。
+
+## 项目范围
+
+对外接口包括 OpenAI Chat Completions、OpenAI Responses、Anthropic Messages 和模型发现。Admin 提供需认证的控制面并服务运维 Dashboard；Worker 负责探针、恢复、retention 与同步任务。
+
+唯一模型上游是 GitHub Copilot。GitHub CLI、SDK、REST 与 GraphQL 只用于凭据初始化和控制面流程，不会作为客户端操作 API 暴露，也不会在每次模型请求中执行。
 
 ## 总体结构
 
@@ -106,16 +113,16 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-  Worker["Metrics Sync Worker"] --> Flag{"copilot_metrics_sync_enabled?"}
-  Flag -->|"否"| Skip["跳过本轮"]
-  Flag -->|"是"| Orgs["读取启用 metrics 的 org"]
-  Orgs --> Token{"org token 或 GITHUB_TOKEN?"}
-  Token -->|"无"| Warn["记录告警并跳过 org"]
-  Token -->|"有"| GitHub["最新 28 天 usage report"]
-  GitHub --> Download["签名报告下载"]
-  Download --> Snapshot[(已校验的 metrics snapshots)]
-  Snapshot --> Reconcile["将最新 UTC 日与同 org 的 proxy usage 对账"]
-  Reconcile --> Dashboard["Dashboard 展示同步状态"]
+  Admin["Admin 手动 sync POST"] --> Queue[(org_sync_requests)]
+  Scheduler["Metrics scheduler"] --> Flag{"copilot_metrics_sync_enabled?"}
+  Flag -->|"是"| Queue
+  Flag -->|"否"| Skip["跳过定时入队"]
+  Queue --> Worker["Metrics Sync Worker claim/lease"]
+  Worker --> Token{"GITHUB_TOKEN_FILE?"}
+  Token -->|"缺失"| Retry["释放并等待 retry"]
+  Token -->|"可用"| GitHub["最新 28 天 report 或 seats"]
+  GitHub --> Commit["带 fence 的 snapshot upsert 或 seat generation 写入"]
+  Commit --> Dashboard["任务状态与 audit"]
 ```
 
 ## 分层职责
@@ -139,8 +146,8 @@ flowchart LR
 - 使用认证后 client profile 的必填 pool，并只在该 pool 内选择可用账号。
 - 支持 sticky 亲和、重绑定和 overflow。
 - 路由时剔除非 active pool、非 active 账号、不可用 org/enterprise seat 和超并发账号。
+- 对 `require_fresh` profile，还会剔除没有解析后 upstream model/API 的当前完整证据的账号。
 - 候选账号按风险、当前并发、pool membership weight 和账号 priority 排序。
-- 不按账号级模型权限过滤；模型权限不同的账号需要拆分到不同 pool。
 
 ### Copilot Provider 适配层
 
@@ -167,9 +174,10 @@ flowchart TD
   Cold --> Policies["池、Client、预算、审计"]
 ```
 
-- PostgreSQL 保存账号、凭据元数据、池、Client、预算、审计和恢复任务。
-- PostgreSQL 还保存 `system_settings`、模型目录配置、GitHub org 信息、metrics snapshots 和 proxy usage ledger。
-- Redis 保存并发计数、短 TTL 亲和关系、限流计数和分布式锁。
+- PostgreSQL 保存账号、凭据元数据与版本、池、Client、持久 binding、provider attempt/reservation、预算、审计、恢复任务、组织同步请求和 usage ledger/rollup。
+- PostgreSQL 还保存 `system_settings`、模型目录配置、GitHub org 信息、metrics snapshots 与持久 Redis coordination epoch。
+- Redis protocol v2 保存 budget reservation/finalization、并发 lease、短 TTL affinity/binding、限流计数、分布式锁、失效事件和 active coordination manifest。
+- Gateway 的本地 Router 快照、排序计数、token cache 或有界 usage materialization 队列可以丢失，不会丢失事实源或跨实例协调状态。
 - 凭据明文不入库，敏感内容必须经过加密和脱敏流程。
 
 ## 关键边界
@@ -177,5 +185,6 @@ flowchart TD
 - 数据面不直接执行通用 GitHub 操作。
 - 路由决策使用代理侧实时状态，不依赖 Copilot Metrics 做热路径判断。
 - sticky session 是软约束，健康、预算、风险和 seat 有效性始终优先。
-- 当前交付形态是单机 Docker Compose，仓库不提供 Kubernetes 部署清单。
-- 模型目录是全局配置，不校验单个账号的模型权限。
+- 运行包同时支持单机 Docker Compose 与集群部署入口。Kubernetes 提供单副本 production、双 Gateway staging，以及包含集群内 PostgreSQL/Redis 的明确一次性 `test` overlay。Azure Bicep 向导仅覆盖 VNet/subnet、AKS、PostgreSQL 和 Managed Redis，不是包含 Ingress、监控、备份、evidence inventory 或 destroy 自动化的完整多副本生产平台。
+- release manifest 将公开 app version、Git SHA、四个 runtime role digest 与 migration schema 绑定；兼容 evidence 使用该 app version，VM 与 Kubernetes 都直接部署 manifest digest。
+- 模型目录是全局配置；`require_fresh` profile 会使用不可变请求快照中的账号模型/API 证据过滤候选，`allow_unknown` profile 保持兼容行为。

@@ -1,0 +1,94 @@
+{
+  "schema_version": 3,
+  "revision": "phase7c-2026-08-18.1",
+  "gateway_build": "2026.08.18.1",
+  "target_schema": 19,
+  "runtime_contracts": [
+    {
+      "id": "claude-code-messages-claude-sonnet-4-20250514",
+      "endpoint": "/v1/messages",
+      "request_format": "anthropic_messages",
+      "response_format": "anthropic_messages",
+      "exposed_model": "claude-sonnet-4-20250514",
+      "upstream_model": "claude-sonnet-4-20250514",
+      "vendor": "Anthropic",
+      "upstream_api": "anthropic_messages",
+      "client_profile": "claude-code-candidate",
+      "pool": "claude-code-candidate",
+      "enabled_capabilities": ["text", "streaming", "function_tools", "thinking"],
+      "disabled_capabilities": ["count_tokens"],
+      "contract": {
+        "request_fields": ["model", "messages", "max_tokens", "stream", "system", "tools", "thinking"],
+        "headers": ["anthropic-version", "anthropic-beta", "authorization", "content-type"],
+        "stream_events": ["message_start", "content_block_start", "content_block_delta", "content_block_stop", "message_delta", "message_stop"],
+        "error_terminals": ["error"]
+      }
+    },
+    {
+      "id": "codex-responses-gpt-5.5",
+      "endpoint": "/v1/responses",
+      "request_format": "openai_responses",
+      "response_format": "openai_responses",
+      "exposed_model": "gpt-5.5",
+      "upstream_model": "gpt-5.5",
+      "vendor": "OpenAI",
+      "upstream_api": "responses",
+      "client_profile": "codex-candidate",
+      "pool": "codex-candidate",
+      "enabled_capabilities": ["text", "streaming", "reasoning"],
+      "disabled_capabilities": ["compact", "function_tools", "websocket"],
+      "contract": {
+        "request_fields": ["model", "input", "instructions", "stream", "tools", "reasoning"],
+        "headers": ["authorization", "content-type"],
+        "stream_events": ["response.created", "response.output_item.added", "response.output_text.delta", "response.output_item.done", "response.completed", "response.incomplete"],
+        "error_terminals": ["response.failed", "error"]
+      }
+    }
+  ],
+  "version_entries": [
+    {
+      "id": "claude-code-2.1.225-claude-sonnet-4-20250514",
+      "runtime_contract_id": "claude-code-messages-claude-sonnet-4-20250514",
+      "level": "unsupported",
+      "client": {
+        "family": "claude_code",
+        "version": "2.1.225",
+        "install_source": "npm"
+      },
+      "evidence_identity": "claude-code/npm/2.1.225"
+    },
+    {
+      "id": "claude-code-2.1.226-claude-sonnet-4-20250514",
+      "runtime_contract_id": "claude-code-messages-claude-sonnet-4-20250514",
+      "level": "unsupported",
+      "client": {
+        "family": "claude_code",
+        "version": "2.1.226",
+        "install_source": "npm"
+      },
+      "evidence_identity": "claude-code/npm/2.1.226"
+    },
+    {
+      "id": "claude-code-2.1.233-claude-sonnet-4-20250514",
+      "runtime_contract_id": "claude-code-messages-claude-sonnet-4-20250514",
+      "level": "unsupported",
+      "client": {
+        "family": "claude_code",
+        "version": "2.1.233",
+        "install_source": "npm"
+      },
+      "evidence_identity": "claude-code/npm/2.1.233"
+    },
+    {
+      "id": "codex-0.147.0-gpt-5.5",
+      "runtime_contract_id": "codex-responses-gpt-5.5",
+      "level": "candidate_native",
+      "client": {
+        "family": "codex",
+        "version": "0.147.0",
+        "install_source": "local"
+      },
+      "evidence_identity": "codex/local/0.147.0"
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ghcp-worker
+spec:
+  template:
+    spec:
+      containers:
+        - name: worker
+          env:
+            - name: WORKER_ROLES
+              value: credential-warning,health,usage-rollup,provider-attempts,budget-recovery,binding-expiry,capability-sync

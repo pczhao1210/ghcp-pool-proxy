@@ -1,0 +1,28 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: ghcp-test
+resources:
+  - data-services.yaml
+secretGenerator:
+  - name: ghcp-runtime-secrets
+    literals:
+      - ADMIN_TOKEN=test-admin-token
+      - POSTGRES_DSN=postgres://ghcp:ghcp@postgres:5432/ghcp?sslmode=disable
+      - REDIS_ADDR=redis:6379
+      - REDIS_PASSWORD=
+      - CREDENTIAL_MASTER_KEY=0123456789abcdef0123456789abcdef
+  - name: ghcp-migration-postgres-dsn
+    literals:
+      - postgres-dsn=postgres://ghcp:ghcp@postgres:5432/ghcp?sslmode=disable
+  - name: ghcp-org-sync-worker-secrets
+    literals:
+      - github-token=test-org-sync-token
+generatorOptions:
+  disableNameSuffixHash: true
+labels:
+  - pairs:
+      app.kubernetes.io/name: ghcp-pool-proxy
+      app.kubernetes.io/part-of: ghcp-pool-proxy
+      app.kubernetes.io/environment: test
+    includeSelectors: false
+    includeTemplates: true

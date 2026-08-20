@@ -1,0 +1,22 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: ghcp-test
+resources:
+  - namespace.yaml
+  - data
+  - ../../base
+images:
+  - name: registry.invalid/ghcp-pool-proxy/gateway
+    newName: pczhao1210/ghcp-pool-proxy
+    newTag: gateway-latest
+  - name: registry.invalid/ghcp-pool-proxy/admin
+    newName: pczhao1210/ghcp-pool-proxy
+    newTag: admin-latest
+  - name: registry.invalid/ghcp-pool-proxy/worker
+    newName: pczhao1210/ghcp-pool-proxy
+    newTag: worker-latest
+labels:
+  - pairs:
+      app.kubernetes.io/environment: test
+    includeSelectors: false
+    includeTemplates: true

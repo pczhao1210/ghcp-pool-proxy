@@ -1,0 +1,95 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ghcp-admin
+  labels:
+    app.kubernetes.io/component: admin
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: admin
+      app.kubernetes.io/part-of: ghcp-pool-proxy
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: admin
+        app.kubernetes.io/part-of: ghcp-pool-proxy
+        app.kubernetes.io/tier: application
+    spec:
+      serviceAccountName: ghcp-admin
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: admin
+          image: registry.invalid/ghcp-pool-proxy/admin:replace-me
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8001
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: ghcp-runtime-env
+            - secretRef:
+                name: ghcp-runtime-secrets
+          env:
+            - name: CONFIG_FILE
+              value: /etc/ghcp/config.yaml
+            - name: ADMIN_ADDR
+              value: :8001
+            - name: ADMIN_PROBE_TIMEOUT
+              value: 2s
+            - name: ADMIN_SHUTDOWN_TIMEOUT
+              value: 10s
+          volumeMounts:
+            - name: app-config
+              mountPath: /etc/ghcp
+              readOnly: true
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 2
+            timeoutSeconds: 1
+            failureThreshold: 60
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 384Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+      volumes:
+        - name: app-config
+          configMap:
+            name: ghcp-app-config

@@ -1,0 +1,157 @@
+version: 1
+migrations:
+  - id: 1
+    path: 001_init.sql
+    sha256: a038d6367e8ea75b412dc91f8eec5c61ef4d1bd59ff1d1d84acdb0acd2280b05
+    phase: expand
+    transaction: per-migration
+    from_schema: 0
+    to_schema: 19
+    consumers: [gateway, admin, worker]
+    min_protocol: 1
+    max_protocol: 1
+    retryable: true
+    repair_policy: fail-closed
+    preconditions: [empty-database]
+    postconditions: [schema-version-19, migration-history, account-model-capabilities, account-model-capability-refresh-requests, capability-evidence-counter, capability-complete-version, model-entitlement-policy, client-profile-runtime-fields-only, usage-source-contract, usage-materialization-outbox]
+  - id: 10
+    path: 010_legacy_schema_reconciliation.sql
+    sha256: d4038dbf2c04672e49bc59c260eadaad1df261d22cec964d8d24787abb6c09a8
+    phase: expand
+    transaction: per-migration
+    from_schema: 1
+    compatible_from_schemas: [2, 3, 4, 5, 6, 7, 8, 9]
+    to_schema: 10
+    consumers: [gateway, admin, worker]
+    min_protocol: 1
+    max_protocol: 1
+    retryable: true
+    repair_policy: fail-closed
+    preconditions: [verified-legacy-schema-1-through-9]
+    postconditions: [schema-version-10]
+  - id: 11
+    path: 011_fixed_pool_assignment.sql
+    sha256: 838f52166af76f1ea849063544bc6203a721b85e5a721f11cdcfcb5ed384d3f1
+    phase: expand
+    transaction: per-migration
+    from_schema: 10
+    to_schema: 11
+    consumers: [gateway, admin, worker]
+    min_protocol: 1
+    max_protocol: 1
+    retryable: true
+    repair_policy: fail-closed
+    preconditions: [schema-version-10]
+    postconditions: [schema-version-11]
+  - id: 12
+    path: 012_usage_ledger_partitioning.sql
+    sha256: b21e5730190af5af38f03a2390d057dea52582796a43640a6107d76ebb4dc347
+    phase: expand
+    transaction: per-migration
+    from_schema: 11
+    to_schema: 12
+    consumers: [gateway, admin, worker]
+    min_protocol: 1
+    max_protocol: 1
+    retryable: true
+    repair_policy: fail-closed
+    preconditions: [schema-version-11]
+    postconditions: [schema-version-12]
+  - id: 13
+    path: 013_usage_rollup_partitioning.sql
+    sha256: c8bf08d8817db956d71041d2cf5bb5534ea22c2b459ecfeca3db9b139b7a6058
+    phase: expand
+    transaction: per-migration
+    from_schema: 12
+    to_schema: 13
+    consumers: [gateway, admin, worker]
+    min_protocol: 1
+    max_protocol: 1
+    retryable: true
+    repair_policy: fail-closed
+    preconditions: [schema-version-12]
+    postconditions: [schema-version-13]
+  - id: 14
+    path: 014_metrics_snapshot_retention.sql
+    sha256: 29b13733dfea67d63f4d7a3182c68c3b8a31536dc244332a990a9c27ac6b8dba
+    phase: expand
+    transaction: per-migration
+    from_schema: 13
+    to_schema: 14
+    consumers: [gateway, admin, worker]
+    min_protocol: 1
+    max_protocol: 1
+    retryable: true
+    repair_policy: fail-closed
+    preconditions: [schema-version-13]
+    postconditions: [schema-version-14]
+  - id: 15
+    path: 015_copilot_compatibility_flags.sql
+    sha256: 78d8ff3832857848b3bb998b2ca9350944d11b161092ddcb5568d2e7c558b5b4
+    phase: expand
+    transaction: per-migration
+    from_schema: 14
+    to_schema: 15
+    consumers: [gateway, admin, worker]
+    min_protocol: 1
+    max_protocol: 1
+    retryable: true
+    repair_policy: fail-closed
+    preconditions: [schema-version-14]
+    postconditions: [schema-version-15]
+  - id: 16
+    path: 016_account_health_state.sql
+    sha256: aee07062e40ea7d7d739d4400175144bb2b59f368ef865b198ef15a5cf6325b1
+    phase: expand
+    transaction: per-migration
+    from_schema: 15
+    to_schema: 16
+    consumers: [gateway, admin, worker]
+    min_protocol: 1
+    max_protocol: 1
+    retryable: true
+    repair_policy: fail-closed
+    preconditions: [schema-version-15]
+    postconditions: [schema-version-16]
+  - id: 17
+    path: 017_affinity_strategy.sql
+    sha256: 61923f16b7ebb2522cc5597ec9eab1a99fe5c63b08fe9d1ad4ccf31a72d0febf
+    phase: expand
+    transaction: per-migration
+    from_schema: 16
+    to_schema: 17
+    consumers: [gateway, admin, worker]
+    min_protocol: 1
+    max_protocol: 1
+    retryable: true
+    repair_policy: fail-closed
+    preconditions: [schema-version-16]
+    postconditions: [schema-version-17]
+  - id: 18
+    path: 018_conservative_capacity_defaults.sql
+    sha256: 5e2d8b9ca589fb496aea14b04e851b18276c3f9fa4dc27f695de821aa2afb002
+    phase: expand
+    transaction: per-migration
+    from_schema: 17
+    to_schema: 18
+    consumers: [gateway, admin, worker]
+    min_protocol: 1
+    max_protocol: 1
+    retryable: true
+    repair_policy: fail-closed
+    preconditions: [schema-version-17]
+    postconditions: [schema-version-18]
+  - id: 19
+    path: 019_cluster_runtime.sql
+    sha256: f69c03ed27d2f104319144096bb9830e2a7f0ce1c6382eafb5f17e2d48c4c120
+    phase: expand
+    transaction: per-migration
+    from_schema: 18
+    to_schema: 19
+    consumers: [gateway, admin, worker]
+    min_protocol: 1
+    max_protocol: 2
+    retryable: true
+    repair_policy: fail-closed
+    preconditions: [schema-version-18]
+    postconditions: [provider-attempt-runtime, credential-version-cas, org-sync-requests, seat-generation, metrics-maintenance-lease, legacy-ledger-removed, sticky-prefix-rejected, account-model-capabilities, account-model-capability-refresh-requests, capability-evidence-counter, capability-complete-version, model-entitlement-policy, client-profile-runtime-fields-only, usage-source-contract, usage-materialization-outbox, schema-version-19]

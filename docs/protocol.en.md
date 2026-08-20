@@ -1,12 +1,13 @@
 # Protocol
 
-This is the single reference for protocol conversion: how the three client-facing endpoints are parsed, which fields are retained, discarded, or passed through, what the internal canonical DTOs contain, and how the Copilot provider rebuilds a GitHub Copilot upstream Chat Completions, Responses, or Anthropic Messages request. Routing, account selection, sticky affinity, user binding, concurrency, and risk rules are documented in [routing.en.md](routing.en.md).
+This is the single reference for protocol conversion: how the three client-facing endpoints are parsed, which fields are retained, normalized, rejected, or passed through, what the internal canonical DTOs contain, and how the Copilot provider rebuilds a GitHub Copilot upstream Chat Completions, Responses, or Anthropic Messages request. Routing, account selection, sticky affinity, user binding, concurrency, and risk rules are documented in [routing.en.md](routing.en.md).
 
 ## Contents
 
 - [Data Flow Boundary](#data-flow-boundary)
 - [Upstream API Selection](#upstream-api-selection)
 - [Same-Protocol Semantics And Compatibility Flags](#same-protocol-semantics-and-compatibility-flags)
+- [Cross-Protocol Semantic Gates](#cross-protocol-semantic-gates)
 - [Reasoning Parameter Policy](#reasoning-parameter-policy)
 - [Client Protocol Fields](#client-protocol-fields)
 - [Canonical Layer Fields](#canonical-layer-fields)
@@ -94,7 +95,7 @@ The authoritative source for `upstream` is the Dashboard Models page after `Refr
 
 | Path | Preserved in the same-protocol path | Deliberately normalized |
 | --- | --- | --- |
-| Responses to Responses | Structured `instructions`; ordered message/reasoning/function/custom/tool-search input and output items; item/call IDs, status, namespace, `previous_response_id`; response/item IDs and indexes in SSE; completed/incomplete/failed semantics | Model ID, auth and Copilot headers, overlong call IDs, unsupported include values, and unsupported tool types |
+| Responses to Responses | Structured `instructions`; ordered message/reasoning/function/custom/tool-search input and output items; item/call IDs, status, namespace, `previous_response_id`; response/item IDs and indexes in SSE; completed/incomplete/failed semantics | Model ID, auth and Copilot headers, overlong call IDs, the declared Codex Responses Lite encrypted-reasoning downgrade, and provider-unsupported tool rejection |
 | Messages to Messages | Ordered system/message blocks; text, image, tool use/result, `is_error`, thinking/signature, redacted thinking, cache breakpoints; native stop reason and usage; strict `message_stop` completion | Model ID, auth headers, beta allowlist, thinking/tool-choice conflict handling, and unsupported cache-control subfields |
 
 The gateway preserves and forwards `previous_response_id`, but Copilot may reject stateful continuation. Responses tool loops should send explicit ordered `function_call` and `function_call_output` input items when that occurs.
@@ -110,13 +111,30 @@ The following PostgreSQL-backed feature flags are editable in Dashboard. They de
 
 Changing a model catalog override back to `chat_completions` rolls native Messages back without a restart or schema rollback. Disabling an individual compatibility flag affects new requests after the feature-flag cache refresh.
 
+## Cross-Protocol Semantic Gates
+
+After model-catalog resolution, every non-native path must match one of the six explicit conversion policies below. Common text, image, function-tool, usage, and supported terminal semantics remain projectable. A source-specific semantic that the target cannot represent is rejected instead of being silently removed.
+
+| Direction | Declared compatible projection | Fail-closed examples | Declared shape normalization |
+| --- | --- | --- | --- |
+| Chat to Responses | messages, images, function tools/results, reasoning text | `message.name` and typed history extensions that cannot be preserved | Responses item IDs and lifecycle are synthesized |
+| Chat to Messages | messages, images, function tools/results, common stop reasons | `message.name`, Chat-only parameters, reasoning content/deltas, non-text system/developer content | Anthropic blocks and lifecycle are synthesized; plain-text system/developer messages become top-level `system` |
+| Responses to Chat | message/text/image and function call/output items | `previous_response_id`, structured instructions, reasoning/custom/tool-search/refusal items, Responses-only parameters, message phase and tool namespace | Responses item/lifecycle identity is omitted |
+| Responses to Messages | message/text/image and function call/output items | the preceding Responses-only semantics plus Responses Lite/additional tools and reasoning/refusal deltas | Responses item/lifecycle identity is omitted |
+| Messages to Chat | text/image and ordinary text tool use/result | thinking/redacted blocks, signature, `is_error`, non-text tool results, native cache/beta/parameter semantics, source stop sequence and non-common terminal reasons | Anthropic block/lifecycle identity is omitted |
+| Messages to Responses | text/image and ordinary text tool use/result | thinking/redacted blocks, signature, `is_error`, non-text tool results, native cache/beta/parameter semantics, source stop sequence and non-common terminal reasons | Anthropic block/lifecycle identity is omitted |
+
+The request validator runs before routing, budget reservation, or provider dispatch and returns `400 invalid_request_error`. The non-streaming response validator runs after typed upstream parsing but before client serialization; an incompatibility returns `502` and does not record durable success. The streaming validator runs before each canonical event reaches the downstream SSE writer; an incompatibility emits the endpoint's stream error shape and leaves the provider attempt as `outcome_unknown`.
+
+Parser errors and semantic-gate errors include the conversion direction, JSON path, and stable reason. Unknown top-level fields, typed Responses item/content fields or types, and typed Anthropic block fields or types are rejected at the canonical boundary; they are not silently skipped.
+
 ## Reasoning Parameter Policy
 
-`reasoning`, `reasoning_effort`, and `thinking` are not normalized across protocols. They remain protocol-native passthrough parameters in `Params` and are written to the final upstream request with their original field names. The gateway does not translate Anthropic `thinking` into OpenAI `reasoning`, and it does not translate OpenAI `reasoning_effort` into an Anthropic thinking budget.
+`reasoning`, `reasoning_effort`, and `thinking` are not normalized across protocols. On a native path they remain protocol-native passthrough parameters in `Params` and are written to the final upstream request with their original field names. On a cross-protocol path they are accepted only when the target builder preserves the same field semantics; otherwise the semantic gate rejects the request. The gateway does not translate Anthropic `thinking` into OpenAI `reasoning`, and it does not translate OpenAI `reasoning_effort` into an Anthropic thinking budget.
 
 The reason is that each model and upstream API can define different shapes, levels, and budget semantics. OpenAI Responses may use `reasoning: { ... }`, OpenAI Chat-compatible requests may use `reasoning_effort`, and Claude/Anthropic commonly uses `thinking`. The gateway preserves only what the client explicitly sends; whether the field is supported, whether a level is valid, and whether a budget is accepted is decided by the target model and GitHub Copilot upstream.
 
-On the response side, upstream reasoning/thinking deltas are normalized into internal `StreamEvent.ReasoningDelta`, then rebuilt as OpenAI Chat `reasoning_content`, Responses reasoning summary events, or Anthropic `thinking` blocks. This affects response event shape only; it does not imply a unified request-side reasoning level.
+On the response side, Chat reasoning text can be retained for Chat or rebuilt as a Responses reasoning item. Structured Responses reasoning items cannot be reduced to Chat or Messages, and Anthropic thinking cannot cross protocols because its block/signature contract has no equivalent; its block-start event is rejected before any thinking delta is written. Message phases and any reasoning delta that the selected writer would drop are likewise rejected. This does not imply a unified request-side reasoning level.
 
 ## Client Protocol Fields
 
@@ -130,14 +148,14 @@ Retained and normalized:
 | --- | --- | --- |
 | `model` | `Model` | Resolved to the upstream model before routing |
 | `stream` | `Stream` | Controls downstream SSE |
-| `messages` | `Messages` | Preserves `role`, `content`, `tool_calls`, and `tool_call_id` |
+| `messages` | `Messages` | Preserves typed `role`, `name`, `content`, `tool_calls`, `tool_call_id`, reasoning, refusal, and audio fields on native Chat |
 | `tools` | `Tools` | OpenAI `function` tools become canonical tools |
 | `tool_choice` | `ToolChoice` | Preserved and written upstream |
 | `max_tokens` / `max_completion_tokens` | `MaxTokens` | `max_tokens` wins; otherwise `max_completion_tokens` is used |
 | `user` | `Metadata.user` | Secondary sticky input; `user_binding` pools prefer it as `user_id`; not written upstream as `user` |
 | `session` / `metadata.session_id` / `metadata.session` / `metadata.conversation_id` | `Metadata` | Secondary sticky input; `session_binding` pools use `session_id` / `session` as `session_id` |
 
-Passed through to `Params` and written to the upstream body with the same name:
+Retained in `Params` and written with the same name on a native Chat path:
 
 ```text
 temperature, top_p, stop, seed, response_format,
@@ -146,9 +164,9 @@ max_completion_tokens, presence_penalty, frequency_penalty, logit_bias,
 logprobs, top_logprobs, service_tier, modalities, audio
 ```
 
-`max_completion_tokens` is passed through only when the client used it and did not also send `max_tokens`; this preserves stricter o-series Chat-compatible behavior. `reasoning_effort` is passed through by name only; it is not converted to Responses `reasoning` or Anthropic `thinking`.
+`max_completion_tokens` is retained only when the client used it and did not also send `max_tokens`; this preserves stricter o-series behavior on native Chat. Cross-protocol builders use canonical `MaxTokens` and rename it deterministically to Responses `max_output_tokens` or Messages `max_tokens`. `reasoning_effort` is passed through by name only and is not converted to Responses `reasoning` or Anthropic `thinking`.
 
-Discarded or rejected: unlisted body fields are discarded; `metadata` keys other than `session_id` and `conversation_id` are discarded; image URLs are rejected unless they are `http`, `https`, or `data:image/*;base64,...`; requests are rejected when they contain more than 20 image parts or an image data URL larger than 20 MiB.
+Rejected or normalized: unknown top-level body fields are rejected; `metadata` keys other than `session_id` and `conversation_id` are omitted from routing metadata; image URLs are rejected unless they are `http`, `https`, or `data:image/*;base64,...`; requests are rejected when they contain more than 20 image parts or an image data URL larger than 20 MiB.
 
 ### OpenAI Responses API
 
@@ -163,6 +181,7 @@ Retained and normalized:
 | `instructions` | `ResponsesInstructions` / `System` | Structured value is retained for Responses to Responses; text is also projected to `System` |
 | `input` string | `SourceResponses` / `Messages` | Retained as a typed user item and projected to one user message |
 | `input` array | `SourceResponses` / `Messages` / `System` | Ordered typed items retain IDs/status; a cross-protocol projection is built in parallel |
+| `input[].type=additional_tools` | `SourceResponses[].Tools` / `Protocol.ResponsesLite` | Preserves nested Responses Lite function, custom, and namespace tools and records a typed protocol marker |
 | `tools` | `Tools` | OpenAI/Responses tools become canonical tools |
 | `tool_choice` | `ToolChoice` | Preserved and written upstream |
 | `max_output_tokens` | `MaxTokens` | Written upstream as `max_output_tokens` |
@@ -180,13 +199,17 @@ truncation, include, store, service_tier
 
 `reasoning` and `reasoning_effort` are passed through by name only; they are not converted to Anthropic `thinking`.
 
-For Copilot upstream, `include` drops the unsupported `reasoning.encrypted_content` value; if that leaves the list empty, `include` is omitted.
+Ordinary Copilot requests containing `include=reasoning.encrypted_content` are rejected before dispatch. The explicit compatibility downgrade is granted only when the first User-Agent token is exactly `codex_exec/0.147.0` and the authenticated, enabled client profile is named `codex-candidate`. The downgrade removes only this unsupported include value; if the list then becomes empty, `include` is omitted. A Lite header or `additional_tools` item alone never grants this downgrade.
 
-Tools from OpenAI Responses requests are retained in the canonical tool record for diagnostics and conversion metadata. Before calling Copilot, the provider uses a cc-switch-style tools adapter instead of raw-passthrough for non-function tools: `function` tools are kept directly; `custom` tools are wrapped as function tools with a fixed string `input` parameter and the original definition embedded in the description; `tool_search` is wrapped as a proxy function named `tool_search`; and `namespace` expands function children into flattened `<namespace>___<tool>` function names. `tool_choice` is mapped to the converted function name as well, and omitted when it cannot target a valid upstream tool. When upstream returns a tool call, the adapter restores the downstream Responses semantics: `custom_tool_call` uses `response.custom_tool_call_input.*` events, `tool_search` is emitted as a `tool_search_call` item, and namespace child tools restore the original tool name with a `namespace` field on the `function_call` item. OpenAI Responses remote MCP tools with `type: "mcp"` are unsupported and filtered because the gateway has no MCP discovery/execution adapter. If no supported tools remain after adaptation/filtering, `tool_choice` and `parallel_tool_calls` are omitted. Use `scripts/probe_stream_mcp.py` to compare the SSE event shape for an MCP request against a no-tool baseline.
+Responses Lite clients may mark a request with `X-OpenAI-Internal-Codex-Responses-Lite: true` and place tools in a leading `additional_tools` developer input item. The gateway retains only this typed marker, never an arbitrary header map, and recognizes wire mode from that header, `additional_tools`, or the exact fixed Codex User-Agent above. Wire-mode detection is separate from the authenticated downgrade authorization. For upstream Responses, nested tools are rebuilt in their original item and the marker header is forwarded. For upstream Chat, nested tools enter the same compatibility adapter.
 
-Conversions: when the upstream is also Responses, typed message, reasoning, function/custom/tool-search call and output items are rebuilt in their original order with identity/status fields. The compatibility adapter wraps unsupported custom/tool-search/namespace tools as functions. For cross-protocol use, direct `input_text`, `input_image`, `text`, and `image_url` items are grouped into a user message; function calls become assistant tool calls and outputs become tool messages.
+Tools from OpenAI Responses requests are retained in the canonical tool record for diagnostics and conversion metadata. Before calling Copilot, the provider keeps `function` tools directly and uses a cc-switch-style adapter for `custom`, `tool_search`, and `namespace`: `custom` tools are wrapped as function tools with a fixed string `input` parameter and the original definition embedded in the description; `tool_search` is wrapped as a proxy function named `tool_search`; and `namespace` expands function and custom children into flattened `<namespace>___<tool>` function names. A strictly validated `web_search` tool is preserved only on a native Responses route, including its typed options; preview, dated, unknown, or cross-protocol web-search types are rejected rather than normalized. Forced `tool_choice` values must resolve to an actual projected tool and are rejected otherwise; neutral controls may be omitted when no valid tool remains. When upstream returns a tool call, the adapter restores the downstream Responses semantics: `custom_tool_call` uses `response.custom_tool_call_input.*` events, `tool_search` is emitted as a `tool_search_call` item, namespace child tools restore the original tool name with a `namespace` field, and native `web_search_call` action/lifecycle items remain typed Responses output. OpenAI Responses remote MCP tools with `type: "mcp"` are unsupported and rejected before provider dispatch because the gateway has no MCP discovery/execution adapter. Namespace `tools` and legacy `children` collections are both validated; MCP, unknown, malformed, or otherwise non-projectable children fail closed instead of being skipped. If adaptation produces no valid tools, neutral `tool_choice` and `parallel_tool_calls` are omitted. Use `scripts/probe_stream_mcp.py` to compare the SSE event shape for an MCP request against a no-tool baseline.
 
-Discarded or rejected: unlisted body fields are discarded; `metadata` keys other than `session_id` and `conversation_id` are discarded; unsupported content parts inside `input` arrays are skipped; image validation is the same as Chat Completions.
+Immediately before serialization, the final upstream body is checked recursively across top-level `tools` and Responses Lite `additional_tools.tools`. Missing, `null`, empty, or whitespace-only `description` values on `function`, `custom`, `tool_search`, and `namespace` tools receive a stable non-empty fallback. Existing non-empty descriptions remain unchanged, and other tool types such as MCP and web search are not rewritten.
+
+Conversions: when the upstream is also Responses, typed message, reasoning, function/custom/tool-search call and output items are rebuilt in their original order with identity/status fields. The compatibility adapter wraps unsupported custom/tool-search/namespace tools as functions. For cross-protocol use, direct `input_text`, `input_image`, `text`, and `image_url` items are grouped into a user message; function calls become assistant tool calls and outputs become tool messages. Other item families are rejected by the semantic gate.
+
+Rejected or normalized: unknown top-level, item, and content-part fields or types are rejected; `metadata` keys other than `session_id` and `conversation_id` are omitted from routing metadata; image validation is the same as Chat Completions.
 
 ### Anthropic Messages
 
@@ -207,14 +230,14 @@ Retained and normalized:
 Passed through to `Params`:
 
 ```text
-temperature, top_p, top_k, stop, thinking, metadata
+temperature, top_p, top_k, stop, thinking, context_management, metadata
 ```
 
-`stop_sequences` is renamed to `stop`. `thinking` is passed through by name only; it is not converted to OpenAI `reasoning` or `reasoning_effort`. Anthropic `metadata` remains an upstream body parameter; binding pools may also read `metadata.user_id` / `metadata.user` as `user_id` and `metadata.session_id` / `metadata.session` as `session_id`.
+`stop_sequences` is renamed to `stop`. `thinking` and `context_management` are passed through by name only on native Messages; neither is converted to an OpenAI equivalent. Anthropic `metadata` remains an upstream body parameter; binding pools may also read `metadata.user_id` / `metadata.user` as `user_id` and `metadata.session_id` / `metadata.session` as `session_id`.
 
-Native preservation includes `text`, `image`, `tool_use`, `tool_result`, tool-result `is_error`, `thinking` with signature, `redacted_thinking`, and `cache_control`. Cross-protocol conversion still projects tool use/result into canonical tool calls/messages and images into OpenAI-style `image_url` content.
+Native preservation includes `text`, `image`, `tool_use`, `tool_result`, tool-result `is_error`, `thinking` with signature, `redacted_thinking`, `cache_control`, and `context_management`. Cross-protocol conversion projects only ordinary tool use/result, images, and text; native-only block metadata is rejected.
 
-Discarded or rejected: unlisted body fields and unknown block types are discarded; image validation is the same as Chat Completions. Native Messages does not forward arbitrary headers or raw JSON fields.
+Rejected: unknown top-level fields and unknown block fields/types are rejected; image validation is the same as Chat Completions. Native Messages does not forward arbitrary headers or raw JSON fields.
 
 ## Canonical Layer Fields
 
@@ -235,7 +258,7 @@ Discarded or rejected: unlisted body fields and unknown block types are discarde
 | `MaxTokens` | `max_tokens` / `max_completion_tokens` | `max_output_tokens` | `max_tokens` | Renamed according to target upstream API |
 | `Params` | allowlisted passthrough fields | allowlisted passthrough fields | allowlisted passthrough fields | Not arbitrary body passthrough; reasoning/thinking keeps its protocol-native shape |
 | `Metadata` | `user`, selected `metadata` | `user`, selected `metadata`, `previous_response_id` | none | Used for sticky or Responses continuation; not forwarded wholesale |
-| `Protocol` / `Compatibility` | none | none | version/beta tokens plus evaluated feature flags | Typed policy inputs, never a generic header map |
+| `Protocol` / `Compatibility` | none | Responses Lite marker | version/beta tokens plus evaluated feature flags | Typed policy inputs, never a generic header map |
 
 `CanonicalResponse` retains the common text/tool projection and, for native paths, ordered Anthropic content blocks or Responses output items with identity/status. `StreamEvent` carries native response/message IDs, block/item indexes, signature deltas, stop/incomplete reasons, and usage while remaining projectable to other downstream protocols.
 
@@ -251,12 +274,12 @@ Path: `POST https://api.githubcopilot.com/chat/completions`.
 | --- | --- |
 | `model` | `CanonicalRequest.Model` |
 | `messages` | `System` prepended as a system message, followed by `Messages` |
-| `tools` | Function `Tools` rebuilt as OpenAI function tool shape; non-function tools are omitted for Chat upstream |
-| `tool_choice` | `ToolChoice`, omitted when no valid tool is sent upstream |
+| `tools` | Chat tools are rebuilt directly; top-level and `additional_tools` Responses tools pass through the compatibility adapter into function tool shapes |
+| `tool_choice` | `ToolChoice`; neutral `auto`/`none` may be omitted without tools, while `required` or named choices must resolve during semantic validation |
 | `max_tokens` / `max_completion_tokens` | `MaxTokens`, preserving `max_completion_tokens` when the client used that field |
 | passthrough fields | `Params` copied by name |
 
-If the valid upstream tool list is empty, `tool_choice` and `parallel_tool_calls` are omitted. Some strict upstream Chat-compatible APIs reject tool controls without tools.
+If the valid upstream tool list is empty, neutral `auto`/`none` and `parallel_tool_calls` are omitted. A `required` or named choice without a matching projected tool has already been rejected by semantic validation. Some strict upstream Chat-compatible APIs reject tool controls without tools.
 
 ### Upstream Responses
 
@@ -265,10 +288,10 @@ Path: `POST https://api.githubcopilot.com/v1/responses`.
 | Upstream field | Source |
 | --- | --- |
 | `model` | `CanonicalRequest.Model` |
-| `input` | `SourceResponses` for same-protocol requests; otherwise `Messages` projected as Responses items |
+| `input` | `SourceResponses`, including Responses Lite `additional_tools`, for same-protocol requests; otherwise `Messages` projected as Responses items |
 | `instructions` | Structured `ResponsesInstructions` for same-protocol requests; otherwise `System` |
-| `tools` | `Tools` rebuilt as Responses tool shape |
-| `tool_choice` | `ToolChoice`, omitted when no valid tool is sent upstream |
+| `tools` | Top-level `Tools` rebuilt as Responses tool shapes; Responses Lite tools remain under `additional_tools.tools` |
+| `tool_choice` | `ToolChoice`; neutral `auto`/`none` may be omitted without tools, while `required` or typed choices must resolve during semantic validation |
 | `max_output_tokens` | `MaxTokens` |
 | `previous_response_id` | `Metadata.previous_response_id` |
 | passthrough fields | `Params` copied by name |
@@ -285,7 +308,7 @@ Content conversions during upstream rebuild:
 
 For Copilot Responses upstream, overlong `call_id` values are deterministically shortened to stay within the upstream 64-character limit; matching `function_call_output` items use the same shortened ID.
 
-If the valid upstream tool list is empty, `tool_choice` and `parallel_tool_calls` are omitted for Responses upstream too. Copilot Responses upstream currently rejects remote MCP tools (`type: "mcp"`), so they are filtered before this check.
+If the valid upstream tool list is empty, neutral `auto`/`none` and `parallel_tool_calls` are omitted for Responses upstream too. A `required` or typed choice without a matching projected tool has already been rejected by semantic validation. Copilot Responses upstream currently rejects remote MCP tools (`type: "mcp"`), so the request validator rejects them before routing or provider dispatch.
 
 ### Upstream Anthropic Messages
 
@@ -303,9 +326,13 @@ Upstream responses are parsed into `CanonicalResponse` or `StreamEvent`, then re
 | OpenAI Responses | `response` | `response.created`, `response.output_text.delta`, `response.completed`, and related events |
 | Anthropic Messages | Anthropic message shape | `message_start`, `content_block_delta`, `message_delta`, `message_stop`, and related events |
 
-Usage is normalized to input/output/cached/reasoning tokens, AI credits, and cost estimates, and records `request_format`, `pool_id`, and `account_id`. Responses stream usage includes OpenAI-style `input_tokens_details.cached_tokens` and `output_tokens_details.reasoning_tokens` as well as gateway cost/cache extensions.
+Usage is normalized to input/output/cached/reasoning tokens, AI credits, and cost estimates. Its internal source is explicitly `upstream`, `estimated`, or `missing` and is persisted in both the provider-attempt journal and usage ledger. Missing upstream usage is omitted from client JSON instead of being fabricated as a zero object; an explicitly present all-zero upstream object remains present. A missing source retains the maximum budget reservation rather than settling it as zero. Responses stream usage includes OpenAI-style `input_tokens_details.cached_tokens` and `output_tokens_details.reasoning_tokens` as well as gateway cost/cache extensions.
 
-Streaming correctness rules are explicit: Chat upstream must end with `[DONE]`; Responses upstream must emit `response.completed`, `response.incomplete`, or a terminal output event accepted for Copilot Responses variants; native Messages succeeds only after `message_stop`. Same-protocol Responses preserves upstream response/item IDs and output/content/summary indexes. Same-protocol Messages preserves block indexes, thinking signatures, tool IDs, stop reason, and usage. An incomplete Responses terminal is returned to the client and recorded as `incomplete`, not `success`. Failed events, read errors, and premature EOF become protocol-level failures rather than fabricated successful completion.
+Streaming correctness rules are explicit: Chat `[DONE]` is accepted only after a validated non-empty final `finish_reason`, while EOF may complete only after that same terminal evidence; Responses upstream must emit `response.completed` or `response.incomplete`, and output/content/item done events are never response-level terminal evidence; native Messages succeeds only after `message_stop`. Malformed Chat SSE JSON terminates the stream, and Messages validates every content-block index and its start/delta/stop type lifecycle before accepting `message_stop`. Same-protocol Responses preserves upstream response/item IDs and output/content/summary indexes. Same-protocol Messages preserves block indexes, thinking signatures, tool IDs, stop reason, `stop_sequence`, and usage. Non-streaming Chat, Responses, and Messages bodies must contain exactly one JSON value followed by EOF. An incomplete Responses terminal is returned to the client and recorded as `incomplete`, not `success`. Failed events, read errors, malformed frames, trailing JSON, and premature EOF become protocol-level failures rather than fabricated successful completion.
+
+Responses refusal items remain native Responses semantics. A non-streaming refusal routed to Chat or Messages is rejected before serialization. Streaming refusal events are treated as upstream protocol failures rather than text deltas, so refusal content is never disguised as ordinary cross-protocol output.
+
+Cross-protocol terminal reasons are normalized only when equivalent: `end_turn`/`stop_sequence` to Chat `stop`, `tool_use` to `tool_calls`, and `max_tokens`/`length` to Responses `incomplete: max_output_tokens` or Chat `length`. Other source-specific terminal reasons fail closed.
 
 To reproduce MCP/tool streaming differences against a running local gateway:
 
@@ -315,14 +342,15 @@ python3 scripts/probe_stream_mcp.py --models gpt-5.5 gemini-3.5-flash claude-son
 
 ## Loss And Distortion Notes
 
-- Unknown client body fields are discarded by default; they do not enter `Params` and are not forwarded to Copilot.
+- Unknown top-level fields and typed item/block fields or types are rejected with a direction and JSON path; they do not enter `Params` or reach Copilot.
 - Client headers are not forwarded by default; auth, sticky, and account-binding inputs affect only gateway logic.
 - `user`, `session`, `metadata.session_id`, and `metadata.conversation_id` are not forwarded upstream as `user`.
 - `user_binding` uses OpenAI Chat/Responses `user`, Anthropic `metadata.user_id` / `metadata.user`, or `X-GHCP-User` as `user_id`; `session_binding` uses request/metadata session fields or session headers as `session_id`.
-- Responses `previous_response_id` is preserved only when the target upstream API is Responses; it is lost if the model is configured for upstream Chat Completions.
+- Responses `previous_response_id` is preserved only when the target upstream API is Responses; a cross-protocol route is rejected before dispatch.
 - Cross-protocol projections merge Responses `developer`/`system` input and Anthropic system text into one `System` string. Their same-protocol typed source fields retain ordered blocks/items.
+- Chat plain-text `system`/`developer` messages become Anthropic top-level `system`; non-text content is rejected instead of being emitted as an invalid Anthropic message role.
 - Anthropic `tool_choice.any` becomes OpenAI-style `required`; `tool_choice.tool` becomes a function choice.
 - Anthropic `stop_sequences` is renamed to upstream `stop`.
-- Unknown Responses item/content types and unknown Anthropic block types are skipped rather than forwarded as arbitrary JSON.
-- Native non-streaming Responses preserves message, reasoning, function, custom, and tool-search output items; other item families are not preserved.
-- Cross-protocol stream conversion rebuilds compatible shapes and cannot preserve every source event field. The native Responses and Messages paths preserve the documented identities and lifecycle semantics, not raw SSE bytes.
+- Unknown Responses item/content types and unknown Anthropic block types are rejected rather than forwarded as arbitrary JSON.
+- Native non-streaming Responses preserves message, reasoning, function, custom, and tool-search output items; an unknown upstream item family is a protocol error.
+- Cross-protocol stream conversion rebuilds compatible shapes and declares source lifecycle/block/item identity omission as a known shape normalization. Refusals, thinking/signatures, redacted thinking, message phases, tool namespaces/types, and other non-representable semantics fail closed before their payload is written.

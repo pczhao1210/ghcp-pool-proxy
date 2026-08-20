@@ -1,14 +1,16 @@
 # Operations Guide
 
-This guide covers the delivered single-machine deployment, shared-state multi-process behavior, startup, migrations, monitoring, alerts, and troubleshooting.
+This guide covers the delivered VM and Kubernetes deployment paths, shared-state multi-process behavior, startup, migrations, monitoring, alerts, and troubleshooting.
 
 ## Contents
 
 - [Runtime Topology](#runtime-topology)
 - [VM Deployment](#vm-deployment)
+- [Cluster Deployment](#cluster-deployment)
 - [Main Configuration](#main-configuration)
 - [Multi-Account Environment Isolation](#multi-account-environment-isolation)
 - [Dashboard and Admin Authentication](#dashboard-and-admin-authentication)
+- [Control-Plane API Groups](#control-plane-api-groups)
 - [Release and Migration](#release-and-migration)
 - [Daily Checks](#daily-checks)
 - [Gateway Error Mapping](#gateway-error-mapping)
@@ -37,6 +39,8 @@ flowchart TD
 
 Use `deploy/deploy.sh` from the release package to deploy on a Linux VM. The script consumes fixed Docker Hub images and does not run source builds, tests, or smoke checks.
 
+Both VM and cluster entry points accept `--release-manifest FILE`, `--install-missing`, and the `deploy` action alias. `RELEASE_MANIFEST` is the shared environment form; `RELEASE_MANIFEST_FILE` remains a compatibility alias. Missing prerequisites prompt before installation unless `--install-missing` is supplied. Cluster `--yes` accepts deployment confirmations but does not imply installation consent; VM data deletion still requires `GHCP_RESET_CONFIRM=reset`.
+
 ```bash
 deploy/deploy.sh --start
 ```
@@ -47,9 +51,9 @@ Startup flow:
 - Creates the default persistent root at host `~/ghcp_proxy` and bind-mounts PostgreSQL/Redis data directories into containers.
 - Creates `~/ghcp_proxy/config.yaml` and `~/ghcp_proxy/.env` automatically on first start; `generate-config` can create the YAML in advance. Neither command overwrites an existing file.
 - Stops when an existing persistent directory is missing its YAML, rather than silently restoring default configuration.
-- Pulls `pczhao1210/ghcp-pool-proxy:gateway-latest`, `admin-latest`, `worker-latest`, plus PostgreSQL and Redis images.
+- Validates the bundled non-sensitive release manifest against the bundled schema, derives and directly pulls the four runtime `repository@sha256:...` references from that manifest, and also pulls the PostgreSQL and Redis images.
 - Starts PostgreSQL and Redis, then waits for health checks.
-- Reads `migrations/schema_version` and `migrations/001_init.sql` from the release package or published admin image. Empty databases receive the single init schema; existing databases read `system_settings.schema_version` and are upgraded only when the script has an explicit smooth upgrade path.
+- Runs the dedicated manifest-backed migration image with a file-mounted DSN. Empty databases receive `001_init.sql`; recognized schema versions 1 through 9 reconcile through `010_legacy_schema_reconciliation.sql`; version 10 and later use their numbered migration path. Partial schemas and unmarked version-10-or-later schemas fail closed.
 - Starts gateway, admin, and worker.
 - Starts a log collector that writes compose logs hourly to `~/ghcp_proxy/logs/ghcp-proxy-YYYYMMDD-HH.log` with 30-day retention by default.
 
@@ -142,6 +146,25 @@ Use sustained 10–15 minute signals rather than one-minute spikes: CPU above 70
 
 Scale in this order: first upgrade the current VM to 4C8G and expand the disk, then observe at least one representative work week. If database write latency dominates, move PostgreSQL to dedicated SSD storage or a managed instance first. If CPU, active SSE streams, or per-host connections dominate, add gateway instances next. More gateway instances do not add account-side capacity, and every instance must share PostgreSQL and Redis.
 
+## Cluster Deployment
+
+Use the cluster entry point from the runtime package; it consumes the same immutable release manifest as the VM deployment:
+
+```bash
+deploy/deploy-cluster.sh local apply
+deploy/deploy-cluster.sh azure apply
+```
+
+`local` checks Docker, Kind, kubectl, and Kustomize, offers to install missing Linux components with the detected package manager and `sudo` when required, then creates or reuses the `ghcp-local` Kind cluster. It applies the disposable `test` overlay with in-cluster PostgreSQL and Redis. Treat it as migration, readiness, and protocol validation only; deleting the Kind cluster deletes its data.
+
+`azure` checks Azure CLI, kubectl, Kustomize, and jq, then interactively selects `create` or `reuse` for the resource group, VNet, AKS subnet, delegated PostgreSQL subnet, private-endpoint subnet, AKS, PostgreSQL Flexible Server, and Azure Managed Redis. Bracketed prompt values are accepted on Enter. Interactive reuse lists visible resource groups, same-region networks/services, and subnets from the selected VNet as numbered choices; Enter selects `[1]`, while `0` allows manual input. Non-interactive reuse requires the resource-group name and complete ARM IDs in environment variables. Reuse fails on mismatched resource type, subscription, resource region, state, subnet, or service contract; the resource group's metadata location is only the default resource region. Creation compiles `deploy/azure/main.bicep`, runs Azure what-if, and requires an explicit confirmation before apply. The script restores the caller's original Azure subscription on exit.
+
+For a new AKS cluster, Bicep creates a user-assigned control-plane identity, grants its principal the built-in Network Contributor role at the node-subnet scope, and makes cluster creation depend on that assignment. The operator therefore needs permission to create managed identities and role assignments on that subnet. Reusing Redis does not change its SKU or database policy, but the deployment still creates a private endpoint, private DNS zone/link, and zone group for the selected VNet; the operator needs the corresponding network and private-link permissions.
+
+After infrastructure resolution, the script obtains the AKS context, writes namespace-scoped application and migration Secrets from hidden inputs, renders release-manifest digests, runs the migration Job, applies workloads, waits for rollout, and performs the configured smoke checks. Temporary parameter and Secret files use mode `0600` and are removed on exit. Do not put credentials in command-line arguments, shell history, checked-in parameter files, or logs.
+
+This Azure baseline provisions only VNet/subnets, AKS, PostgreSQL, Managed Redis, and their required private connectivity. A successful Bicep build, fake render, or what-if is not live-environment acceptance. Before production apply, independently approve and validate subscription/region quota, Azure Policy, subnet permissions, DNS, ingress/TLS, observability, backup/restore, HA, cost, and rollback ownership. The entry point does not provide destroy automation.
+
 ## Main Configuration
 
 Configuration has two authorities. Local source deployments use the ignored repository `config.yaml` created by `start.sh`; VM deployments use `~/ghcp_proxy/config.yaml` created by `deploy.sh generate-config`. Provider endpoints, OAuth endpoints, timeouts, connection/queue sizing, and logging are startup-only YAML settings: Dashboard displays their effective values as read-only, and changes require a process restart. Deployment secrets, host paths, ports, listen addresses, and database/Redis addresses remain in `~/ghcp_proxy/.env`. Custom deployments follow environment > YAML > built-in defaults; VM Compose injects deployment values from `.env` and reads application startup settings from YAML.
@@ -159,11 +182,24 @@ The recommended Copilot compatibility flags are `copilot_compat_anthropic_beta_e
 | `gateway.read_header_timeout` | Maximum time to read request headers, default `5s` |
 | `gateway.write_timeout` | Overall response write timeout; default `0s` keeps long SSE streams open |
 | `gateway.idle_timeout` | Keep-alive idle timeout, default `120s` |
+| `GATEWAY_BIND_ADDR` / `ADMIN_BIND_ADDR` | VM host interfaces for published Gateway/Admin ports; both default to `127.0.0.1`. Use SSH forwarding or a TLS-terminating private ingress; never expose plaintext Admin on an untrusted network. |
 | `WORKER_METRICS_ADDR` | Worker health and retention-metrics listen address, default `:8002`; VM Compose publishes it only on host `127.0.0.1` |
+| `WORKER_ROLES` | Comma-separated Worker loops: `all` (default), `credential-warning`, `health`, `metrics-sync`, `usage-rollup`, `provider-attempts`, `budget-recovery`, `binding-expiry`, or `capability-sync`. Both Compose baselines pass this variable through. Kubernetes runs `metrics-sync` in the dedicated `ghcp-org-sync-worker`; only the production Copilot overlay adds `capability-sync` to the general Worker, while fake-provider overlays omit it. `budget-recovery` requires Redis readiness; capability fencing uses PostgreSQL and does not require Redis. |
+| `CAPABILITY_SYNC_MATRIX_PATH` | Versioned compatibility matrix used by `capability-sync`; source default `compatibility/matrix.json`, packaged Worker default `/srv/ghcp/compatibility/matrix.json` |
+| `CAPABILITY_SYNC_INTERVAL` / `CAPABILITY_SYNC_RUN_TIMEOUT` / `CAPABILITY_SYNC_LEASE_DURATION` | Capability collection cadence and fencing deadlines; defaults `1h`, `10m`, and `11m` |
+| `CAPABILITY_EVIDENCE_TTL` | Persisted account-model evidence freshness window, default `24h`; must exceed the sync interval |
 | `ADMIN_ADDR` | Admin listen address |
+| `admin.read_timeout` / `ADMIN_READ_TIMEOUT` | Maximum time to read a complete Admin request, default `30s` |
+| `admin.read_header_timeout` / `ADMIN_READ_HEADER_TIMEOUT` | Maximum time to read Admin request headers, default `5s` |
+| `admin.write_timeout` / `ADMIN_WRITE_TIMEOUT` | Maximum Admin response write duration, default `60s` |
+| `admin.idle_timeout` / `ADMIN_IDLE_TIMEOUT` | Admin keep-alive idle timeout, default `120s` |
 | `ADMIN_TOKEN` | Admin API authentication token |
 | `POSTGRES_DSN` | PostgreSQL connection string |
 | `REDIS_ADDR` | Redis address |
+| `REDIS_CLIENT_MODE` | Redis topology: `single`, `sentinel`, or `cluster` |
+| `REDIS_PROTOCOL_VERSION` | Redis writer protocol: `1` by default; `2` only through the drained-writer Admin cutover procedure |
+| `REDIS_ADDRS` | Sentinel or Cluster seed endpoints; required instead of `REDIS_ADDR` for those modes |
+| `REDIS_TLS` | Enable native Redis TLS; non-Cluster modes also require `REDIS_TLS_SERVER_NAME` |
 | `SCHEMA_VERSION` | Target schema version for the current release package; written to `.env` by `deploy.sh`, while the installed DB version is stored in `system_settings.schema_version` |
 | `maintenance.raw_retention_days` | Raw-ledger daily partition fallback, default `7`; set to `0` to disable automatic pruning |
 | `maintenance.hourly_retention_days` | Hourly-rollup UTC daily partition fallback, default `90`; set to `0` to disable automatic pruning |
@@ -185,9 +221,9 @@ The recommended Copilot compatibility flags are `copilot_compat_anthropic_beta_e
 | `github.login_base_url` | GitHub login base URL, default `https://github.com` |
 | `github.api_base_url` | GitHub API base URL, default `https://api.github.com` |
 | `github.copilot_token_url` | Copilot bearer token exchange endpoint |
-| `GITHUB_TOKEN` | Fallback token for worker GitHub Copilot Metrics sync |
+| `GITHUB_TOKEN_FILE` | Read-only GitHub token file for the `metrics-sync` Worker role; no `GITHUB_TOKEN` or database-setting fallback is used |
 | `DASHBOARD_DIR` | Dashboard static asset directory served by admin |
-| `model_catalog_json` | Controls exposed names, upstream model IDs, upstream API, and enabled status |
+| `model_catalog_json` | Strict model catalog contract for exposed names, upstream model IDs, upstream API, and enabled status; invalid JSON, unknown fields, empty IDs, duplicate exposed IDs, and unknown APIs are rejected before storage |
 | `logging.level` / `logging.format` | Log level and format |
 
 ## Multi-Account Environment Isolation
@@ -213,9 +249,9 @@ flowchart TD
 - Pool membership is managed by `pool_accounts`; each account belongs to at most one pool and each client profile points to exactly one pool.
 - Redis sticky keys include pool, model, request format, and affinity hash; sticky only affects account reuse within the same scope.
 - Organization/enterprise seat accounts should fill `account_source`, `org_id`, and `seat_status`; the router filters unavailable seats.
-- Per-account model entitlement is not represented in routing data. A pool must contain accounts with the same usable model set.
+- Per-account model evidence is published into the Router snapshot. Set a client profile to `require_fresh` for fail-closed account/model/API filtering; `allow_unknown` remains the compatibility default.
 
-If model access differs inside one pool, the router may select an account that cannot serve the resolved model. The provider request then fails without retrying another account. A Copilot `403` is classified as `permission_denied` and may increase that account's risk state.
+For `require_fresh`, the Dashboard Capabilities page must show fresh evidence for at least one active account. Unknown, stale, or mismatch evidence can leave the route unavailable. With `allow_unknown`, model access differences can still reach the provider, so keep those pools homogeneous. A Copilot `403` is classified as `permission_denied` and may increase that account's risk state.
 
 Recommended isolation practices:
 
@@ -227,10 +263,22 @@ Recommended isolation practices:
 
 ## Dashboard and Admin Authentication
 
-- Dashboard static pages are served by admin at root, default `http://localhost:8001/`.
+- Dashboard static pages are served by admin at root, default `http://localhost:8001/`. VM releases publish this port on host loopback only; use the documented SSH tunnel or a private TLS ingress.
 - `/admin/*` APIs require `Authorization: Bearer <ADMIN_TOKEN>`.
 - The dashboard attaches the admin token to API requests; static pages themselves should not carry sensitive data.
 - In container images, dashboard dist is copied to `/srv/dashboard`; `DASHBOARD_DIR` can point to a custom build.
+
+## Control-Plane API Groups
+
+All endpoints below require the Admin bearer token. The detailed request and response contracts are defined by the handlers and tests; this index is for operations navigation.
+
+| Area | Endpoints |
+| --- | --- |
+| Accounts and credentials | `/admin/accounts`, account state actions, credential import, and Device Flow |
+| Pools and bindings | `/admin/pools`, account assignments, pool-account details, and binding release |
+| Client profiles and settings | `/admin/client-profiles`, `/admin/settings`, and model-catalog configuration |
+| GitHub organization data | organization, seat, metrics, and synchronization-request endpoints |
+| Operations views | usage summaries, client usage, compatibility, model capabilities, and audit events |
 
 ## Release and Migration
 
@@ -256,8 +304,16 @@ flowchart TD
 | --- | --- |
 | `GET /healthz` | Liveness check |
 | `GET /readyz` | Readiness check |
+| `GET /version` | Public Gateway `version` and `build_time`; excludes commits, configuration, and credentials |
 | `GET /metrics` | Gateway metrics check with `Authorization: Bearer <ADMIN_TOKEN>` |
 | Dashboard | Inspect account status, pool status, error events, usage, cost, cache hit rate, and sync status |
+
+Every Gateway response carries `X-Request-ID`. The access log and `provider request dispatch` event use the same `request_id`; the latter also records `request_format`, `model`, `upstream_api`, `pool_id`, `account_id`, `client_profile_id`, `client_version`, `runtime_version`, `responses_lite`, and `stream`, but never the request body, credentials, Authorization, or configuration values. Confirm the running version, then search the VM hourly logs using the request ID observed by the client:
+
+```bash
+curl -fsS http://127.0.0.1:8000/version
+grep -R --fixed-strings '<request-id>' ~/ghcp_proxy/logs
+```
 
 ## Gateway Error Mapping
 
@@ -278,7 +334,7 @@ Clients receive standard AI gateway semantics through `external_status`, `extern
 | `500 stream_error` | SSE writer or streaming response initialization failed | `500 stream_error` | `stream response unavailable` | Check response writing, proxying, and client connection state |
 | Unmapped internal code | Other errors passed through the mapping function | Same as internal | Same as internal | Default passthrough; review new error types for neutralization needs |
 
-Upstream Copilot 4xx responses are classified before account health is updated. Authentication, permission, rate-limit, quota, network, and 5xx failures can still affect risk. Invalid request and generic upstream 4xx classifications are recorded in metrics and usage, but they do not increase account risk because they usually come from request shape, model compatibility, or client parameters rather than account health. A model-entitlement rejection may arrive as `403 permission_denied`; the gateway records it against the selected account and does not fail over to another account. For streaming calls, an upstream SSE read error or premature EOF before a completion marker is treated as a failed request and must not be emitted as a successful `[DONE]` terminator. Client cancellation interrupts blocked stream event delivery, closes the upstream response, and releases local and Redis concurrency reservations. For upstream Responses API streams, EOF after terminal output events such as `response.output_text.done` or `response.output_item.done` is accepted as completion for model variants that omit `response.completed`.
+Upstream Copilot 4xx responses are classified before account health is updated. Authentication, permission, rate-limit, quota, network, and 5xx failures can still affect risk. Invalid request and generic upstream 4xx classifications are recorded in metrics and usage, but they do not increase account risk because they usually come from request shape, model compatibility, or client parameters rather than account health. A model-entitlement rejection may arrive as `403 permission_denied`; the gateway records it against the selected account and does not fail over to another account. For streaming calls, an upstream SSE read error or premature EOF before a completion marker is treated as a failed request and must not be emitted as a successful `[DONE]` terminator. Client cancellation interrupts blocked stream event delivery, closes the upstream response, and releases local and Redis concurrency reservations. Chat accepts `[DONE]` or EOF after a validated non-empty final `finish_reason`. Responses requires `response.completed` or `response.incomplete`; `response.output_text.done`, `response.content_part.done`, and `response.output_item.done` never prove response-level completion on their own.
 
 If clients receive `budget_exhausted`, check the gateway log fields `internal_code`, `account_id`, and `pool_id`, then inspect Redis counters such as `budget:daily:account:<account_id>:<yyyymmdd>` and `budget:daily:global:<yyyymmdd>`. Daily token and AI Credits caps are only active when the Dashboard Config value or corresponding `BUDGET_MAX_DAILY_*` environment value is greater than `0`.
 
@@ -333,12 +389,12 @@ Query granularity:
 
 | Granularity | Description |
 | --- | --- |
-| `raw` | Reads the `usage_ledger_all` compatibility view, request-accurate and best for short ranges inside the default seven-day retention window |
+| `raw` | Reads the partitioned `usage_ledger` table, request-accurate and best for short ranges inside the default seven-day retention window |
 | `hourly` | Reads UTC-day-partitioned `usage_rollup_hourly`, retained for 90 days by default and useful for multi-day trends |
 | `daily` | Reads UTC-month-partitioned `usage_rollup_daily`, retaining the current month and 13 complete prior months by default for long-term trends and reconciliation |
 | `auto` | Uses raw within one hour, hourly within 90 days, and daily beyond 90 days, so the default 24-hour dashboard does not scan a full day of raw ledger data |
 
-Admin APIs support absolute date ranges: `/admin/usage/summary?from=2026-06-01&to=2026-06-23&granularity=auto`. Date-only `to` values use half-open range semantics and are advanced to the next UTC midnight, so `to=2026-06-23` includes the full June 23 day. The Usage Rollup Worker runs every five minutes and processes data up to `now()-2m` to avoid edge jitter from freshly written requests. Raw pruning uses `min(now-retention, rollup watermark)` as its safe boundary, while hourly and daily retention only drops complete UTC day/month partitions. The `usage_ledger_all` compatibility view exposes all raw-ledger storage in the current schema; retention removes auxiliary nonpartitioned storage only after its complete window expires.
+Admin APIs support absolute date ranges: `/admin/usage/summary?from=2026-06-01&to=2026-06-23&granularity=auto`. Date-only `to` values use half-open range semantics and are advanced to the next UTC midnight, so `to=2026-06-23` includes the full June 23 day. The Usage Rollup Worker runs every five minutes and processes data up to `now()-2m` to avoid edge jitter from freshly written requests. Raw pruning uses `min(now-retention, rollup watermark)` as its safe boundary, while hourly and daily retention only drops complete UTC day/month partitions. Schema `19` has no auxiliary legacy ledger table or compatibility view; an upgrade refuses to continue until any legacy ledger has been emptied by the prior retention window.
 
 Retention can be changed under Dashboard Config without restarting services. The UI asks for confirmation when a new non-zero value shortens the current window because the next maintenance pass can make that deletion irreversible.
 
@@ -422,6 +478,22 @@ curl -s http://localhost:8001/admin/accounts/{account_id}/device-flow/complete \
 
 If complete returns `202` with `error=authorization_pending`, the user has not finished GitHub authorization yet; call complete again later. If it returns `409 expired_token`, start again.
 
+Account model capability evidence:
+
+```bash
+curl -s "http://localhost:8001/admin/accounts/{account_id}/model-capabilities?model=gpt-5.5&upstream_api=responses" \
+  -H "Authorization: Bearer dev-admin-token"
+
+curl -s "http://localhost:8001/admin/pools/{pool_id}/model-capabilities?model=gpt-5.5&upstream_api=responses" \
+  -H "Authorization: Bearer dev-admin-token"
+
+curl -s http://localhost:8001/admin/accounts/{account_id}/model-capabilities/refresh \
+  -H "Authorization: Bearer dev-admin-token" \
+  -X POST
+```
+
+Capability queries classify evidence as `fresh`, `stale`, `unknown`, or `mismatch`. `fresh` requires model visibility, a passed probe, unexpired evidence, and an evidence version equal to the latest fully completed Worker run. A refresh returns `202`; Admin persists the request and the `capability-sync` Worker consumes it under the existing PostgreSQL lease and credential-generation fencing. Admin never probes Copilot in the request path. A completed refresh references its evidence version; an incomplete run records `failed/sync_failed` without exposing the upstream error. Pool consistency is true only when every active account in the active membership set has `fresh` evidence for the requested model and API. Responses and audit entries contain no credential generation or raw upstream body.
+
 Grouping
 
 1. Create a pool and choose its allocation mode and load-balancing strategy.
@@ -457,19 +529,22 @@ flowchart TD
 | --- | --- |
 | `exposed` | Model name visible to clients |
 | `upstream` | Actual upstream model ID sent to GitHub Copilot |
-| `upstream_api` | Optional upstream endpoint: `chat_completions`, `responses`, or `anthropic_messages` |
+| `upstream_api` | Optional upstream endpoint: `chat_completions`, `responses`, or `anthropic_messages`; release-matrix entries must set it explicitly |
 | `name` | Optional display name refreshed from Copilot `/models` |
 | `vendor` | Optional model vendor refreshed from Copilot `/models`; `OpenAI` infers Responses and `Anthropic` infers Messages |
 | `enabled` | Whether the model is returned by `/v1/models` and allowed in requests |
 
-GitHub Copilot upstream endpoint selection is mixed, not globally Responses by default. Selection order is: model catalog `upstream_api` wins; then Copilot `/models` `vendor` is normalized, where `OpenAI` / `Azure OpenAI` use upstream Responses, Anthropic uses upstream Messages, and Google, Microsoft, and xAI use upstream Chat Completions; if vendor is empty, the gateway infers from `upstream`, `name`, and `exposed`: `gpt*`/o-series infer OpenAI, `gemini*` infers Google, `claude*`/`opus*`/`haiku*`/`sonnet*` infer Anthropic, `MAI*` infers Microsoft, and `grok*`/`xai*` infer xAI; other models follow the downstream request protocol.
+GitHub Copilot upstream endpoint selection is mixed, not globally Responses by default. The server normalizes an explicit `upstream_api`; when it is omitted for a non-release entry, the single server catalog contract infers it from `vendor`, `upstream`, `name`, and `exposed`. Admin GET returns the normalized catalog plus `upstream_api_explicit`, and Dashboard consumes that DTO without maintaining its own vendor or API inference rules.
 
-This catalog is global. It does not verify model access for each account, so pools must group accounts by a common usable model set.
+The catalog is global. For `require_fresh` client profiles, Router and binding paths additionally require fresh per-account model evidence; `allow_unknown` profiles retain the legacy permissive policy. Release validation requires exact matrix/profile/pool references and fresh evidence for every active or binding-reserved account.
 
 ```mermaid
 flowchart LR
   A["Dashboard Models / Settings"] --> B["PATCH /admin/settings/model_catalog_json"]
-  B --> C[(system_settings)]
+  B --> V["strict server validation"]
+  V --> C[(system_settings)]
+  C --> I["Admin normalized catalog DTO"]
+  I --> A
   C --> D["GET /v1/models"]
   C --> E["request model resolution"]
   E --> F{"exposed enabled?"}
@@ -531,28 +606,28 @@ flowchart TD
 
 ### Copilot Metrics Sync Delay
 
-1. Check whether worker is alive.
-2. Check whether `copilot_metrics_sync_enabled` is enabled.
-3. Check whether org access token or `GITHUB_TOKEN` is available.
-4. Check the usage-report metadata request and every signed report download; an invalid or partial report is rejected without replacing the latest snapshot.
-5. Check whether Postgres writes are blocked.
+1. Check whether `ghcp-org-sync-worker` is alive and ready.
+2. Check `/admin/github/orgs/{id}/sync-requests` for a pending request, lease retry, or last error.
+3. Check whether `copilot_metrics_sync_enabled` is enabled for scheduled work and whether `GITHUB_TOKEN_FILE` is mounted in the sync Worker.
+4. Check the usage-report metadata request and every signed report download; an invalid or partial report is retried without replacing the latest snapshot.
+5. Check PostgreSQL request claims, snapshot upserts, and maintenance lease errors.
 
 Metrics sync path:
 
 ```mermaid
 flowchart TD
   A["hourly trigger"] --> B{"copilot_metrics_sync_enabled?"}
-  B -->|"no"| C["skip"]
-  B -->|"yes"| D["read metrics-enabled orgs"]
-  D --> E{"org access_token or GITHUB_TOKEN?"}
-  E -->|"none"| F["warn and skip org"]
-  E -->|"present"| G["request latest 28-day report"]
-  G --> H["download and validate every report file"]
-  H --> I[(save snapshot and sync timestamp atomically)]
-  I --> J["compare the latest report UTC day with same-org proxy requests"]
+  B -->|"yes"| Q[(org_sync_requests)]
+  B -->|"no"| C["skip scheduled enqueue"]
+  D["manual Admin POST"] --> Q
+  Q --> E["Worker claim with lease"]
+  E --> F{"GITHUB_TOKEN_FILE available?"}
+  F -->|"no"| G["release for retry"]
+  F -->|"yes"| H["request and validate 28-day report"]
+  H --> I["fenced snapshot upsert and completion audit"]
+  I --> J["singleton maintenance reconcile"]
   J --> K{"drift > 10%?"}
-  K -->|"yes"| L["record audit event"]
-  K -->|"no"| M["update metrics only"]
+  K -->|"yes"| L["deduplicated audit event"]
 ```
 
 ## Rollback Principles

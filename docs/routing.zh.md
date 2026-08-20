@@ -101,11 +101,11 @@ session_binding: client_profile_id + pool_id + lower(trim(session_id))
 | Reserved 账号 | active binding 占用的账号不可被 shared pool 选择；绑定请求只允许自己的 required account |
 | 进程内并发 | `current_concurrency < effective_max_concurrency`；绑定池优先使用 pool 的 `binding_max_concurrency`，否则使用账号 `max_concurrency`；非正数按 1 处理 |
 | 排除列表 | sticky overflow、并发 rebind 时可临时排除旧账号 |
-| 账号级模型权限 | 不检查；解析后的 model 不参与账号候选集过滤 |
+| 账号级模型权限 | `require_fresh` profile 要求解析后的 upstream model/API 具备当前完整版本的 `available/passed` 证据；缺失、旧版、过期、失败或 mismatch 都会拒绝 |
 
 候选集为空时会进入 Gateway 错误映射；对外状态码与内部路由原因的对应关系见 [operations.zh.md](operations.zh.md)。
 
-模型目录控制 Gateway 对外暴露的模型，但不保存或校验单个账号的模型权限。同一 pool 中的账号需要具备相同的可用上游模型集合。如果把模型权限不同的账号放入同一 pool，Router 可能选中不支持请求模型的账号；Provider 调用会失败，Gateway 不会把该请求切换到另一个账号重试。模型权限不同时应拆分到不同 pool，并把 client profile 分配到兼容的 pool。上游 `403` 会被分类为 `permission_denied`，可能影响被选账号的 risk 状态。
+模型目录控制 Gateway 对外暴露的模型。Schema 19 保存逐账号 discovery/probe 证据，client profile 显式选择 `model_entitlement_policy=allow_unknown` 或 `require_fresh`。严格请求从最近一次完整 evidence version 捕获不可变 allowlist；普通、sticky、required-account、Redis 并发重选、预算重选，以及 user/session binding 创建与恢复都复用它。已有 binding 的账号不再合格时会 fail closed，不会静默创建第二条 binding。证据 expiry 在请求 plan 创建时判断。`allow_unknown` 是兼容默认值，不按证据过滤，因此这类 pool 仍应保持模型集合一致。
 
 ## 负载均衡策略
 
@@ -157,7 +157,7 @@ Session key 优先级：
 9. `X-GHCP-Project`
 10. body metadata 中的 `session_id`、`conversation_id`、`user`
 
-`session_then_prefix` 没有 session key 时会 fallback 到 prefix hash；`prefix_only` 始终使用 prefix hash 并忽略 session header。Affinity key 默认包含 client profile、协议、模型和 session/prefix 材料，只保存 hash，不保存 prompt 明文。为了兼容旧 API，历史值 `sticky_mode=prefix` 会归一化为 `sticky_mode=soft` 与 `affinity_strategy=prefix_only`。
+`session_then_prefix` 没有 session key 时会 fallback 到 prefix hash；`prefix_only` 始终使用 prefix hash 并忽略 session header。Affinity key 默认包含 client profile、协议、模型和 session/prefix 材料，只保存 hash，不保存 prompt 明文。`sticky_mode` 只接受 `soft`、`strict` 和 `none`；需要 prefix 亲和时使用 `affinity_strategy=prefix_only`。
 
 ## Sticky Overflow 与并发
 

@@ -1,0 +1,113 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ghcp-org-sync-worker
+  labels:
+    app.kubernetes.io/component: worker
+    app.kubernetes.io/part-of: ghcp-pool-proxy
+    ghcp-pool-proxy.io/worker-role: org-sync
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: worker
+      app.kubernetes.io/part-of: ghcp-pool-proxy
+      ghcp-pool-proxy.io/worker-role: org-sync
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: worker
+        app.kubernetes.io/part-of: ghcp-pool-proxy
+        app.kubernetes.io/tier: application
+        ghcp-pool-proxy.io/worker-role: org-sync
+    spec:
+      serviceAccountName: ghcp-org-sync-worker
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: worker
+          image: registry.invalid/ghcp-pool-proxy/worker:replace-me
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: metrics
+              containerPort: 8002
+              protocol: TCP
+          env:
+            - name: CONFIG_FILE
+              value: /etc/ghcp/config.yaml
+            - name: POSTGRES_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: ghcp-runtime-secrets
+                  key: POSTGRES_DSN
+            - name: WORKER_METRICS_ADDR
+              value: :8002
+            - name: WORKER_PROBE_TIMEOUT
+              value: 2s
+            - name: WORKER_SHUTDOWN_TIMEOUT
+              value: 5s
+            - name: WORKER_ROLES
+              value: metrics-sync
+            - name: GITHUB_TOKEN_FILE
+              value: /var/run/secrets/ghcp-org-sync/github-token
+          volumeMounts:
+            - name: app-config
+              mountPath: /etc/ghcp
+              readOnly: true
+            - name: github-sync-token
+              mountPath: /var/run/secrets/ghcp-org-sync
+              readOnly: true
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            periodSeconds: 2
+            timeoutSeconds: 1
+            failureThreshold: 60
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: metrics
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+      volumes:
+        - name: app-config
+          configMap:
+            name: ghcp-app-config
+        - name: github-sync-token
+          secret:
+            secretName: ghcp-org-sync-worker-secrets
+            optional: true
+            items:
+              - key: github-token
+                path: github-token

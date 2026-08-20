@@ -1,0 +1,24 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: ghcp-staging
+resources:
+  - namespace.yaml
+  - ../../base
+  - gateway-pdb.yaml
+patches:
+  - path: gateway-phase3-patch.yaml
+images:
+  - name: registry.invalid/ghcp-pool-proxy/gateway
+    newName: pczhao1210/ghcp-pool-proxy
+    newTag: gateway-latest
+  - name: registry.invalid/ghcp-pool-proxy/admin
+    newName: pczhao1210/ghcp-pool-proxy
+    newTag: admin-latest
+  - name: registry.invalid/ghcp-pool-proxy/worker
+    newName: pczhao1210/ghcp-pool-proxy
+    newTag: worker-latest
+labels:
+  - pairs:
+      app.kubernetes.io/environment: staging
+    includeSelectors: false
+    includeTemplates: true

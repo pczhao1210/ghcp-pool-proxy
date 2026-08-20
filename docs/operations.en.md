@@ -251,9 +251,9 @@ flowchart TD
 - Pool membership is managed by `pool_accounts`; each account belongs to at most one pool and each client profile points to exactly one pool.
 - Redis sticky keys include pool, model, request format, and affinity hash; sticky only affects account reuse within the same scope.
 - Organization/enterprise seat accounts should fill `account_source`, `org_id`, and `seat_status`; the router filters unavailable seats.
-- Per-account model evidence is published into the Router snapshot. Set a client profile to `require_fresh` for fail-closed account/model/API filtering; `allow_unknown` remains the compatibility default.
+- Per-account model evidence is published into the Router snapshot. Ordinary client profiles default to `allow_unknown`, and the Dashboard does not expose an entitlement selector. Controlled allowlisted profiles may retain `require_fresh` through backend configuration/API for fail-closed account/model/API filtering.
 
-For `require_fresh`, the Dashboard Capabilities page must show fresh evidence for at least one active account. Unknown, stale, or mismatch evidence can leave the route unavailable. With `allow_unknown`, model access differences can still reach the provider, so keep those pools homogeneous. A Copilot `403` is classified as `permission_denied` and may increase that account's risk state.
+For `require_fresh`, use the Admin capability API or Worker sync state to confirm fresh evidence for at least one active account. Unknown, stale, or mismatch evidence can leave the route unavailable. With `allow_unknown`, model access differences can still reach the provider, so keep those pools homogeneous. A Copilot `403` is classified as `permission_denied` and may increase that account's risk state.
 
 Recommended isolation practices:
 

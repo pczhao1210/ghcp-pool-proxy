@@ -251,9 +251,9 @@ flowchart TD
 - pool membership 使用 `pool_accounts` 管理；每个账号最多属于一个 pool，每个 client profile 必须指向一个 pool。
 - Redis sticky key 包含 pool、model、request format 和 affinity hash，sticky 只影响同一 scope 下的账号复用。
 - 组织/企业 seat 账号应填写 `account_source`、`org_id`、`seat_status`，router 会过滤不可用 seat。
-- 账号级模型证据会发布到 Router 快照。把 client profile 设为 `require_fresh` 可对账号/model/API 执行 fail-closed 过滤；`allow_unknown` 保持为兼容默认值。
+- 账号级模型证据会发布到 Router 快照。普通 client profile 默认使用 `allow_unknown`，Dashboard 不暴露 entitlement 选择；受控白名单 profile 可通过后端配置/API 保留 `require_fresh`，对账号/model/API 执行 fail-closed 过滤。
 
-使用 `require_fresh` 时，Dashboard Capabilities 页必须显示至少一个 active 账号具有 fresh 证据；unknown、stale 或 mismatch 可能让 route 不可用。使用 `allow_unknown` 时，模型权限差异仍可能到达 Provider，因此这类 pool 应保持同质。Copilot `403` 会分类为 `permission_denied`，并可能增加该账号的 risk。
+使用 `require_fresh` 时，应通过 Admin capability API 或 Worker 同步状态确认至少一个 active 账号具有 fresh 证据；unknown、stale 或 mismatch 可能让 route 不可用。使用 `allow_unknown` 时，模型权限差异仍可能到达 Provider，因此这类 pool 应保持同质。Copilot `403` 会分类为 `permission_denied`，并可能增加该账号的 risk。
 
 建议隔离做法
 

@@ -2,7 +2,7 @@
 
 Chinese companion: [README.zh.md](README.zh.md).
 
-`matrix.json` schema 3 separates one runtime contract from its exact client-version eligibility entries. A runtime contract owns the client profile, pool, model, route, capabilities, and typed wire contract. Each version entry owns its family, exact version, install source, static level, and evidence identity. This prevents multiple versions of the same request contract from creating duplicate Gateway route keys. A non-committed release-evidence attestation can derive `verified_native` for one immutable Gateway build after clean fixed-CLI evidence passes. Controlled real-Copilot checks are optional manual validation and do not block release attestation.
+`matrix.json` schema 3 separates one runtime contract from its exact client-version eligibility entries. A runtime contract owns the client profile, pool, model, route, capabilities, and typed wire contract. Each version entry owns its family, exact version, install source, static level, and evidence identity. Runtime lookup uses only profile, model, and upstream API; neither Codex nor Claude Code is routed by an exact client version. This prevents multiple versions of the same request contract from creating duplicate Gateway route keys while retaining auditable fixed-CLI release evidence. A non-committed release-evidence attestation can derive `verified_native` for one immutable Gateway build after clean fixed-CLI evidence passes. Controlled real-Copilot checks are optional manual validation and do not block release attestation.
 
 ## Current status
 

@@ -61,7 +61,7 @@ curl --fail --silent --show-error "$GATEWAY_URL/version"
 5. `claude-opus-4.8`，使用 Anthropic Messages API；
 6. `gemini-3.5-flash`，使用 Chat Completions API。
 
-五个生成探针串行执行，每次请求前默认等待 15 秒；`PROBE_INTERVAL` 最低为 10 秒。模型 ID 必须与 `/models` 返回值精确匹配；目录中不存在的目标记录为 `model_not_visible`，不会用相近模型替代，也不会发送生成请求。
+每个可见模型按顺序执行基础文本、流式终态和强制 function tool；两个 GPT 目标追加 reasoning，两个 Claude 目标追加 thinking，共 19 个生成场景。所有请求串行执行，每次请求前默认等待 15 秒；`PROBE_INTERVAL` 最低为 10 秒。模型 ID 必须与 `/models` 返回值精确匹配；目录中不存在的目标记录为 `model_not_visible`，不会用相近模型替代，也不会发送生成请求。
 
 前置条件：
 
@@ -97,11 +97,12 @@ COMPOSE_FILE=deploy/docker-compose.vm.yml \
 - `catalog.raw.data`：Copilot 返回的原始模型 ID、展示名和能力元数据；
 - `probes[].catalog_match`：固定目标是否在目录可见；
 - `probes[].upstream_api`：实际使用的原生协议；
+- `probes[].scenario`：`text`、`streaming`、`tool`、`reasoning` 或 `thinking`；
 - `probes[].result`：`supported`、`model_not_visible` 或 `failed`；
 - `probes[].error`：HTTP 状态、Provider 错误类型和诊断细节；
-- `summary`：五项目标的最终计数。
+- `summary`：所有已执行场景的最终计数。
 
-该报告用于提出白名单变更，不直接证明完整客户端兼容。streaming、tools、MCP、thinking、图片、取消、Claude Code `--resume`、Codex encrypted-reasoning fallback 和完整 CLI 合同仍需各自的兼容门禁。
+该报告用于提出模型/协议合同变更，不直接证明完整客户端兼容。它只证明这些最小 streaming、function tool、reasoning/thinking 样例；MCP、图片、取消、并行工具、多轮工具结果、Claude Code `--resume`、Codex encrypted-reasoning fallback 和完整 CLI 合同仍需各自的兼容门禁。
 
 ## P2.4 Compose/VM 迁移运行时手动验收（中文）
 

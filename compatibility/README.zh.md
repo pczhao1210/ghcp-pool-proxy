@@ -1,6 +1,6 @@
 # 兼容性矩阵
 
-[matrix.json](matrix.json) 是静态客户端合同的唯一事实源。它把 runtime contract 与精确客户端版本分离：前者定义 profile、pool、模型、路由、能力和 typed wire contract，后者定义客户端家族、版本、安装来源、静态等级和证据身份。
+[matrix.json](matrix.json) 是静态客户端合同的唯一事实源。它把 runtime contract 与精确客户端版本分离：前者定义 profile、pool、模型、路由、能力和 typed wire contract，后者定义客户端家族、版本、安装来源、静态等级和证据身份。运行时只用 profile、模型和上游 API 查找合同；Codex 与 Claude Code 都不按精确客户端版本路由。版本条目只保留 fixed-CLI 发布证据的可审计身份。
 
 ## 当前边界
 

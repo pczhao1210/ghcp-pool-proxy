@@ -153,6 +153,8 @@ flowchart LR
 
 当前 VM 运行包由 `deploy/deploy.sh` 和 `deploy/docker-compose.vm.yml` 启动一个 Gateway、一个 Admin、一个 Worker、PostgreSQL 和 Redis；启动前会校验 bundled `release-manifest.env` 的 schema，并直接拉取四个 manifest digest。本地开发使用 `start.sh` 与 `deploy/docker-compose.yml`。这两种方式以及 K8s `test` overlay 都是功能回归基线，不等同于持久多副本验收环境。
 
+2026-08-20 本地 Compose 基线维护：开发 Compose 的 migration target/phase 现分别默认跟随当前 schema `19` 与 `expand`，因此直接运行 `docker compose ... ps/exec/logs` 不再要求先导出只供 migration 使用的变量；`start.sh` 的显式迁移值仍覆盖默认值。`env -u MIGRATION_TARGET_VERSION -u MIGRATION_PHASE docker compose -f deploy/docker-compose.yml config --quiet`、`ps` 和 active-credential PostgreSQL `exec` 查询均通过。`scripts/release_parity_validate.sh` 新增默认 target 与 `migrations/schema_version` 一致性断言；完整 `make release-validate`、VM、Redis Cluster 和 Kubernetes 门禁本次未运行。下一最小步骤是在下次 schema 升级时由 release parity 同步阻止 Compose 默认值漂移。
+
 ## 计划交付物状态
 
 下表区分已提交的仓库产物与仍待环境批准的交付。已提交的 Kubernetes 清单仅可通过渲染和受控集群验证；它们不表示已经创建了任何 Azure 或 Kubernetes 资源。

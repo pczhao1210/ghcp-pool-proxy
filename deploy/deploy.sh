@@ -804,7 +804,7 @@ logging:
   success_sample_rate: $(config_decimal_value GATEWAY_SUCCESS_LOG_SAMPLE_RATE 0.01)
 EOF
   mv "$temporary_file" "$APP_CONFIG_FILE"
-  chmod 600 "$APP_CONFIG_FILE"
+  chmod 644 "$APP_CONFIG_FILE"
 
   log "Created application configuration at $APP_CONFIG_FILE"
   if [[ -f "$ENV_FILE" ]]; then
@@ -835,6 +835,13 @@ Create and review it before starting:
   $SCRIPT_PATH generate-config --data-dir "$DATA_DIR" --config-file "$APP_CONFIG_FILE"
 EOF
   exit 1
+}
+
+ensure_config_file_permissions() {
+  # Runtime images use an unprivileged UID; this file intentionally excludes secrets.
+  if ! chmod 644 "$APP_CONFIG_FILE"; then
+    run_privileged chmod 644 "$APP_CONFIG_FILE" || die "cannot make application config readable: $APP_CONFIG_FILE"
+  fi
 }
 
 add_env_if_missing() {
@@ -1206,6 +1213,7 @@ start_app_services() {
 start_stack() {
   require_config_file
   require_start_cmds
+  ensure_config_file_permissions
   log "Preparing host bind-mount directories under $DATA_DIR"
   prepare_directories
   write_env_file_if_missing

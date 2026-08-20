@@ -86,6 +86,7 @@ VM Docker persistence:
 - Redis AOF data is stored under `~/ghcp_proxy/data/redis` by default.
 - Logs are stored under `~/ghcp_proxy/logs`, split hourly, with `LOG_RETENTION_DAYS=30` by default.
 - Logs consume disk in two places: Docker `json-file` keeps up to about `50 MB × 3` per container in the VM Compose file (about 750 MB across five services), while the hourly collector duplicates service output under `~/ghcp_proxy/logs` for 30 days with no byte cap. The source-development Compose file relies on Docker daemon defaults and has no Compose-level rotation limit.
+- `~/ghcp_proxy/config.yaml` contains non-secret startup settings and is maintained as mode `0644` so unprivileged service containers can read its bind mount.
 - Deployment secrets and ports are stored in `~/ghcp_proxy/.env`. Do not rotate `CREDENTIAL_MASTER_KEY` casually after storing credentials.
 - `~/ghcp_proxy/.env` records the current release package `SCHEMA_VERSION` for operations visibility; the installed database version is stored in `system_settings.schema_version`.
 - These are host paths. PostgreSQL and Redis use them through Docker Compose bind mounts; persistent directories are not created inside the images.

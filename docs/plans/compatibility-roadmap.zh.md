@@ -44,3 +44,11 @@
 - 验证：全仓库 25 份 Markdown 的本地链接检查通过；运行包 README 按其 staged release root 解析链接；`make release-manifest-test` 通过，确认 staging 包含文档索引与兼容矩阵。
 - 未运行检查：本次只改变文档与本地构建产物，不需要运行 Go、Dashboard、Compose 或 Kubernetes 门禁。
 - 下一最小步骤：仅在新的 release、matrix/schema/build 变化或经批准的新能力出现时创建独立兼容性任务。
+
+## 2026-08-20 Dashboard 首次加载回归
+
+- 状态：已完成。`AdminAPI` 默认 `fetch` 现在绑定到 `globalThis`，避免经实例字段调用浏览器 `Window.fetch` 时抛出 `Illegal invocation`；该问题由 schema 19 页面首次请求暴露，不是 schema `18 -> 19` migration 的允许错误或重试策略。
+- 验证：严格校验默认 `fetch` 接收者的回归测试先失败后通过；`npm --prefix web/dashboard test` 共 25 项通过，`npm --prefix web/dashboard run build` 通过且无警告，相关编辑器诊断为零。经 VS Code 转发的 Chromium 可载入 Vite Dashboard；带测试 token 的首次加载进入已登录视图并向 `/admin/*` 发出网络请求，页面未出现 `Illegal invocation` 或未捕获异常。
+- 桌面布局：Quick Start 的 Client、Client profile、API key、Endpoint 与 Load 控件已统一为 `40px` 高和 `14px` 字号；Chromium 桌面视口量测确认四列顶部坐标一致。手机布局不在本次验收范围。
+- 未运行检查：本地 Admin `8001` 未启动，Vite proxy 因而返回 `500`，未验证成功的真实 Admin payload；未执行目标 VM、真实 Copilot、Compose、Redis Cluster、Kind 或完整 `make validate`。本切片不改变后端、数据库 schema、协议、路由或发布身份。
+- 下一最小步骤：将修复纳入新的不可变 Dashboard/Admin 镜像与 release manifest，再在目标环境首次加载 Dashboard；若不创建新 release，则兼容性路线图仍保持关闭。

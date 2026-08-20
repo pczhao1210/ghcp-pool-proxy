@@ -95,7 +95,7 @@ Claude Code 侧可通过 `/model <alias|name>`、启动参数 `claude --model <a
 
 | 路径 | 同协议路径保留 | 明确归一化 |
 | --- | --- | --- |
-| Responses → Responses | 结构化 `instructions`；有序 message/reasoning/function/custom/tool-search 输入输出 item；item/call ID、status、namespace、`previous_response_id`；SSE response/item ID 与 index；completed/incomplete/failed 语义 | model ID、认证/Copilot header、过长 call ID、明确声明的 Codex Responses Lite encrypted-reasoning 降级，以及 provider 不支持 tool 的前置拒绝 |
+| Responses → Responses | 结构化 `instructions`；有序 message/reasoning/function/custom/tool-search 输入输出 item；item/call ID、status、namespace、`previous_response_id`；SSE response/item ID 与 index；completed/incomplete/failed 语义 | model ID、认证/Copilot header、过长 call ID、encrypted-reasoning include 兼容 fallback，以及 provider 不支持 tool 的前置拒绝 |
 | Messages → Messages | 有序 system/message block；text、image、tool use/result、`is_error`、thinking/signature、redacted thinking、cache breakpoint；原生 stop reason、usage 和严格 `message_stop` 完成 | model ID、认证 header、beta 白名单、thinking/tool-choice 冲突处理和不支持的 cache-control 子字段 |
 
 Gateway 会保留并转发 `previous_response_id`，但 Copilot 可能拒绝有状态续接。出现这种情况时，Responses 工具循环应显式发送有序的 `function_call` 与 `function_call_output` input item。
@@ -199,9 +199,9 @@ truncation, include, store, service_tier
 
 `reasoning` 和 `reasoning_effort` 只按原名透传；不会转换为 Anthropic `thinking`。
 
-普通 Copilot 请求包含 `include=reasoning.encrypted_content` 时会在 dispatch 前拒绝。只有 User-Agent 首 token 精确为 `codex_exec/0.147.0`，且已认证、启用的 client profile 名为 `codex-candidate` 时，才授予显式兼容降级；降级只删除这个不支持的 include 值，列表因此为空时才省略 `include`。仅有 Lite header 或 `additional_tools` item 不能获得该授权。
+Copilot Responses 请求包含 `include=reasoning.encrypted_content` 时，无论客户端是否在白名单内，都会走有界兼容 fallback。Provider 只删除这个不支持的 include 值，列表因此为空时才省略 `include`。固定 `codex_exec/0.147.0` 与已认证 `codex-candidate` profile 的组合仍记录为 declared downgrade；其它客户端记录一条结构化 WARN，只包含请求标识、route 和受控的 `provider_include_filtered` reason，同时递增 `applied_compatibility_fallback` 兼容指标。因此白名单用于标记已知客户端合同，不再阻断这条安全降级；其它语义校验保持不变。
 
-Responses Lite 客户端可通过 `X-OpenAI-Internal-Codex-Responses-Lite: true` 标记请求，并把工具放在 `input` 首部的 `additional_tools` developer item 中。Gateway 只保存这个 typed 标记，不保存任意 header map；wire mode 可由该 header、`additional_tools` 或上述固定 Codex User-Agent 识别，但 wire mode 与认证后的降级授权相互独立。目标为上游 Responses 时，嵌套工具在原 item 中重建且标记头继续转发；目标为上游 Chat 时，嵌套工具进入同一兼容 adapter。
+Responses Lite 客户端可通过 `X-OpenAI-Internal-Codex-Responses-Lite: true` 标记请求，并把工具放在 `input` 首部的 `additional_tools` developer item 中。Gateway 只保存这个 typed 标记，不保存任意 header map；wire mode 可由该 header、`additional_tools` 或上述固定 Codex User-Agent 识别，但 wire mode 与 declared-downgrade 分类相互独立。目标为上游 Responses 时，嵌套工具在原 item 中重建且标记头继续转发；目标为上游 Chat 时，嵌套工具进入同一兼容 adapter。
 
 OpenAI Responses 请求中的工具会保留在 canonical tool 记录中，用于诊断和转换元数据。发往 Copilot 上游时，Provider 直接保留 `function`，并对 `custom`、`tool_search`、`namespace` 使用 cc-switch 风格的 adapter：`custom` 包装成带固定 `input` 字符串参数的 function tool，并把原始定义写入 description；`tool_search` 包装成名为 `tool_search` 的 proxy function；`namespace` 展开其中的 function 和 custom 子工具，并把名称扁平化为 `<namespace>___<tool>`。经过严格校验的 `web_search` 只在原生 Responses 路径保留其 typed options；preview、带日期后缀、未知或跨协议的 web-search 类型会明确拒绝，不做猜测性规范化。强制 `tool_choice` 必须能解析到实际投影后的工具，否则在 dispatch 前拒绝；没有有效工具时只会省略中性的控制项。上游返回 tool call 后，adapter 会把转换后的 function 名称还原为 Responses 下游语义：`custom_tool_call` 使用 `response.custom_tool_call_input.*` 事件，`tool_search` 输出 `tool_search_call` item，namespace 子工具恢复原始 tool 名称并带回 `namespace` 字段，原生 `web_search_call` 的 action/lifecycle 则保持 typed Responses 输出。OpenAI Responses remote MCP tool（`type: "mcp"`）不受支持；由于 Gateway 没有 MCP discovery/执行 adapter，请求会在 provider dispatch 前拒绝。Namespace 的 `tools` 与 legacy `children` 集合都会验证；MCP、未知、畸形或其它不可投影 child 会 fail closed，不再被跳过。如果适配后没有有效 tool，会同时省略中性的 `tool_choice` 和 `parallel_tool_calls`。可用 `scripts/probe_stream_mcp.py` 对比 MCP 请求和无工具 baseline 的 SSE 事件形状。
 

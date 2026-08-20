@@ -48,6 +48,61 @@ curl --fail --silent --show-error "$GATEWAY_URL/version"
 
 不得借此手动检查启用 tools、MCP、WebSocket、`compact`、`count_tokens` 或 matrix 中仍保持禁用的其他能力。
 
+### 真实账号未知能力探针
+
+根目录的 `manual_test.sh` 是外置人工工具，不是服务命令。它不调用 Gateway，也不依赖 client profile、pool 路由或 Gateway API key。脚本在运行时临时编译一个 helper，复用 Worker 容器已有的配置、PostgreSQL credential、credential master key、Copilot token 刷新和 Provider 请求实现；退出时删除临时源码与容器内二进制。
+
+脚本严格执行以下顺序：
+
+1. 直接请求 Copilot `/models`，将原始 JSON 写入报告的 `catalog.raw`；
+2. `gpt-5.4`，使用 Responses API；
+3. `gpt-5.6-terra`，使用 Responses API；
+4. `claude-sonnet-4.6`，使用 Anthropic Messages API；
+5. `claude-opus-4.8`，使用 Anthropic Messages API；
+6. `gemini-3.5-flash`，使用 Chat Completions API。
+
+五个生成探针串行执行，每次请求前默认等待 15 秒；`PROBE_INTERVAL` 最低为 10 秒。模型 ID 必须与 `/models` 返回值精确匹配；目录中不存在的目标记录为 `model_not_visible`，不会用相近模型替代，也不会发送生成请求。
+
+前置条件：
+
+- 当前目录是包含 `manual_test.sh`、`go.mod` 和 `internal/` 的源码树；
+- Go、Docker 和 Docker Compose 可用；
+- 待测栈的 Worker 容器正在运行，且已配置真实账号 credential；
+- 已取得待测账号 UUID。脚本只测试该 UUID，不经过 Router 选择账号。
+
+先验证外置 helper 能编译；该命令不连接数据库或 GitHub：
+
+```bash
+./manual_test.sh --check
+```
+
+使用开发 Compose 默认路径执行：
+
+```bash
+./manual_test.sh ACCOUNT_UUID
+```
+
+使用 VM Compose 或自定义报告路径执行：
+
+```bash
+COMPOSE_FILE=deploy/docker-compose.vm.yml \
+	PROBE_INTERVAL=15s \
+	./manual_test.sh ACCOUNT_UUID /tmp/ghcp-direct-capabilities.json
+```
+
+脚本同时向标准输出打印 JSON，并以 `0600` 权限写入报告。退出码含义：`0` 表示所有目录可见目标均通过，`2` 表示至少一个目标不可见或探测失败，其它非零值表示配置、credential、数据库、目录请求或执行环境失败。
+
+重点查看：
+
+- `catalog.raw.data`：Copilot 返回的原始模型 ID、展示名和能力元数据；
+- `probes[].catalog_match`：固定目标是否在目录可见；
+- `probes[].upstream_api`：实际使用的原生协议；
+- `probes[].result`：`supported`、`model_not_visible` 或 `failed`；
+- `probes[].error`：HTTP 状态、Provider 错误类型和诊断细节；
+- `summary`：五项目标的最终计数。
+
+该报告用于提出白名单变更，不直接证明完整客户端兼容。streaming、tools、MCP、thinking、图片、取消、Claude Code `--resume`、Codex encrypted-reasoning fallback 和完整 CLI 合同仍需各自的兼容门禁。
+
 ## P2.4 Compose/VM 迁移运行时手动验收（中文）
 
 这是 P2 的剩余退出门禁。当前仓库的 Go migration integration test、Kubernetes overlay 和本地开发 Compose 不能替代 VM release runtime 检查：后者还验证固定镜像、release manifest、`deploy.sh`、`.env` 生成、DSN 临时文件挂载和宿主机持久化目录。

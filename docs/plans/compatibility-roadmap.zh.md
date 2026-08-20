@@ -2,7 +2,7 @@
 
 > 状态：Phase 7 已完成；仅在新的 release、matrix/schema/build 变化或经批准的新能力出现时创建新的兼容性任务。
 >
-> 最近确认：2026-08-19
+> 最近确认：2026-08-20
 
 ## 事实源
 
@@ -50,5 +50,22 @@
 - 状态：已完成。`AdminAPI` 默认 `fetch` 现在绑定到 `globalThis`，避免经实例字段调用浏览器 `Window.fetch` 时抛出 `Illegal invocation`；该问题由 schema 19 页面首次请求暴露，不是 schema `18 -> 19` migration 的允许错误或重试策略。
 - 验证：严格校验默认 `fetch` 接收者的回归测试先失败后通过；`npm --prefix web/dashboard test` 共 25 项通过，`npm --prefix web/dashboard run build` 通过且无警告，相关编辑器诊断为零。经 VS Code 转发的 Chromium 可载入 Vite Dashboard；带测试 token 的首次加载进入已登录视图并向 `/admin/*` 发出网络请求，页面未出现 `Illegal invocation` 或未捕获异常。
 - 桌面布局：Quick Start 的 Client、Client profile、API key、Endpoint 与 Load 控件已统一为 `40px` 高和 `14px` 字号；Chromium 桌面视口量测确认四列顶部坐标一致。手机布局不在本次验收范围。
+- Dashboard 收口：已删除 Capabilities 与 Compatibility 两个导航页，以及对应的前端状态、轮询、刷新请求、DTO、渲染组件和专属样式。Gateway 的 `require_fresh` 路由快照、Worker capability-sync、静态兼容矩阵与 Admin API 保留为后端运行/发布合同，不再由 Dashboard 暴露。
 - 未运行检查：本地 Admin `8001` 未启动，Vite proxy 因而返回 `500`，未验证成功的真实 Admin payload；未执行目标 VM、真实 Copilot、Compose、Redis Cluster、Kind 或完整 `make validate`。本切片不改变后端、数据库 schema、协议、路由或发布身份。
 - 下一最小步骤：将修复纳入新的不可变 Dashboard/Admin 镜像与 release manifest，再在目标环境首次加载 Dashboard；若不创建新 release，则兼容性路线图仍保持关闭。
+
+## 2026-08-20 Responses 非白名单兼容 fallback
+
+- 状态：实现与包级回归完成。原生 Responses 请求中的 `reasoning.encrypted_content` 不再因客户端不在固定 Codex 白名单内而拒绝；Gateway 允许这条已知安全降级，由 Copilot Provider 在序列化前过滤该 include 值。白名单命中仍记录 `ignored_by_declared_downgrade`，其它客户端记录 WARN 和 `applied_compatibility_fallback/provider_include_filtered` 指标。
+- 性能边界：请求热路径只增加常数级 include 检查；仅命中 fallback 时增加一条结构化日志和一次计数，不增加网络调用、重试、探测、存储读写或请求内容持久化。
+- 验证：新增普通 profile 的红灯回归，先复现 `400 provider_include_not_supported`，实现后确认 `200`、一次 provider dispatch、一次 fallback 指标；普通 UA、未认证 Codex UA、伪装固定 UA、仅 Lite header 和 `additional_tools` 五种形态均通过；固定 Codex declared downgrade 与其它 provider 不支持语义的拒绝用例继续通过。`go test ./internal/compatibility ./internal/protocol ./internal/provider/copilot ./internal/api/gateway -count=1` 通过。
+- 未运行检查：`make validate`、真实 Copilot、Compose、Redis Cluster、Kind、目标 VM 与 release 门禁尚未执行。
+- 下一最小步骤：在隔离 pool 的真实账号上运行人工探针；本切片停止扩展，release 时再执行聚合门禁。
+
+## 2026-08-20 真实账号可选人工探针
+
+- 状态：Phase 7 后维护验证工具已收敛为仓库根目录的外置 `manual_test.sh`，不新增 `cmd/*` 命令、不修改服务入口、不进入 Dockerfile 或发布镜像。脚本运行时在仓库内生成一次性 Go helper，复用 Worker 的配置、PostgreSQL credential、`DBTokenSource` 和 Copilot Provider，执行后删除临时源码与容器内二进制；Gateway 不参与探测。
+- 探测边界：先直接读取 Copilot `/models` 原始 JSON，再严格按 `GPT 5.4 / responses`、`GPT 5.6 Terra / responses`、`Claude Sonnet 4.6 / anthropic_messages`、`Claude Opus 4.8 / anthropic_messages`、`Gemini 3.5 Flash / chat_completions` 顺序执行目录可见目标。生成请求串行执行，默认每次请求前等待 15 秒且不允许低于 10 秒；目录不可见项明确记录 `model_not_visible`。
+- 验证：`bash -n manual_test.sh` 与 `./manual_test.sh --check` 通过，临时目录在退出后清理；恢复后的 `go test ./internal/provider/copilot -run 'TestFetchCopilotModels' -count=1` 通过；工作树不存在 `cmd/manualtest` 或 `FetchCopilotModelsDocument` 残留引用。
+- 未运行检查：尚未使用真实 Copilot 账号执行五项探测；未运行 `make validate`、release、Compose、Redis Cluster 或 Kubernetes 门禁。人工报告不能直接修改静态白名单，也不能替代 fixed-CLI report、release manifest 或 schema 2 attestation。
+- 下一最小步骤：用户在测试环境对单个明确账号运行 `manual_test.sh`，回传生成的 JSON 报告；根据原始模型 ID、模型元数据和五项协议结果提出最小白名单变更，再运行对应 compatibility gate。

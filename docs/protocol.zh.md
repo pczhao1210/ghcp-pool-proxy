@@ -247,7 +247,7 @@ OpenAI Responses 请求中的工具会保留在 canonical tool 记录中，用�
 temperature, top_p, top_k, stop, thinking, context_management, metadata
 ```
 
-其中 `stop_sequences` 会重命名为 `stop`。`thinking` 和 `context_management` 只在原生 Messages 中按原名透传，不会转换为 OpenAI 等价字段。Anthropic `metadata` 仍是上游 body 参数；绑定池也会读取 `metadata.user_id` / `metadata.user` 作为 `user_id`，读取 `metadata.session_id` / `metadata.session` 作为 `session_id`。
+其中 `stop_sequences` 会重命名为 `stop`。`thinking` 和 `context_management` 只在原生 Messages 中按原名透传，不会转换为 OpenAI 等价字段。原生 Messages 流式响应会把最终 `message_delta` 上 object 类型的 `context_management` 保留在相同位置；非 object 值或其它事件上的同名字段仍视为上游协议错误。Anthropic `metadata` 仍是上游 body 参数；绑定池也会读取 `metadata.user_id` / `metadata.user` 作为 `user_id`，读取 `metadata.session_id` / `metadata.session` 作为 `session_id`。
 
 原生保真范围包括 `text`、`image`、`tool_use`、`tool_result`、tool-result `is_error`、带 signature 的 `thinking`、`redacted_thinking`、`cache_control` 和 `context_management`。跨协议只投影普通 tool use/result、图片和文本；原生 block metadata 会被拒绝。
 

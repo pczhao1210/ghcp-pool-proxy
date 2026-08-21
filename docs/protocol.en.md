@@ -247,7 +247,7 @@ Passed through to `Params`:
 temperature, top_p, top_k, stop, thinking, context_management, metadata
 ```
 
-`stop_sequences` is renamed to `stop`. `thinking` and `context_management` are passed through by name only on native Messages; neither is converted to an OpenAI equivalent. Anthropic `metadata` remains an upstream body parameter; binding pools may also read `metadata.user_id` / `metadata.user` as `user_id` and `metadata.session_id` / `metadata.session` as `session_id`.
+`stop_sequences` is renamed to `stop`. `thinking` and `context_management` are passed through by name only on native Messages; neither is converted to an OpenAI equivalent. For streaming native Messages responses, an object-valued `context_management` field on the final `message_delta` event is preserved at the same location; a non-object value or the field on another event remains an upstream protocol error. Anthropic `metadata` remains an upstream body parameter; binding pools may also read `metadata.user_id` / `metadata.user` as `user_id` and `metadata.session_id` / `metadata.session` as `session_id`.
 
 Native preservation includes `text`, `image`, `tool_use`, `tool_result`, tool-result `is_error`, `thinking` with signature, `redacted_thinking`, `cache_control`, and `context_management`. Cross-protocol conversion projects only ordinary tool use/result, images, and text; native-only block metadata is rejected.
 

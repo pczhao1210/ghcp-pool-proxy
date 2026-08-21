@@ -207,7 +207,7 @@ response_format, parallel_tool_calls, stream_options,
 truncation, include, store, service_tier, context_management
 ```
 
-The Copilot Responses adapter omits `temperature`, which the upstream endpoint does not accept. The other listed parameters are written to the upstream body with the same name.
+The Copilot Responses adapter omits `temperature` and `top_p`, which the upstream endpoint does not accept. The other listed parameters are written to the upstream body with the same name.
 
 `reasoning` and `reasoning_effort` are passed through by name only; they are not converted to Anthropic `thinking`.
 

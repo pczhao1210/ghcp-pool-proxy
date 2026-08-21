@@ -207,7 +207,7 @@ response_format, parallel_tool_calls, stream_options,
 truncation, include, store, service_tier, context_management
 ```
 
-Copilot Responses adapter 会丢弃上游端点不接受的 `temperature`；列表中的其它参数仍按原名写入上游请求 body。
+Copilot Responses adapter 会丢弃上游端点不接受的 `temperature` 和 `top_p`；列表中的其它参数仍按原名写入上游请求 body。
 
 `reasoning` 和 `reasoning_effort` 只按原名透传；不会转换为 Anthropic `thinking`。
 

@@ -47,12 +47,12 @@
 
 ## 2026-08-21 Cherry Studio Messages 502 调查
 
-- 状态：Phase 7 后维护诊断已完成，未复现 Messages 协议缺陷。Sonnet 4.6 目录声明 `/v1/messages`，同一隔离账号的原生 Messages text、`max_tokens=128000` 非流式、`max_tokens=128000` 流式，以及 `tools + tool_choice:auto + max_tokens=128000` 流式 tool-use 均真实通过；Gemini 3.5 Flash 的 Chat Completions `max_tokens=128000` 流式请求也通过。因此 `128000` 必然超过 64K output limit 并被拒绝的假设已被证伪，不实施 catalog clamp。已有回归继续覆盖 Cherry `eager_input_streaming` 丢弃、cache-control 位置的 `"[Circular]"` 清理、合法 ephemeral cache-control、tool-use/tool-result 与多工具 SSE。
+- 状态：Phase 7 后维护修复已实现。Messages -> Chat 的 Cherry Studio 请求已稳定复现 `$.system[0]: system_block_not_representable`：方向级 validator 错把纯文本 system block 的合法 `cache_control` 当作不可表达语义；Chat/Responses provider body 实际只使用已扁平化的 `System`。现在两个转换方向允许该提示缓存元数据作为既有跨协议损失被丢弃，非文本 system block 仍 fail closed；原生 Messages 保持 typed cache-control 透传。此前 Sonnet 4.6 原生 Messages text、`max_tokens=128000` 非流式/流式和 tool-use 真实探针均通过，仍未复现附件中的原生 502，不实施 catalog clamp。
 - 诊断改进：外置 `manual_test.sh` 修复 Go bool flag 的调用形式，`CATALOG_ONLY=false` 不再被误解析为 true；新增 `PROBE_MAX_TOKENS` 与 Anthropic `streaming_tool` 场景。Gateway 的 provider dispatch 日志新增 request body 字节数、message/system/tool 数和 `max_tokens`；上游 HTTP 失败日志仅在 Provider 已生成安全 metadata 时保留 status、error type、response body length/hash，不记录请求、响应正文或凭据，客户端仍只收到通用 `model provider error`。
-- 性能边界：请求热路径只增加固定字段和 slice 长度读取，不序列化 tool schema，不增加网络调用、重试、探测或存储访问。
-- 验证：`bash -n manual_test.sh` 与 `./manual_test.sh --check` 通过；四个 Sonnet 4.6 direct probe 分别约 `1.6s-2.4s` 且均为 supported，Gemini 3.5 Flash 的 128K streaming probe 约 `2.46s` 且为 supported；Gateway 安全日志、Anthropic MCP tool payload 与多工具 streaming 聚焦测试通过。
+- 性能边界：修复只删除一次跨协议 validator 的 metadata 拒绝分支，不增加序列化、网络调用、重试、探测或存储访问；既有 dispatch 诊断仍只读取固定字段和 slice 长度。
+- 验证：新增协议红灯先精确复现 Messages -> Chat 400，修复后 Chat/Messages/Responses 三目标均通过；完整 Cherry 风格流式 HTTP 回归覆盖 system `ephemeral`、message `"[Circular]"`、tool cache-control、`eager_input_streaming`、`max_tokens=128000`，三个目标子测试均到达正确 Provider API 并正常结束。`go test ./internal/protocol ./internal/api/gateway ./internal/provider/copilot -count=1` 通过，改动文件编辑器诊断为零；此前四个 Sonnet 4.6 direct probe 与 Gemini 3.5 Flash 128K streaming probe 仍为真实支持证据。
 - 未运行检查：出现 502 的目标环境账号不在本地 PostgreSQL，未能用同一凭据重放附件中的大型 MCP 请求；尚未获得该失败的上游 HTTP status/body hash，也未运行完整 `make validate`、release、Redis Cluster、Kubernetes 或目标 VM 门禁。
-- 下一最小步骤：发布诊断改进后只重试一次失败请求，收集同一 trace 的 `gateway error mapped` 与 dispatch 结构字段；若是 400 且 body/tool 数显著偏大，再冻结该请求形状做工具数量/schema 规模二分；若是 403/404，则检查被选账号的模型/端点 entitlement。取得该证据前不扩大 parser 或修改模型 limits。
+- 下一最小步骤：发布新 Gateway，随后分别重放三个模型请求。若原生 Messages 仍为 502，只收集同一 trace 的 `gateway error mapped` 与 dispatch 结构字段：400 且 body/tool 数显著偏大时冻结请求形状做工具数量/schema 规模二分，403/404 时检查所选账号的模型/端点 entitlement。取得该证据前不扩大 parser 或修改模型 limits。
 
 ## 2026-08-20 Dashboard 首次加载回归
 

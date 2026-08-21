@@ -29,7 +29,7 @@ flowchart LR
   U --> O["client protocol response"]
 ```
 
-客户端 header 不会原样透传到 Copilot。Provider 会重新生成上游 header，包括账号 bearer token、editor/user-agent 和 GitHub API version。`X-GHCP-*`、session、workspace 等字段属于路由输入，见 [routing.zh.md](routing.zh.md)。原生 Messages 会读取 typed `Anthropic-Version` 和 `Anthropic-Beta`：白名单 beta 原样转发，未知 beta 被丢弃，同时结构化告警只记录数量和位置，不记录原值。任意客户端 header 仍不会跨过 provider 边界；过滤可选 beta 也不会放宽 canonical 请求或工具结构校验。
+客户端 header 不会原样透传到 Copilot。Provider 会重新生成上游 header，包括账号 bearer token、editor/user-agent 和 GitHub API version。`X-GHCP-*`、session、workspace 等字段属于路由输入，见 [routing.zh.md](routing.zh.md)。原生 Messages 会读取 typed `Anthropic-Version` 和 `Anthropic-Beta`：白名单 beta 原样转发，未知 beta 被丢弃并并入该请求的采样 dropped-field 诊断，不记录 token 原值。任意客户端 header 仍不会跨过 provider 边界；过滤可选 beta 也不会放宽 canonical 请求或工具结构校验。
 
 ## 上游 API 选择
 
@@ -123,7 +123,7 @@ Gateway 会保留并转发 `previous_response_id`，但 Copilot 可能拒绝有�
 
 ## 跨协议语义门禁
 
-模型目录解析完成后，所有非原生路径必须匹配下面六个显式转换策略之一。公共 text、image、function tool、usage 和可映射终态继续投影。普通客户端以成功响应优先：无法映射到目标协议的已知顶层参数会在语义校验前删除，并记录仅含 route 与参数名的结构化日志；未知顶层参数由 JSON parser 忽略。无法安全投影的内容、角色、item/block、tool lifecycle、identity 和终态语义仍会拒绝。
+模型目录解析完成后，所有非原生路径必须匹配下面六个显式转换策略之一。方向策略与 Copilot Anthropic beta allowlist 统一由 `internal/protocol/request_policy.go` 管理；各 parser 的字段列表仍作为对应 envelope 的 wire schema 留在解析器内。公共 text、image、function tool、usage 和可映射终态继续投影。普通客户端以成功响应优先：已识别请求 envelope 中的未知可选字段，以及无法映射到目标协议的已知参数，会在 provider dispatch 前删除。JSON Schema、tool input/output、metadata 等开放业务对象不做递归过滤。无法安全投影的 content discriminator、role、必填字段与类型、tool lifecycle、identity 和终态语义仍会拒绝。
 
 | 方向 | 明确兼容的投影 | Fail-closed 示例 | 明确允许的 shape 归一化 |
 | --- | --- | --- | --- |
@@ -136,7 +136,7 @@ Gateway 会保留并转发 `previous_response_id`，但 Copilot 可能拒绝有�
 
 Request validator 在路由、预算 reservation 和 provider dispatch 前执行，不兼容请求返回 `400 invalid_request_error`。非流式 response validator 在 typed 上游解析后、客户端序列化前执行；不兼容时返回 `502`，且不记录 durable success。Stream validator 在每个 canonical event 进入下游 SSE writer 前执行；不兼容时写入对应入口的 stream error shape，并把 provider attempt 保留为 `outcome_unknown`。
 
-Parser 和语义门禁错误会包含转换方向、JSON path 和稳定 reason。未知顶层请求字段会被忽略，已知但目标不可表达的参数会按固定表删除；typed Responses item/content 字段或类型、typed Anthropic block 字段或类型仍会在 canonical 边界被拒绝。
+Parser 和语义门禁错误会包含转换方向、JSON path 和稳定 reason。未知可选 envelope 字段会原地删除，并把路径聚合到不参与序列化的 canonical request，避免经 raw map 到达上游；未知 union discriminator、role、缺失必填字段和核心字段类型错误仍会拒绝。仅当至少丢弃一个字段或 beta token 时，Gateway 才复用普通成功 access log 的 `logging.success_sample_rate` / `GATEWAY_SUCCESS_LOG_SAMPLE_RATE`，并按同一个服务端 request ID 得出相同的稳定采样决定。命中的请求只输出一条 `protocol_request_status` WARN，状态为 `normalized`，包含 source、target、route、聚合计数和最多 16 个去重后的路径，每条最长 160 rune；敏感路径片段替换为遮蔽标记，且不记录字段值、beta token、请求正文或凭据。没有丢弃项的请求不会进入该采样路径。
 
 ## 推理参数策略
 
@@ -176,7 +176,7 @@ logprobs, top_logprobs, service_tier, modalities, audio
 
 只有客户端使用 `max_completion_tokens` 且没有同时发送 `max_tokens` 时才保留该字段，以维持原生 Chat 的 o-series 等严格行为。跨协议 builder 使用 canonical `MaxTokens`，并确定性改名为 Responses `max_output_tokens` 或 Messages `max_tokens`。`reasoning_effort` 只按原名透传，不会转换为 Responses `reasoning` 或 Anthropic `thinking`。
 
-拒绝或归一化：未知顶层 body 字段会被忽略；`metadata` 里除 `session_id`、`conversation_id` 外的键不会进入路由 metadata；图片 URL 不是 `http`、`https` 或 `data:image/*;base64,...` 时拒绝请求；图片 part 总数超过 20 或 data URL 超过 20 MiB 时拒绝请求。
+拒绝或归一化：顶层、message、content part、image URL、tool call、tool、tool choice 与 cache-control envelope 中的未知可选字段会删除并按上述方式采样；未知 discriminator 和非法核心字段仍会拒绝。`metadata` 里除 `session_id`、`conversation_id` 外的键不会进入路由 metadata；图片 URL 不是 `http`、`https` 或 `data:image/*;base64,...` 时拒绝请求；图片 part 总数超过 20 或 data URL 超过 20 MiB 时拒绝请求。
 
 ### OpenAI Responses API
 
@@ -211,7 +211,7 @@ Copilot Responses adapter 会丢弃上游端点不接受的 `temperature` 和 `t
 
 `reasoning` 和 `reasoning_effort` 只按原名透传；不会转换为 Anthropic `thinking`。
 
-Responses `context_management` 只接受 `{ "type": "compaction", "compact_threshold": <正整数> }` 组成的数组。Gateway 仅在 Responses -> Responses 路径按原名保留该字段；容器错误、未知 entry type、字段缺失、未知嵌套字段以及非正数或非整数阈值都会在 provider dispatch 前拒绝。跨协议路径会丢弃该参数，因为目标协议不能保留 Responses 服务端 compaction 语义。
+Responses `context_management` 只接受 `{ "type": "compaction", "compact_threshold": <正整数> }` 组成的数组。Gateway 仅在 Responses -> Responses 路径按原名保留该字段；未知可选 entry 字段会删除，容器错误、未知 entry type、字段缺失以及非正数或非整数阈值仍会在 provider dispatch 前拒绝。跨协议路径会丢弃该参数，因为目标协议不能保留 Responses 服务端 compaction 语义。
 
 Copilot Responses 请求包含 `include=reasoning.encrypted_content` 时，无论客户端是否在白名单内，都会走有界兼容 fallback。Provider 只删除这个不支持的 include 值，列表因此为空时才省略 `include`。`codex_exec/<major>.<minor>.<patch>` 家族 User-Agent 与已认证 `codex-candidate` profile 的组合仍记录为 declared downgrade；运行时白名单不再钉死一个 Codex 版本。其它客户端记录一条结构化 WARN，只包含请求标识、route 和受控的 `provider_include_filtered` reason，同时递增 `applied_compatibility_fallback` 兼容指标。精确 CLI 版本继续作为发布证据身份，不进入请求路由键；其它语义校验保持不变。
 
@@ -223,7 +223,7 @@ OpenAI Responses 请求中的工具会保留在 canonical tool 记录中，用�
 
 转换：上游同为 Responses 时，会按原顺序重建 typed message、reasoning、function/custom/tool-search call/output item，并保留 identity/status；不支持的 custom/tool-search/namespace tool 仍通过兼容 adapter 包装成 function。跨协议时，顶层 text/image item 会合并成 user message，function call 转为 assistant tool call，output 转为 tool message；其它 item 家族由语义门禁拒绝。
 
-拒绝或归一化：未知顶层字段会被忽略；未知 item/content-part 字段或类型仍会拒绝；`metadata` 除 `session_id`、`conversation_id` 外不会进入路由 metadata；图片校验规则与 Chat Completions 相同。
+拒绝或归一化：已识别 item、content part、image URL、tool、tool choice、context-management 和 cache-control envelope 中的未知可选字段会删除；未知 item/content type 与非法核心字段仍会拒绝。`metadata` 除 `session_id`、`conversation_id` 外不会进入路由 metadata；图片校验规则与 Chat Completions 相同。
 
 ### Anthropic Messages
 
@@ -244,14 +244,14 @@ OpenAI Responses 请求中的工具会保留在 canonical tool 记录中，用�
 透传到 `Params`：
 
 ```text
-temperature, top_p, top_k, stop, thinking, context_management, metadata
+temperature, top_p, top_k, stop, thinking, output_config, context_management, metadata
 ```
 
-其中 `stop_sequences` 会重命名为 `stop`。`thinking` 和 `context_management` 只在原生 Messages 中按原名透传，不会转换为 OpenAI 等价字段。原生 Messages 流式响应会把最终 `message_delta` 上 object 类型的 `context_management` 保留在相同位置；非 object 值或其它事件上的同名字段仍视为上游协议错误。Anthropic `metadata` 仍是上游 body 参数；绑定池也会读取 `metadata.user_id` / `metadata.user` 作为 `user_id`，读取 `metadata.session_id` / `metadata.session` 作为 `session_id`。
+其中 `stop_sequences` 会重命名为 `stop`。`thinking`、`output_config` 和 `context_management` 只在原生 Messages 中按原名透传，转换到 Chat 或 Responses 时删除，不会转换为 OpenAI 等价字段。原生 Messages 流式响应会把最终 `message_delta` 上 object 类型的 `context_management` 保留在相同位置；非 object 值或其它事件上的同名字段仍视为上游协议错误。Anthropic `metadata` 仍是上游 body 参数；绑定池也会读取 `metadata.user_id` / `metadata.user` 作为 `user_id`，读取 `metadata.session_id` / `metadata.session` 作为 `session_id`。
 
 原生保真范围包括 `text`、`image`、`tool_use`、`tool_result`、tool-result `is_error`、带 signature 的 `thinking`、`redacted_thinking`、`cache_control` 和 `context_management`。跨协议只投影普通 tool use/result、图片和文本；原生 block metadata 会被拒绝。
 
-拒绝或归一化：未知顶层字段会被忽略；未知 block/tool 字段或类型仍会拒绝。Cherry Studio 生成的布尔 `tools[].eager_input_streaming` 会被丢弃，非布尔值仍返回带字段路径的 `400`；只在 `cache_control` 位置出现的 `"[Circular]"` 序列化占位符会被清除，不影响正文或 tool schema 中的同名字符串。图片校验规则与 Chat Completions 相同。原生 Messages 不转发任意 header 或 raw JSON 字段。
+拒绝或归一化：已识别 message、block、image source、function tool、tool choice、thinking、output config 与 cache-control envelope 中的未知可选字段会删除；未知 block/tool-choice/image-source discriminator 与非法核心字段仍会拒绝。Cherry Studio 生成的布尔 `tools[].eager_input_streaming` 会被丢弃，非布尔值仍返回带字段路径的 `400`；只在 `cache_control` 位置出现的 `"[Circular]"` 序列化占位符会被清除，不影响正文或 tool schema 中的同名字符串。图片校验规则与 Chat Completions 相同。原生 Messages 不转发任意 header 或 raw JSON 字段。
 
 ## 归一化层字段
 
@@ -356,7 +356,7 @@ python3 scripts/probe_stream_mcp.py --models gpt-5.5 gemini-3.5-flash claude-son
 
 ## 丢失与失真注意事项
 
-- 未知顶层字段会被忽略，跨协议固定表中的不可表达参数会被删除；typed item/block 字段或类型仍会带方向和 JSON path 被拒绝，不会进入 `Params` 或到达 Copilot。
+- 已识别请求 envelope 中的未知可选字段和跨协议固定表中的不可表达参数会被删除；未知 discriminator、role、必填字段和非法核心类型仍会带方向与 JSON path 被拒绝，丢弃字段不会进入 `Params` 或到达 Copilot。
 - 客户端 header 默认不透传；认证、sticky、account-binding 等输入只影响 Gateway 自身逻辑。
 - `user`、`session`、`metadata.session_id`、`metadata.conversation_id` 不会成为上游 `user`。
 - `user_binding` 使用 OpenAI Chat/Responses 的 `user`、Anthropic `metadata.user_id` / `metadata.user` 或 `X-GHCP-User` 作为 `user_id`；`session_binding` 使用 request/metadata session 字段或 session header 作为 `session_id`。

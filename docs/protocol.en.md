@@ -29,7 +29,7 @@ flowchart LR
   U --> O["client protocol response"]
 ```
 
-Client headers are not forwarded verbatim to Copilot. The provider generates upstream headers itself, including the account bearer token, editor/user-agent metadata, and GitHub API version. `X-GHCP-*`, session, and workspace headers are routing inputs; see [routing.en.md](routing.en.md). Native Messages reads typed `Anthropic-Version` and `Anthropic-Beta` values. Allowlisted beta tokens are forwarded; unknown beta tokens are dropped while a structured warning records only their count and positions, not their values. Arbitrary client headers never cross the provider boundary, and filtering an optional beta does not relax canonical request or tool validation.
+Client headers are not forwarded verbatim to Copilot. The provider generates upstream headers itself, including the account bearer token, editor/user-agent metadata, and GitHub API version. `X-GHCP-*`, session, and workspace headers are routing inputs; see [routing.en.md](routing.en.md). Native Messages reads typed `Anthropic-Version` and `Anthropic-Beta` values. Allowlisted beta tokens are forwarded; unknown beta tokens join the request's sampled dropped-field diagnostic without recording token values. Arbitrary client headers never cross the provider boundary, and filtering an optional beta does not relax canonical request or tool validation.
 
 ## Upstream API Selection
 
@@ -123,7 +123,7 @@ Changing a model catalog override back to `chat_completions` rolls native Messag
 
 ## Cross-Protocol Semantic Gates
 
-After model-catalog resolution, every non-native path must match one of the six explicit conversion policies below. Common text, image, function-tool, usage, and supported terminal semantics remain projectable. Ordinary clients prioritize a successful response: known top-level parameters that the target cannot represent are removed before semantic validation and logged with only the route and parameter names; unknown top-level parameters are ignored by the JSON parser. Content, roles, items/blocks, tool lifecycle, identity, and terminal semantics that cannot be projected safely remain fail-closed.
+After model-catalog resolution, every non-native path must match one of the six explicit conversion policies below. The direction policies and Copilot Anthropic beta allowlist are owned together by `internal/protocol/request_policy.go`; parser-local field lists remain the wire schemas for their respective envelopes. Common text, image, function-tool, usage, and supported terminal semantics remain projectable. Ordinary clients prioritize a successful response: unknown optional fields in recognized request envelopes and known parameters that the target cannot represent are removed before provider dispatch. Open business objects such as JSON Schema, tool input/output, and metadata are not recursively filtered. Content discriminators, roles, required fields and types, tool lifecycle, identity, and terminal semantics that cannot be projected safely remain fail-closed.
 
 | Direction | Declared compatible projection | Fail-closed examples | Declared shape normalization |
 | --- | --- | --- | --- |
@@ -136,7 +136,7 @@ After model-catalog resolution, every non-native path must match one of the six 
 
 The request validator runs before routing, budget reservation, or provider dispatch and returns `400 invalid_request_error`. The non-streaming response validator runs after typed upstream parsing but before client serialization; an incompatibility returns `502` and does not record durable success. The streaming validator runs before each canonical event reaches the downstream SSE writer; an incompatibility emits the endpoint's stream error shape and leaves the provider attempt as `outcome_unknown`.
 
-Parser errors and semantic-gate errors include the conversion direction, JSON path, and stable reason. Unknown top-level request fields are ignored and known target-inexpressible parameters are removed by a fixed table; typed Responses item/content fields or types and typed Anthropic block fields or types remain rejected at the canonical boundary.
+Parser errors and semantic-gate errors include the conversion direction, JSON path, and stable reason. Unknown optional envelope fields are removed in place and accumulated as paths on the non-serialized canonical request, so they cannot leak through raw maps. Unknown union discriminators, roles, missing required fields, and invalid core types remain rejected. When at least one field or beta token is dropped, the gateway uses the normal `logging.success_sample_rate` / `GATEWAY_SUCCESS_LOG_SAMPLE_RATE` and the same server-request-ID sampling decision as the success access log. A selected request emits one `protocol_request_status` warning with status `normalized`, source, target, route, aggregate counts, and at most 16 deduplicated paths of at most 160 runes. Sensitive path components are replaced by a redaction marker; field values, beta tokens, request bodies, and credentials are never logged. Requests with no drops never enter this sampling path.
 
 ## Reasoning Parameter Policy
 
@@ -176,7 +176,7 @@ logprobs, top_logprobs, service_tier, modalities, audio
 
 `max_completion_tokens` is retained only when the client used it and did not also send `max_tokens`; this preserves stricter o-series behavior on native Chat. Cross-protocol builders use canonical `MaxTokens` and rename it deterministically to Responses `max_output_tokens` or Messages `max_tokens`. `reasoning_effort` is passed through by name only and is not converted to Responses `reasoning` or Anthropic `thinking`.
 
-Rejected or normalized: unknown top-level body fields are ignored; `metadata` keys other than `session_id` and `conversation_id` are omitted from routing metadata; image URLs are rejected unless they are `http`, `https`, or `data:image/*;base64,...`; requests are rejected when they contain more than 20 image parts or an image data URL larger than 20 MiB.
+Rejected or normalized: unknown optional fields in the top-level, message, content-part, image-URL, tool-call, tool, tool-choice, and cache-control envelopes are removed and sampled as described above; unknown discriminators and invalid core fields remain rejected. `metadata` keys other than `session_id` and `conversation_id` are omitted from routing metadata; image URLs are rejected unless they are `http`, `https`, or `data:image/*;base64,...`; requests are rejected when they contain more than 20 image parts or an image data URL larger than 20 MiB.
 
 ### OpenAI Responses API
 
@@ -211,7 +211,7 @@ The Copilot Responses adapter omits `temperature` and `top_p`, which the upstrea
 
 `reasoning` and `reasoning_effort` are passed through by name only; they are not converted to Anthropic `thinking`.
 
-Responses `context_management` accepts only an array of typed compaction entries shaped as `{ "type": "compaction", "compact_threshold": <positive integer> }`. The gateway preserves this field by name only on Responses-to-Responses routes. A wrong container, unknown entry type, missing field, unknown nested field, or non-positive/non-integer threshold is rejected before provider dispatch; cross-protocol routes discard the parameter because they cannot preserve server-managed Responses compaction semantics.
+Responses `context_management` accepts only an array of typed compaction entries shaped as `{ "type": "compaction", "compact_threshold": <positive integer> }`. The gateway preserves this field by name only on Responses-to-Responses routes. Unknown optional entry fields are removed; a wrong container, unknown entry type, missing field, or non-positive/non-integer threshold is rejected before provider dispatch. Cross-protocol routes discard the parameter because they cannot preserve server-managed Responses compaction semantics.
 
 Copilot Responses requests containing `include=reasoning.encrypted_content` use a bounded compatibility fallback regardless of client allowlisting. The provider removes only this unsupported include value; if the list then becomes empty, `include` is omitted. A `codex_exec/<major>.<minor>.<patch>` family User-Agent plus authenticated `codex-candidate` profile retains the declared-downgrade observation; the runtime allowlist does not pin one Codex version. All other clients receive a structured warning containing only request identity, route, and the controlled `provider_include_filtered` reason, plus an `applied_compatibility_fallback` compatibility metric. Exact CLI versions remain release-evidence identities, not request-routing keys. Other semantic validation remains unchanged.
 
@@ -223,7 +223,7 @@ Immediately before serialization, the final upstream body is checked recursively
 
 Conversions: when the upstream is also Responses, typed message, reasoning, function/custom/tool-search call and output items are rebuilt in their original order with identity/status fields. The compatibility adapter wraps unsupported custom/tool-search/namespace tools as functions. For cross-protocol use, direct `input_text`, `input_image`, `text`, and `image_url` items are grouped into a user message; function calls become assistant tool calls and outputs become tool messages. Other item families are rejected by the semantic gate.
 
-Rejected or normalized: unknown top-level fields are ignored; unknown item/content-part fields or types remain rejected; `metadata` keys other than `session_id` and `conversation_id` are omitted from routing metadata; image validation is the same as Chat Completions.
+Rejected or normalized: unknown optional fields in recognized item, content-part, image-URL, tool, tool-choice, context-management, and cache-control envelopes are removed; unknown item/content types and invalid core fields remain rejected. `metadata` keys other than `session_id` and `conversation_id` are omitted from routing metadata; image validation is the same as Chat Completions.
 
 ### Anthropic Messages
 
@@ -244,14 +244,14 @@ Retained and normalized:
 Passed through to `Params`:
 
 ```text
-temperature, top_p, top_k, stop, thinking, context_management, metadata
+temperature, top_p, top_k, stop, thinking, output_config, context_management, metadata
 ```
 
-`stop_sequences` is renamed to `stop`. `thinking` and `context_management` are passed through by name only on native Messages; neither is converted to an OpenAI equivalent. For streaming native Messages responses, an object-valued `context_management` field on the final `message_delta` event is preserved at the same location; a non-object value or the field on another event remains an upstream protocol error. Anthropic `metadata` remains an upstream body parameter; binding pools may also read `metadata.user_id` / `metadata.user` as `user_id` and `metadata.session_id` / `metadata.session` as `session_id`.
+`stop_sequences` is renamed to `stop`. `thinking`, `output_config`, and `context_management` are passed through by name only on native Messages and are removed when converting to Chat or Responses; they are not converted to OpenAI equivalents. For streaming native Messages responses, an object-valued `context_management` field on the final `message_delta` event is preserved at the same location; a non-object value or the field on another event remains an upstream protocol error. Anthropic `metadata` remains an upstream body parameter; binding pools may also read `metadata.user_id` / `metadata.user` as `user_id` and `metadata.session_id` / `metadata.session` as `session_id`.
 
 Native preservation includes `text`, `image`, `tool_use`, `tool_result`, tool-result `is_error`, `thinking` with signature, `redacted_thinking`, `cache_control`, and `context_management`. Cross-protocol conversion projects only ordinary tool use/result, images, and text; native-only block metadata is rejected.
 
-Rejected or normalized: unknown top-level fields are ignored; unknown block/tool fields or types remain rejected. A boolean Cherry Studio `tools[].eager_input_streaming` hint is discarded, while a non-boolean value still returns a path-specific `400`. The `"[Circular]"` serialization placeholder is removed only in `cache_control` positions and does not affect the same string in message text or tool schemas. Image validation is the same as Chat Completions. Native Messages does not forward arbitrary headers or raw JSON fields.
+Rejected or normalized: unknown optional fields in recognized message, block, image-source, function-tool, tool-choice, thinking, output-config, and cache-control envelopes are removed; unknown block/tool-choice/image-source discriminators and invalid core fields remain rejected. A boolean Cherry Studio `tools[].eager_input_streaming` hint is discarded, while a non-boolean value still returns a path-specific `400`. The `"[Circular]"` serialization placeholder is removed only in `cache_control` positions and does not affect the same string in message text or tool schemas. Image validation is the same as Chat Completions. Native Messages does not forward arbitrary headers or raw JSON fields.
 
 ## Canonical Layer Fields
 
@@ -356,7 +356,7 @@ python3 scripts/probe_stream_mcp.py --models gpt-5.5 gemini-3.5-flash claude-son
 
 ## Loss And Distortion Notes
 
-- Unknown top-level fields are ignored and target-inexpressible parameters in the fixed cross-protocol table are removed. Typed item/block fields or types remain rejected with a direction and JSON path; they do not enter `Params` or reach Copilot.
+- Unknown optional fields in recognized request envelopes and target-inexpressible parameters in the fixed cross-protocol table are removed. Unknown discriminators, roles, required fields, and invalid core types remain rejected with a direction and JSON path; dropped fields do not enter `Params` or reach Copilot.
 - Client headers are not forwarded by default; auth, sticky, and account-binding inputs affect only gateway logic.
 - `user`, `session`, `metadata.session_id`, and `metadata.conversation_id` are not forwarded upstream as `user`.
 - `user_binding` uses OpenAI Chat/Responses `user`, Anthropic `metadata.user_id` / `metadata.user`, or `X-GHCP-User` as `user_id`; `session_binding` uses request/metadata session fields or session headers as `session_id`.

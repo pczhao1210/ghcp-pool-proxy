@@ -45,6 +45,16 @@
 - 未运行检查：本次只改变文档与本地构建产物，不需要运行 Go、Dashboard、Compose 或 Kubernetes 门禁。
 - 下一最小步骤：仅在新的 release、matrix/schema/build 变化或经批准的新能力出现时创建独立兼容性任务。
 
+## 2026-08-21 三协议未知可选字段降级
+
+- 状态：Phase 7 后维护兼容已实现。Chat Completions、Responses 和 Messages 的已识别请求 envelope 现在原地删除未知可选字段并继续转发，覆盖顶层、message/item/block、content part、image、tool/tool choice、thinking/output config、Responses compaction 与 cache-control；字段路径聚合到不参与序列化的 canonical 诊断字段，`Raw` map 不再把未知字段带到 Provider。JSON Schema、tool input/output 和 metadata 等开放业务对象不递归清洗。
+- 严格边界：未知 role、item/block/tool-choice/image-source 等 union discriminator，已识别 envelope 内缺失的必填 identity 字段、非法核心类型，以及不可表达的核心跨协议语义仍 fail closed；不新增会误拒绝 Responses 有状态续接的全局 tool-call 配对规则。原生 Messages beta 继续只转发 allowlist；未知 beta 和跨协议 beta 与固定表删除的不可表达参数统一进入同一 dropped-field 聚合。
+- 规则归一：六个转换方向的参数删除表、原生 Messages beta allowlist、跨协议 beta 删除策略与诊断有界/遮蔽规则统一收敛到 `internal/protocol/request_policy.go`；parser-local allowed-field 列表继续作为各 wire envelope 的结构定义，不并入运行时方向表。
+- 日志与性能：协议诊断与普通成功 access log 统一复用 `logging.success_sample_rate` / `GATEWAY_SUCCESS_LOG_SAMPLE_RATE` 和同一个服务端 request ID 稳定采样决定，默认 `0.01`，客户端提供的 trace ID 不能控制结果。仅实际命中丢弃项且入样的请求输出一条 `protocol_request_status` WARN，状态为 `normalized`；日志聚合 source/target/route、总数、最多 16 个去重且最长 160 rune 的路径、省略数和遮蔽数，不记录字段值、beta token、请求正文或认证信息。热路径只增加本地 map 删除、字段路径聚合和 SHA-256，不增加网络、重试、探测或存储访问。
+- 验证：parser 回归覆盖三入口顶层与嵌套 envelope、namespace 子工具、cache-control、Provider 前 Raw 清理，以及未知 discriminator/role/类型继续拒绝；有限审查修复了 Chat content 和 cache-control typed/Raw 双副本导致已删除嵌套字段仍进入 canonical 的缺口，并补齐 Messages -> Chat/Responses 对原生 `output_config` 的删除策略。端到端矩阵向 3 个透传和 6 个互转方向注入顶层与嵌套未知字段，9 个方向均继续 dispatch 且未知值未到达 Provider；集中策略回归覆盖六个转换方向、native/cross-protocol beta、诊断去重/截断/敏感路径遮蔽；采样回归覆盖 0%、100% 和 `0.01`，验证无丢弃项不产生日志、入样决定仅使用服务端 request ID 且每请求最多一条聚合状态日志。`go test ./internal/protocol ./internal/observability ./internal/provider/copilot ./internal/api/gateway -count=1` 与带显式 build identity、仓库外 `0600` CLI manifest 的 `make validate` 通过，覆盖 lint、全 Go race tests、Dashboard 26 tests/build、compat validation/fake collector、release manifest、VM/cluster deploy 脚本、Azure Bicep 和 Kubernetes 静态校验；当前 dirty 工作树结果不构成 release evidence。
+- 未满足门禁：尚未运行真实 Copilot/固定 CLI 目标环境重放、不可变 release attestation、目标 VM、Redis Cluster 或实际 Kubernetes 集群门禁。
+- 下一最小步骤：构建并部署新 Gateway，在目标环境分别重放原生与互转的 Chat/Responses/Messages 请求，确认未知可选字段不再造成 4xx/5xx，并核对 1% 命中日志无正文和值泄漏。
+
 ## 2026-08-21 Cherry Studio Messages 502 调查
 
 - 状态：Phase 7 后维护修复已实现。第一处失败是 Messages -> Chat 的 `$.system[0]: system_block_not_representable`：方向级 validator 错把纯文本 system block 的合法 `cache_control` 当作不可表达语义；现在 Chat/Responses 投影允许丢弃该 metadata，非文本 system block 仍 fail closed，原生 Messages 保持 typed cache-control 透传。部署后 `gpt-5.6-luna` 的 Messages -> Responses 已到达 Copilot，但稳定返回 `400 invalid_request`；直连反例证明 Copilot Responses 同时拒绝 `temperature` 和 `top_p`，普通 Responses builder 现统一丢弃这两个采样字段。`max_tokens=128000` 单独及与 30 个工具组合均已通过，因此不实施 catalog clamp。`claude-sonnet-4.6` 的原生 Messages 失败是独立问题，当前证据不支持归因于 `/v1/messages` parser 或 dispatch。

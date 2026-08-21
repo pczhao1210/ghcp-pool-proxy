@@ -205,6 +205,8 @@ Gateway 在路由前检查全局 RPM、全局 daily tokens 和全局 daily AI cr
 
 Daily token 和 AI Credits 预算默认关闭。可在 Dashboard Config 页配置，或将 `BUDGET_MAX_DAILY_TOKENS_PER_ACCOUNT`、`BUDGET_MAX_DAILY_TOKENS_GLOBAL`、`BUDGET_MAX_DAILY_NANO_AIU_PER_ACCOUNT`、`BUDGET_MAX_DAILY_NANO_AIU_GLOBAL` 设置为大于 `0` 的值启用对应上限。RPM 保护默认开启：`BUDGET_MAX_RPM_PER_ACCOUNT=60`，100 账号聚合上限为 `BUDGET_MAX_RPM_GLOBAL=6000`；任一值设为 `0` 可关闭对应 RPM 检查。RPM 使用 Redis 原子滑动窗口；窗口满时直接返回 429，不在 Gateway 内等待，被该窗口拒绝的尝试不会继续占用该窗口额度。Gateway 会周期性刷新 Dashboard 保存的预算设置，环境变量只是启动默认值；数据库中已保存的值仍优先。
 
+关闭 daily token 预算时，客户端显式输出上限会原样作为 reservation 数量保留，不会仅因超过请求未提供输出上限时使用的 `4096` fallback 而被拒绝。启用任一 daily token 预算后，`BUDGET_MAX_RESERVATION_INPUT_TOKENS` 与 `BUDGET_MAX_RESERVATION_OUTPUT_TOKENS` 是保守硬上界；输出上界必须不低于计划接纳的最大客户端 `max_tokens` 或 `max_output_tokens`。这样既保持 daily-budget fail-closed 记账，也允许只启用 RPM 的部署接纳请求更大输出窗口的 coding client。
+
 Router 本身不读取预算账本；它只处理指定 pool、账号状态、seat、reserved 和并发。
 
 ## 指标

@@ -223,7 +223,7 @@ Retained and normalized:
 | `stream` | `Stream` | Controls downstream Anthropic SSE |
 | `system` string / array | `SystemBlocks` / `System` | Ordered typed blocks are retained; text is also projected to `System` |
 | `messages` | `SourceMessages` / `Messages` / `System` | Native blocks are retained in order and a cross-protocol text/tool projection is built in parallel |
-| `tools` | `Tools` | Preserves `name`, `description`, `input_schema`, and `cache_control` |
+| `tools` | `Tools` | Preserves `name`, `description`, `input_schema`, and `cache_control`; consumes but does not forward the boolean `eager_input_streaming` client hint |
 | `tool_choice` | `ToolChoice` | `any` maps to `required`; `tool` maps to an OpenAI function choice |
 | `max_tokens` | `MaxTokens` | Written upstream as `max_tokens` for Chat and `max_output_tokens` for Responses |
 
@@ -237,7 +237,7 @@ temperature, top_p, top_k, stop, thinking, context_management, metadata
 
 Native preservation includes `text`, `image`, `tool_use`, `tool_result`, tool-result `is_error`, `thinking` with signature, `redacted_thinking`, `cache_control`, and `context_management`. Cross-protocol conversion projects only ordinary tool use/result, images, and text; native-only block metadata is rejected.
 
-Rejected or normalized: unknown top-level fields are ignored; unknown block fields/types remain rejected; image validation is the same as Chat Completions. Native Messages does not forward arbitrary headers or raw JSON fields.
+Rejected or normalized: unknown top-level fields are ignored; unknown block/tool fields or types remain rejected. A boolean Cherry Studio `tools[].eager_input_streaming` hint is discarded, while a non-boolean value still returns a path-specific `400`. The `"[Circular]"` serialization placeholder is removed only in `cache_control` positions and does not affect the same string in message text or tool schemas. Image validation is the same as Chat Completions. Native Messages does not forward arbitrary headers or raw JSON fields.
 
 ## Canonical Layer Fields
 

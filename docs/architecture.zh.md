@@ -101,6 +101,7 @@ flowchart TD
 
 ```mermaid
 flowchart LR
+  CopilotModels["Copilot /models capabilities.limits"] -->|"Refresh from Copilot"| Admin["Dashboard / Admin API"]
   Admin["Dashboard / Admin API"] -->|"PATCH /admin/settings/model_catalog_json"| Settings[(system_settings)]
   Settings -->|"读取 model_catalog_json"| Catalog["Gateway Model Catalog"]
   Catalog --> Models["GET /v1/models 返回 exposed 模型"]
@@ -108,6 +109,8 @@ flowchart LR
   Resolve --> Provider["Copilot Provider Adapter"]
   Resolve -->|"未启用或不存在"| Invalid["400 invalid_model"]
 ```
+
+模型刷新会把 Copilot 当前有效的 context、prompt、output 和 non-streaming output limits 导入严格目录；Dashboard 在 Models 页面展示并在保存时保留这些值。缺失 limit 保持未知，目录不按名称推测模型原生规格；这些展示字段不会改变请求校验、路由或预算 reservation。
 
 ## Copilot Metrics 同步链路
 

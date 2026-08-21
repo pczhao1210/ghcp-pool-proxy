@@ -223,7 +223,7 @@ OpenAI Responses 请求中的工具会保留在 canonical tool 记录中，用�
 | `stream` | `Stream` | 决定下游是否返回 Anthropic SSE |
 | `system` string / array | `SystemBlocks` / `System` | 有序 typed block 保留，text 另行投影到 `System` |
 | `messages` | `SourceMessages` / `Messages` / `System` | 原生 block 按顺序保留，同时生成跨协议 text/tool 投影 |
-| `tools` | `Tools` | 保留 `name`、`description`、`input_schema`、`cache_control` |
+| `tools` | `Tools` | 保留 `name`、`description`、`input_schema`、`cache_control`；布尔 `eager_input_streaming` 作为客户端 hint 消费但不转发 |
 | `tool_choice` | `ToolChoice` | `any` 映射为 `required`；`tool` 映射为 OpenAI function choice |
 | `max_tokens` | `MaxTokens` | 上游 Chat 写为 `max_tokens`；上游 Responses 写为 `max_output_tokens` |
 
@@ -237,7 +237,7 @@ temperature, top_p, top_k, stop, thinking, context_management, metadata
 
 原生保真范围包括 `text`、`image`、`tool_use`、`tool_result`、tool-result `is_error`、带 signature 的 `thinking`、`redacted_thinking`、`cache_control` 和 `context_management`。跨协议只投影普通 tool use/result、图片和文本；原生 block metadata 会被拒绝。
 
-拒绝或归一化：未知顶层字段会被忽略；未知 block 字段/类型仍会拒绝；图片校验规则与 Chat Completions 相同。原生 Messages 不转发任意 header 或 raw JSON 字段。
+拒绝或归一化：未知顶层字段会被忽略；未知 block/tool 字段或类型仍会拒绝。Cherry Studio 生成的布尔 `tools[].eager_input_streaming` 会被丢弃，非布尔值仍返回带字段路径的 `400`；只在 `cache_control` 位置出现的 `"[Circular]"` 序列化占位符会被清除，不影响正文或 tool schema 中的同名字符串。图片校验规则与 Chat Completions 相同。原生 Messages 不转发任意 header 或 raw JSON 字段。
 
 ## 归一化层字段
 

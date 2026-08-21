@@ -101,6 +101,7 @@ flowchart TD
 
 ```mermaid
 flowchart LR
+  CopilotModels["Copilot /models capabilities.limits"] -->|"Refresh from Copilot"| Admin["Dashboard / Admin API"]
   Admin["Dashboard / Admin API"] -->|"PATCH /admin/settings/model_catalog_json"| Settings[(system_settings)]
   Settings -->|"read model_catalog_json"| Catalog["Gateway Model Catalog"]
   Catalog --> Models["return exposed models"]
@@ -108,6 +109,8 @@ flowchart LR
   Resolve --> Provider["Copilot Provider Adapter"]
   Resolve -->|"disabled or missing"| Invalid["400 invalid_model"]
 ```
+
+Model refresh imports Copilot's effective context, prompt, output, and non-streaming output limits into the strict catalog. Dashboard displays these values on the Models page and preserves them when saving. Missing limits remain unknown; the catalog does not infer native model specifications from names, and these display fields do not alter request validation, routing, or budget reservation.
 
 ## Copilot Metrics Sync Flow
 

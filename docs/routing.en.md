@@ -194,6 +194,8 @@ Before routing, the gateway checks global RPM, daily tokens, and daily AI credit
 
 Daily token and AI Credits budgets are disabled by default. Configure them from the Dashboard Config page or set `BUDGET_MAX_DAILY_TOKENS_PER_ACCOUNT`, `BUDGET_MAX_DAILY_TOKENS_GLOBAL`, `BUDGET_MAX_DAILY_NANO_AIU_PER_ACCOUNT`, or `BUDGET_MAX_DAILY_NANO_AIU_GLOBAL` to a value greater than `0` to enable those caps. RPM protection remains enabled through `BUDGET_MAX_RPM_PER_ACCOUNT=60` and the 100-account aggregate cap `BUDGET_MAX_RPM_GLOBAL=6000`; set either value to `0` to disable that RPM check. RPM uses an atomic Redis sliding window: a full window returns 429 immediately without waiting in the gateway, and rejected attempts do not consume more capacity in that window. Gateway refreshes Dashboard-saved budget settings periodically, while environment values are startup defaults. A previously saved database value continues to override the startup default.
 
+When daily token budgets are disabled, an explicit client output limit is retained as the reservation amount and is not rejected merely because it exceeds the `4096` fallback used for requests that omit an output limit. When either daily token budget is enabled, `BUDGET_MAX_RESERVATION_INPUT_TOKENS` and `BUDGET_MAX_RESERVATION_OUTPUT_TOKENS` are conservative hard bounds; set the output bound at least as high as the largest client `max_tokens` or `max_output_tokens` value that should be admitted. This preserves fail-closed daily-budget accounting while allowing RPM-only deployments to accept coding clients that request larger output windows.
+
 The router itself does not read budget ledgers; it handles the assigned pool, account status, seats, reservations, and concurrency.
 
 ## Metrics

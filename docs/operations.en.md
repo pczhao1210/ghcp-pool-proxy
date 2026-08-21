@@ -225,7 +225,7 @@ The recommended Copilot compatibility flags are `copilot_compat_anthropic_beta_e
 | `github.copilot_token_url` | Copilot bearer token exchange endpoint |
 | `GITHUB_TOKEN_FILE` | Read-only GitHub token file for the `metrics-sync` Worker role; no `GITHUB_TOKEN` or database-setting fallback is used |
 | `DASHBOARD_DIR` | Dashboard static asset directory served by admin |
-| `model_catalog_json` | Strict model catalog contract for exposed names, upstream model IDs, upstream API, and enabled status; invalid JSON, unknown fields, empty IDs, duplicate exposed IDs, and unknown APIs are rejected before storage |
+| `model_catalog_json` | Strict model catalog contract for exposed names, upstream model IDs, upstream API, enabled status, and optional Copilot effective token limits (`context_window_tokens`, `max_prompt_tokens`, `max_output_tokens`, `max_non_streaming_output_tokens`); invalid JSON, unknown fields, negative limits, empty IDs, duplicate exposed IDs, and unknown APIs are rejected before storage |
 | `logging.level` / `logging.format` | Log level and format |
 
 ## Multi-Account Environment Isolation

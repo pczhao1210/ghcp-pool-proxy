@@ -80,3 +80,26 @@
 - 验证：受影响四个 Go 包共 507 项测试通过；Dashboard 25 项测试和生产 build 通过且无警告。Provider 聚焦反例覆盖不同 item 共用上游 index、终态 ID/顺序漂移、辅助 item 省略、terminal-only reasoning、incomplete status、类型/内容/tool identity 冲突和 `obfuscation` 类型边界。随后以 matrix 固定 build `2026.08.18.1` 和仓库外权限 `0600` 的四 entry CLI manifest 执行 `make validate`，lint、全仓 Go race、Dashboard、静态 matrix、fixed-CLI candidate、release-manifest、VM 部署脚本、Kubernetes manifest/cluster 脚本与 Azure Bicep 检查全部通过；工作树为 dirty，因此该结果不构成 release evidence。
 - 未运行检查：最终代码尚未再跑真实 19 场景；`make release-validate`、Redis Cluster、实际 Kubernetes 集群、目标 VM 与目标环境 compatibility 门禁尚未执行。人工报告不能替代 clean fixed-CLI report、release manifest 或 schema 2 attestation。
 - 下一最小步骤：可选执行一次最终代码的外置真实探针，确认没有 `upstream_protocol_error`；创建不可变 release 时以 clean revision 重新生成 manifest/report/attestation 并执行 `make release-validate`，不因单次模型服从性波动扩大 parser 或修改 matrix 等级。
+
+## 2026-08-20 Cherry Studio Anthropic tool hint 兼容
+
+- 状态：Phase 7 后维护修复已完成。Messages parser 接受并丢弃布尔 `tools[].eager_input_streaming`，不让客户端流式输入提示进入 canonical/provider body；非布尔值仍按精确 JSON path 返回 `400`，其它未知 tool 字段继续拒绝。Cherry Studio 在 content `cache_control` 中生成的 `"[Circular]"` 仅作为该位置的序列化占位符清除，普通文本与 tool schema 不做全局替换。
+- 验证：parser 正向、类型反例和完整 HTTP/provider capture 回归通过；`go test ./internal/api/gateway ./internal/protocol ./internal/provider/copilot -count=1` 通过。随后以 matrix 固定 build 与仓库外权限 `0600` 的 CLI manifest 执行 `make validate`，lint、全仓 Go race、Dashboard 25 tests/build、静态 matrix、fixed-CLI candidate、release-manifest、VM 部署/迁移修复脚本、Kubernetes manifest/cluster 脚本与 Azure Bicep 检查全部通过；dirty 工作树结果不构成 release evidence。
+- 未运行检查：尚未执行 release、Redis Cluster、实际 Kubernetes 集群、目标 VM 或更新后的远端 Gateway 请求重放。
+- 下一最小步骤：构建并部署包含本修复的 Gateway 镜像，然后从 Cherry Studio 重放同一 `/v1/messages` 请求；若出现新的精确字段错误，只按已证明为非语义客户端 hint 的字段建立有界兼容，不放宽 tool schema/lifecycle 校验。
+
+## 2026-08-20 Claude Code 输出 reservation 上界兼容
+
+- 状态：Phase 7 后维护修复已完成。真实 `/v1/messages` 请求已越过 parser、模型目录和账号选择，但客户端显式输出窗口超过默认 `4096` 时，budget checker 即使只启用 RPM 也返回 `503 budget_unavailable`。现在仅在启用 account/global daily-token 预算时把 `BUDGET_MAX_RESERVATION_OUTPUT_TOKENS` 作为硬上界；未启用 daily-token 预算时原样保留客户端显式输出上限，未指定输出上限的请求仍使用配置 fallback。已启用的 daily-token 预算继续 fail closed，不因兼容性目标放宽。
+- 部署合同：本地与 VM Compose 已把 `BUDGET_MAX_RESERVATION_INPUT_TOKENS`、`BUDGET_MAX_RESERVATION_OUTPUT_TOKENS` 和 `BUDGET_MAX_RESERVATION_NANO_AIU` 传入 Gateway。两个 Compose 文件均以 `200000/32000/9000` 覆盖值完成渲染验证；默认值保持 `128000/4096/0`。若目标环境启用了 daily-token 预算，operator 必须将输出 reservation 上界配置为不低于计划接纳的最大 `max_tokens`/`max_output_tokens`。
+- 验证：budget 正反例证明 RPM-only 32K reservation 被原样保留、daily-token 超界仍拒绝；完整 Anthropic HTTP 回归证明 `claude-opus-4.8`、`max_tokens:32000` 不再在 Provider dispatch 前返回 503。预算、Gateway、Redis 相邻包测试、`make lint` 与 `make deploy-test` 通过。随后以 matrix 固定 build `2026.08.18.1` 和仓库外 CLI manifest 执行 `make validate`，lint、全仓 Go race、Dashboard 25 tests/build、compat candidate、release workflow、VM 部署、Kubernetes/cluster 与 Azure Bicep 门禁全部通过；dirty 工作树结果不构成 release evidence。
+- 未运行检查：尚未构建/发布包含本修复的新不可变 Gateway 镜像，未在目标 VM 重放原始 Claude Code 请求，也未执行 release、Redis Cluster 或实际 Kubernetes 集群门禁。
+- 下一最小步骤：创建并部署包含本修复的 Gateway 镜像；确认目标环境 daily-token 预算是否为 `0`。若已启用，将 `BUDGET_MAX_RESERVATION_OUTPUT_TOKENS` 设为计划接纳的最大客户端输出窗口后重建 Gateway，再用原始 Claude Code 请求确认不再出现 reservation bound 503。
+
+## 2026-08-20 Models 页面 Copilot 有效窗口
+
+- 状态：Phase 7 后维护功能已完成。经用户确认只采用 Copilot 当前有效上限，不按模型名称维护原生规格；`FetchCopilotModels` typed 解析 `/models.data[].capabilities.limits` 的 context、prompt/input、output 与 non-streaming output 数值，Admin refresh/catalog response 和严格 `model_catalog_json` 合同保留四个可选非负字段。旧目录不含字段时继续兼容，缺失值保持未知。
+- Dashboard：现有 `Refresh from Copilot -> Save` 流程批量更新并持久化 limits；刷新预览和 Models 主表均以紧凑数值显示 Context、Input 和 Output，Output 同时显示可用的 non-streaming 上限。修改 GHCP Model ID 会清除旧 limits，避免跨模型残留。展示数据不进入 Gateway 请求校验、路由或预算 reservation。
+- 验证：Provider fixture 证明 nested capabilities limits 被完整解析；Model Catalog 正向/负值反例和 Admin response 回归通过；Provider、Model Catalog、Admin 三包完整测试通过；Dashboard 26 tests 与 production build 通过且无警告，编辑器诊断为零。
+- 未运行检查：尚未执行完整 `make validate`、release、目标 VM 的真实 `/models` 刷新与浏览器视觉验收、Redis Cluster 或实际 Kubernetes 集群门禁。
+- 下一最小步骤：运行完整提交级门禁；部署新 Admin/Dashboard 后选择 active Copilot account 执行 Refresh，确认目标 `/models` 数值进入预览，保存后在 Models 主表持续显示。

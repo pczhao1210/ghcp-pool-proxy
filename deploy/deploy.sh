@@ -1024,6 +1024,21 @@ db_scalar() {
   db_psql -Atc "$1" | tr -d '[:space:]'
 }
 
+installed_schema_version() {
+  local settings_exists
+  local version
+
+  settings_exists="$(db_scalar "SELECT to_regclass('public.system_settings') IS NOT NULL")"
+  if [[ "$settings_exists" != "t" ]]; then
+    printf '0\n'
+    return 0
+  fi
+
+  version="$(db_scalar "SELECT value FROM system_settings WHERE key = 'schema_version'")"
+  [[ "$version" =~ ^[0-9]+$ ]] || die "invalid installed schema version: $version"
+  printf '%s\n' "$version"
+}
+
 
 run_migration_runner() {
   local target
@@ -1061,8 +1076,49 @@ target_schema_version() {
 
 
 
+provider_attempt_ledger_default_state() {
+  db_scalar "
+    SELECT CASE
+      WHEN is_nullable = 'NO' AND column_default IS NULL THEN 'repair'
+      WHEN is_nullable = 'NO' AND column_default IS NOT NULL THEN 'ok'
+      ELSE 'invalid'
+    END
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = 'provider_attempts'
+      AND column_name = 'ledger_status'
+  "
+}
+
+repair_schema_18_to_19_provider_attempt_default() {
+  local source_version="$1"
+  local target_version="$2"
+  local state
+
+  [[ "$source_version" == "18" && "$target_version" == "19" ]] || return 0
+
+  state="$(provider_attempt_ledger_default_state)"
+  if [[ "$state" == "ok" ]]; then
+    return 0
+  fi
+  [[ "$state" == "repair" ]] || die "schema 19 provider_attempts.ledger_status is missing or invalid"
+
+  log "Repairing schema 18 to 19 provider attempt ledger default"
+  db_psql -v ON_ERROR_STOP=1 -c \
+    "ALTER TABLE public.provider_attempts ALTER COLUMN ledger_status SET DEFAULT 'error';"
+
+  state="$(provider_attempt_ledger_default_state)"
+  [[ "$state" == "ok" ]] || die "schema 19 provider_attempts.ledger_status default repair failed"
+}
+
 apply_migrations_if_needed() {
+  local source_version
+  local target_version
+
+  source_version="$(installed_schema_version)"
+  target_version="$(target_schema_version)"
   run_migration_runner
+  repair_schema_18_to_19_provider_attempt_default "$source_version" "$target_version"
 }
 
 reset_data_dir_with_container() {

@@ -2,7 +2,7 @@
 
 > 状态：Phase 7 已完成；仅在新的 release、matrix/schema/build 变化或经批准的新能力出现时创建新的兼容性任务。
 >
-> 最近确认：2026-08-20
+> 最近确认：2026-08-21
 
 ## 事实源
 
@@ -44,6 +44,15 @@
 - 验证：全仓库 25 份 Markdown 的本地链接检查通过；运行包 README 按其 staged release root 解析链接；`make release-manifest-test` 通过，确认 staging 包含文档索引与兼容矩阵。
 - 未运行检查：本次只改变文档与本地构建产物，不需要运行 Go、Dashboard、Compose 或 Kubernetes 门禁。
 - 下一最小步骤：仅在新的 release、matrix/schema/build 变化或经批准的新能力出现时创建独立兼容性任务。
+
+## 2026-08-21 Cherry Studio Messages 502 调查
+
+- 状态：Phase 7 后维护诊断已完成，未复现 Messages 协议缺陷。Sonnet 4.6 目录声明 `/v1/messages`，同一隔离账号的原生 Messages text、`max_tokens=128000` 非流式、`max_tokens=128000` 流式，以及 `tools + tool_choice:auto + max_tokens=128000` 流式 tool-use 均真实通过；Gemini 3.5 Flash 的 Chat Completions `max_tokens=128000` 流式请求也通过。因此 `128000` 必然超过 64K output limit 并被拒绝的假设已被证伪，不实施 catalog clamp。已有回归继续覆盖 Cherry `eager_input_streaming` 丢弃、cache-control 位置的 `"[Circular]"` 清理、合法 ephemeral cache-control、tool-use/tool-result 与多工具 SSE。
+- 诊断改进：外置 `manual_test.sh` 修复 Go bool flag 的调用形式，`CATALOG_ONLY=false` 不再被误解析为 true；新增 `PROBE_MAX_TOKENS` 与 Anthropic `streaming_tool` 场景。Gateway 的 provider dispatch 日志新增 request body 字节数、message/system/tool 数和 `max_tokens`；上游 HTTP 失败日志仅在 Provider 已生成安全 metadata 时保留 status、error type、response body length/hash，不记录请求、响应正文或凭据，客户端仍只收到通用 `model provider error`。
+- 性能边界：请求热路径只增加固定字段和 slice 长度读取，不序列化 tool schema，不增加网络调用、重试、探测或存储访问。
+- 验证：`bash -n manual_test.sh` 与 `./manual_test.sh --check` 通过；四个 Sonnet 4.6 direct probe 分别约 `1.6s-2.4s` 且均为 supported，Gemini 3.5 Flash 的 128K streaming probe 约 `2.46s` 且为 supported；Gateway 安全日志、Anthropic MCP tool payload 与多工具 streaming 聚焦测试通过。
+- 未运行检查：出现 502 的目标环境账号不在本地 PostgreSQL，未能用同一凭据重放附件中的大型 MCP 请求；尚未获得该失败的上游 HTTP status/body hash，也未运行完整 `make validate`、release、Redis Cluster、Kubernetes 或目标 VM 门禁。
+- 下一最小步骤：发布诊断改进后只重试一次失败请求，收集同一 trace 的 `gateway error mapped` 与 dispatch 结构字段；若是 400 且 body/tool 数显著偏大，再冻结该请求形状做工具数量/schema 规模二分；若是 403/404，则检查被选账号的模型/端点 entitlement。取得该证据前不扩大 parser 或修改模型 limits。
 
 ## 2026-08-20 Dashboard 首次加载回归
 
@@ -114,11 +123,11 @@
 ## 2026-08-21 Models 长上下文自动检测
 
 - 状态：Phase 7 后维护功能已实现。`FetchCopilotModels` 现在解析 `/models.data[].billing.token_prices.long_context.max_prompt_tokens`；仅当 Copilot 明确返回正数上限时标记 `long_context_supported=true`，有效 prompt limit 取普通与 long-context 上限的较大值，有效 context window 取原值与 `long prompt + max output` 的较大值。负数和 `int64` 加法溢出继续 fail closed；未声明该字段的模型不会按名称推断支持。
-- Dashboard：`Refresh from Copilot` 会把检测状态和有效 limits 写入严格 `model_catalog_json`，编辑页与主表新增只读 Long Context 状态列。修改 GHCP Model ID 会同时清除旧 limits 和检测状态，防止跨模型残留。当前本机 VS Code Copilot 模型快照明确为 GPT-5.4、GPT-5.5、GPT-5.6 Luna/Sol/Terra 返回 `1050000` context、`922000` prompt、`128000` output 和 long-context 计价档位；Claude 当前仍没有该字段。
+- Dashboard：`Refresh from Copilot` 会把检测状态和有效 limits 写入严格 `model_catalog_json`。新账号真实刷新证明 Copilot 也可能直接在 `capabilities.limits` 返回 `1050000` context、`922000` prompt、`128000` output，而不返回独立 `billing.long_context` 标记；因此编辑页与主表不再显示重复且可能矛盾的 Long Context 状态列，只以 Context/Input/Output 有效 limits 为准。修改 GHCP Model ID 仍会清除旧 limits 和检测状态，防止跨模型残留。
 - 边界：该配置只记录 Copilot 真实能力并让 Models 页采用有效上限，不在 Gateway 热路径自动注入 `context_management`，也不把手工展示值当作授权。Responses 客户端仍需选择 1M 模式或发送已支持的 typed compaction 参数；真正超过默认 272K 输入的 Copilot 成功响应仍是发布门禁。
-- 验证：Provider 正例证明默认 `400000/272000/128000` 加 long-context `922000` 自动得到 `1050000/922000/128000`；负值和溢出反例通过。Model Catalog 严格合同、Admin response、Dashboard normalize/save/清理状态回归通过；Provider、Model Catalog、Admin 包测试、Dashboard 26 tests、production build、编辑器诊断和 `git diff --check` 均通过。
-- 未运行检查：完整 `make validate`、目标环境真实 Copilot refresh、浏览器视觉验收、超过 272K 输入的真实 Copilot 响应、不可变 release、Redis Cluster 与实际 Kubernetes 集群门禁尚未执行。
-- 下一最小步骤：运行完整提交级门禁；部署 Admin/Dashboard 后选择目标 active account 执行 `Refresh from Copilot -> Save`，确认 GPT-5.6 Sol/Terra 显示 `1.05M / 922K / 128K` 和 `Detected`，再用已选择 1M 的 Responses 客户端完成一次真实长输入响应。
+- 验证：Provider 正例证明默认 `400000/272000/128000` 加 long-context `922000` 自动得到 `1050000/922000/128000`；负值和溢出反例通过。Model Catalog 严格合同、Admin response、Dashboard normalize/save/清理状态回归通过；完整 `make validate` 已通过。移除状态列后 Dashboard production build、编辑器诊断和无残留文案检查通过。
+- 未运行检查：状态列移除后的完整 `make validate`、超过 272K 输入的真实 Copilot 响应、不可变 release、Redis Cluster 与实际 Kubernetes 集群门禁尚未执行。
+- 下一最小步骤：运行 Dashboard tests 并重新发布 Admin/Dashboard，确认 Models 页仅显示 GPT-5.6 Sol/Terra 的 `1.05M / 922K / 128K`；再用已选择 1M 的 Responses 客户端完成一次真实长输入响应。
 
 ## 2026-08-21 客户端失败与账号 Risk 归因
 

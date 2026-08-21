@@ -29,7 +29,7 @@ flowchart LR
   U --> O["client protocol response"]
 ```
 
-Client headers are not forwarded verbatim to Copilot. The provider generates upstream headers itself, including the account bearer token, editor/user-agent metadata, and GitHub API version. `X-GHCP-*`, session, and workspace headers are routing inputs; see [routing.en.md](routing.en.md). Native Messages accepts only typed `Anthropic-Version` and allowlisted `Anthropic-Beta` values; arbitrary client headers never cross the provider boundary.
+Client headers are not forwarded verbatim to Copilot. The provider generates upstream headers itself, including the account bearer token, editor/user-agent metadata, and GitHub API version. `X-GHCP-*`, session, and workspace headers are routing inputs; see [routing.en.md](routing.en.md). Native Messages reads typed `Anthropic-Version` and `Anthropic-Beta` values. Allowlisted beta tokens are forwarded; unknown beta tokens are dropped while a structured warning records only their count and positions, not their values. Arbitrary client headers never cross the provider boundary, and filtering an optional beta does not relax canonical request or tool validation.
 
 ## Upstream API Selection
 

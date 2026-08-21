@@ -29,7 +29,7 @@ flowchart LR
   U --> O["client protocol response"]
 ```
 
-客户端 header 不会原样透传到 Copilot。Provider 会重新生成上游 header，包括账号 bearer token、editor/user-agent 和 GitHub API version。`X-GHCP-*`、session、workspace 等字段属于路由输入，见 [routing.zh.md](routing.zh.md)。原生 Messages 只接收 typed `Anthropic-Version` 和白名单内的 `Anthropic-Beta`，任意客户端 header 不会跨过 provider 边界。
+客户端 header 不会原样透传到 Copilot。Provider 会重新生成上游 header，包括账号 bearer token、editor/user-agent 和 GitHub API version。`X-GHCP-*`、session、workspace 等字段属于路由输入，见 [routing.zh.md](routing.zh.md)。原生 Messages 会读取 typed `Anthropic-Version` 和 `Anthropic-Beta`：白名单 beta 原样转发，未知 beta 被丢弃，同时结构化告警只记录数量和位置，不记录原值。任意客户端 header 仍不会跨过 provider 边界；过滤可选 beta 也不会放宽 canonical 请求或工具结构校验。
 
 ## 上游 API 选择
 

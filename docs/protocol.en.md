@@ -199,13 +199,15 @@ Retained and normalized:
 | `user` | `Metadata.user` | Secondary sticky input; `user_binding` pools prefer it as `user_id` |
 | `session` / `metadata.session_id` / `metadata.session` / `metadata.conversation_id` | `Metadata` | Secondary sticky input; `session_binding` pools use `session_id` / `session` as `session_id` |
 
-Passed through to `Params` and written to the upstream body with the same name:
+Parsed into `Params`:
 
 ```text
 temperature, top_p, text, reasoning, reasoning_effort,
 response_format, parallel_tool_calls, stream_options,
 truncation, include, store, service_tier, context_management
 ```
+
+The Copilot Responses adapter omits `temperature`, which the upstream endpoint does not accept. The other listed parameters are written to the upstream body with the same name.
 
 `reasoning` and `reasoning_effort` are passed through by name only; they are not converted to Anthropic `thinking`.
 

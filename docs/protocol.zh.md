@@ -199,13 +199,15 @@ logprobs, top_logprobs, service_tier, modalities, audio
 | `user` | `Metadata.user` | sticky 备用输入；`user_binding` pool 会优先把它作为 `user_id` |
 | `session` / `metadata.session_id` / `metadata.session` / `metadata.conversation_id` | `Metadata` | sticky 备用输入；`session_binding` pool 使用 `session_id` / `session` 作为 `session_id` |
 
-透传到 `Params`，并在上游请求 body 中原名写出：
+解析到 `Params`：
 
 ```text
 temperature, top_p, text, reasoning, reasoning_effort,
 response_format, parallel_tool_calls, stream_options,
 truncation, include, store, service_tier, context_management
 ```
+
+Copilot Responses adapter 会丢弃上游端点不接受的 `temperature`；列表中的其它参数仍按原名写入上游请求 body。
 
 `reasoning` 和 `reasoning_effort` 只按原名透传；不会转换为 Anthropic `thinking`。
 

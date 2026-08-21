@@ -103,3 +103,45 @@
 - 验证：Provider fixture 证明 nested capabilities limits 被完整解析；Model Catalog 正向/负值反例和 Admin response 回归通过；Provider、Model Catalog、Admin 三包完整测试通过；Dashboard 26 tests 与 production build 通过且无警告，编辑器诊断为零。
 - 未运行检查：尚未执行完整 `make validate`、release、目标 VM 的真实 `/models` 刷新与浏览器视觉验收、Redis Cluster 或实际 Kubernetes 集群门禁。
 - 下一最小步骤：运行完整提交级门禁；部署新 Admin/Dashboard 后选择 active Copilot account 执行 Refresh，确认目标 `/models` 数值进入预览，保存后在 Models 主表持续显示。
+
+## 2026-08-21 Responses 1M context management 透传
+
+- 状态：Phase 7 后维护修复已实现。真实 Copilot 模型元数据的 `billing.token_prices.long_context.max_prompt_tokens` 为 `936000`；当前 VS Code Copilot 请求构造器按所选 prompt 上限的 90% 生成 `context_management:[{"type":"compaction","compact_threshold":842400}]`。Responses parser 现在只接受 typed compaction 数组和正整数阈值，并在原生 Responses 路径写回上游 body；错误容器、未知类型、缺失/未知字段和非法阈值继续 fail closed，跨协议路径按既有策略丢弃不可表达参数。
+- 验证：parser 正向与四类反例通过；HTTP -> canonical capture、canonical -> provider body 断言通过；使用真实 Copilot Provider 和受控 HTTP upstream 的 wire capture 确认请求发往 `/v1/responses`，且 body 保留 `type=compaction`、`compact_threshold=842400`。修复 `internal/provider/copilot/auth_test.go` 既有的未检查测试响应写入错误后，以冻结 build `2026.08.18.1` 和仓库外 `0600` 固定 CLI manifest 运行完整 `make validate`，lint、全仓 Go race、Dashboard 26 tests/build、静态兼容、manifest-aware CLI、release workflow、VM 部署、Kubernetes/cluster 与 Azure Bicep 门禁全部通过；编辑器诊断和 `git diff --check` 为零。
+- 未满足门禁：真实 Copilot 1M 上游响应、不可变 release、目标 VM、Redis Cluster 与实际 Kubernetes 集群门禁尚未执行；受控 upstream 的 wire capture 与 dirty 工作树聚合结果不构成 release evidence。
+- 下一最小步骤：部署新 Gateway 后从已选择 1M 的 VS Code 会话重放请求，确认 Copilot 上游接受 `842400` 阈值并返回成功响应；创建不可变 release 时在 clean revision 上重新生成 evidence。
+
+## 2026-08-21 Models 长上下文自动检测
+
+- 状态：Phase 7 后维护功能已实现。`FetchCopilotModels` 现在解析 `/models.data[].billing.token_prices.long_context.max_prompt_tokens`；仅当 Copilot 明确返回正数上限时标记 `long_context_supported=true`，有效 prompt limit 取普通与 long-context 上限的较大值，有效 context window 取原值与 `long prompt + max output` 的较大值。负数和 `int64` 加法溢出继续 fail closed；未声明该字段的模型不会按名称推断支持。
+- Dashboard：`Refresh from Copilot` 会把检测状态和有效 limits 写入严格 `model_catalog_json`，编辑页与主表新增只读 Long Context 状态列。修改 GHCP Model ID 会同时清除旧 limits 和检测状态，防止跨模型残留。当前本机 VS Code Copilot 模型快照明确为 GPT-5.4、GPT-5.5、GPT-5.6 Luna/Sol/Terra 返回 `1050000` context、`922000` prompt、`128000` output 和 long-context 计价档位；Claude 当前仍没有该字段。
+- 边界：该配置只记录 Copilot 真实能力并让 Models 页采用有效上限，不在 Gateway 热路径自动注入 `context_management`，也不把手工展示值当作授权。Responses 客户端仍需选择 1M 模式或发送已支持的 typed compaction 参数；真正超过默认 272K 输入的 Copilot 成功响应仍是发布门禁。
+- 验证：Provider 正例证明默认 `400000/272000/128000` 加 long-context `922000` 自动得到 `1050000/922000/128000`；负值和溢出反例通过。Model Catalog 严格合同、Admin response、Dashboard normalize/save/清理状态回归通过；Provider、Model Catalog、Admin 包测试、Dashboard 26 tests、production build、编辑器诊断和 `git diff --check` 均通过。
+- 未运行检查：完整 `make validate`、目标环境真实 Copilot refresh、浏览器视觉验收、超过 272K 输入的真实 Copilot 响应、不可变 release、Redis Cluster 与实际 Kubernetes 集群门禁尚未执行。
+- 下一最小步骤：运行完整提交级门禁；部署 Admin/Dashboard 后选择目标 active account 执行 `Refresh from Copilot -> Save`，确认 GPT-5.6 Sol/Terra 显示 `1.05M / 922K / 128K` 和 `Detected`，再用已选择 1M 的 Responses 客户端完成一次真实长输入响应。
+
+## 2026-08-21 客户端失败与账号 Risk 归因
+
+- 状态：Phase 7 后维护修复已实现。使用与 Gateway 相同的本地账号直接探测真实 Copilot：19 个模型/场景中 17 个成功，Claude Sonnet 4.6 的 text、streaming、tool、thinking 全部成功，Claude Opus 4.8 的 text、streaming、tool 成功；其 thinking 请求返回 `400 invalid_request`。GPT 5.4 tool 的唯一失败是模型未遵循 forced tool call，不是 HTTP/provider 失败。账号在探测后仍为 `active`、Risk `0`、连续失败 `0`，因此凭据、seat 与一般配额不是 Claude Code/Cherry Studio 共同失败的根因。
+- 修复：`classifyUpstreamFailure` 原先把所有未识别错误兜底归因为 `network_error`，导致 Gateway 自己产生的上游协议解析、本地转换等错误每次错误增加账号 Risk `+3`。现在仅已类型化的 credential、401/403、429/quota、upstream 5xx 和 provider network 错误影响账号 Risk；`invalid_request`、`upstream_4xx`、语义兼容、上游协议解析和未类型化本地错误均不再归因账号。
+- 验证：新增反例先复现 `UpstreamProtocolError -> network_error`，修复后协议错误、语义兼容错误和普通本地错误均返回空 Risk reason，显式 `UpstreamError{Type:"network_error"}` 仍映射 `network_error`。聚焦测试和 Gateway 包测试通过；以冻结 build `2026.08.18.1` 和仓库外 `0600` 固定 CLI manifest 运行完整 `make validate`，所有提交级聚合门禁通过。外置探针通过可选 `WORKER_CONTAINER_ID` 使用隔离 idle Worker-compatible 容器，避免启动后台健康/Risk 任务；报告保存在仓库外，不作为 release evidence。
+- 未满足门禁：聊天附件正文未暴露给当前工具，现有 Gateway/Worker/Admin 日志结束于本次客户端失败之前，故尚未确定 Claude Code 与 Cherry Studio 的精确共同错误类型；未构建或部署新 Gateway，也未运行 release、Redis Cluster 或实际 Kubernetes 集群门禁。dirty 工作树的聚合结果不构成 release evidence。
+- 下一最小步骤：部署包含本修复的 Gateway，分别重放原始 Claude Code 与 Cherry Studio 请求，并按 trace/provider attempt 核对返回状态、`error_type` 与 Risk 变化；预期本地 protocol/compatibility 错误不再提升 Risk。取得附件原文或部署日志后，再针对共同的精确失败路径建立有界兼容测试。
+
+## 2026-08-21 Claude Code 2.1.238 adaptive effort 资格验证
+
+- 状态：Phase 7 后维护兼容已实现。受控 Gateway 抓取证明：自定义 `claude-sonnet-4.6` 和点号 `claude-opus-4.8` 仍发送 `thinking.type=enabled`、固定 `budget_tokens=31999`，不发送 `output_config`；连字符 `claude-opus-4-8` 会发送 `thinking.type=adaptive`、`thinking.display=omitted`、`output_config.effort=medium`，以及 `mid-conversation-system-2026-04-07`、`effort-2025-11-24` beta。Gateway 现对两项 beta 建立精确 allowlist，对 thinking/output_config 建立 typed 嵌套校验，并将验证过的 exposed `claude-opus-4-8` 精确映射到 Copilot upstream `claude-opus-4.8`；其它未知 beta、字段、thinking 类型和 effort 值继续 fail closed。
+- 真实验证：使用同一 `ms` 账号、隔离 idle Worker-compatible 容器和不经过 Gateway/Router/Risk scheduler 的 Provider 探针，`claude-opus-4.8/adaptive_thinking` 在完整两项 beta 下 `1/1 supported`，耗时 `12596ms`，无 HTTP/provider error；报告保存在仓库外并设为 `0600`。另以 `CLAUDE_CODE_QUALIFICATION_VERSION=2.1.238` 运行 exact CLI qualification，确认 resolved binary、adaptive thinking、medium effort 和两项 beta 全部通过。两类证据都不是 release attestation。
+- 配置：模型目录使用 `{"exposed":"claude-opus-4-8","upstream":"claude-opus-4.8","vendor":"Anthropic","upstream_api":"anthropic_messages","enabled":true}`；Claude Code/CC Switch 的 `model` 与 `opusModel` 使用 exposed 连字符 ID。CC Switch 的 Codex `reasoningEffort` 不适用于 Claude；实测孤立 `settings.json` 的 `effortLevel:"medium"` 被 Claude Code `2.1.238` 忽略并发送默认 `high`，因此档位应在 Claude Code 内选择或显式使用 `--effort medium`。
+- 验证：Provider allowlist/wire、Messages parser 正反例、Claude 专用模型列表精确映射、exact Claude Code `2.1.238` qualification 和外置 helper 编译检查均通过。随后以冻结 build `2026.08.18.1` 和仓库外固定 CLI manifest 执行完整 `make validate`，exit `0`；lint 0 issues、全仓 Go race、Dashboard 26 tests/build、compatibility matrix/fixed CLI、release workflow、VM/deploy、Kubernetes/cluster 与 Azure Bicep identity/subnet RBAC 门禁全部通过。
+- 未满足门禁：Claude Code `2.1.238` 尚未加入 `compatibility/matrix.json`，当前 qualification、真实账号结果和 dirty 工作树聚合验证不提升静态/effective level；未构建/部署新 Gateway，未执行 clean fixed-CLI report、release attestation、目标 VM、Redis Cluster 或实际 Kubernetes 集群门禁。Sonnet 4.6 尚无已验证 adaptive-capable exposed ID，继续使用固定 manual thinking。
+- 下一最小步骤：在 Dashboard 保存精确 alias，部署新 Gateway，并用 CC Switch/Claude Code `2.1.238` 的 `claude-opus-4-8` 重放一次 medium effort 请求。只有在独立 Opus runtime contract、profile/pool/entitlement 和完整 exact workflow 通过后，才考虑新增 matrix entry。
+
+## 2026-08-21 Models 页 Claude 默认 exposed ID
+
+- 状态：Phase 7 后维护配置修复已实现。Copilot model refresh 和内置默认目录现在只对 Claude/Anthropic 模型的默认 exposed ID 将 `.` 改为 `-`，例如 `claude-opus-4.7 -> claude-opus-4-7`、`claude-sonnet-4.6 -> claude-sonnet-4-6`；发往 Copilot 的 upstream ID 保持原始点号。OpenAI、Google 等非 Claude 模型不变，operator 已配置的自定义 exposed 也不在读取时被静默改写。
+- Context window 边界：Models 页当前只读展示 Copilot 返回的 Context/Input/Output limits，没有 context window 编辑控件。严格 `model_catalog_json` 合同能够持久化正数 `context_window_tokens`，但该字段目前仅用于 Admin DTO 和 Dashboard 展示，不参与 Gateway 请求校验、路由、预算或上游能力变更；手工修改不能扩大 Copilot 的真实 context window。
+- 1M 能力门禁：同账号真实 `/models` 报告中 Claude Opus 4.6/4.7/4.8、Sonnet 4.6/5 均只声明 `264000` context、`200000` prompt，且没有 `long_context` 能力，因此当前不能发布 Claude `sonnet[1m]` / `opus[1m]` alias。只有 Copilot 后续返回实际 1M 上限或独立 1M upstream ID 后，才能新增 `[1m]` exposed alias，并继续验证 Claude Code 发出的 1M beta/request wire 与 Copilot 接受度；修改 Dashboard 展示值不能越过该门禁。
+- 验证：Claude Opus/Sonnet/旧 3.5 命名正例及 GPT/Gemini 不变反例通过；`internal/modelcatalog` 与 `internal/api/admin` 全包测试通过。随后以冻结 build `2026.08.18.1` 和仓库外固定 CLI manifest 执行完整 `make validate`，lint 0 issues、全仓 Go race、Dashboard 26 tests/build、compatibility matrix/fixed CLI、release workflow、VM/deploy、Kubernetes/cluster 与 Azure Bicep 门禁全部通过。
+- 未满足门禁：未构建/部署 Admin/Dashboard，也未在目标环境执行一次真实 Copilot refresh；dirty 工作树聚合验证不构成 release evidence。已有持久化目录不会自动迁移，需 refresh 后 Save 才写入新的默认 exposed ID。
+- 下一最小步骤：部署 Admin 后在 Models 页执行 `Refresh from Copilot -> Save`，确认 Claude exposed 使用连字符、GHCP Model ID 保持点号，并显示真实 `264K/200K` 上限；1M alias 等待 Copilot 目录提供可验证能力后再建立。

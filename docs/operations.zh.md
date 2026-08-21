@@ -225,7 +225,7 @@ Dashboard Events 默认打开聚焦后的 `Changes` 视图，在分页前排除�
 | `github.copilot_token_url` | Copilot bearer token 换取端点 |
 | `GITHUB_TOKEN_FILE` | `metrics-sync` Worker role 使用的只读 GitHub token 文件；不使用 `GITHUB_TOKEN` 或数据库 setting fallback |
 | `DASHBOARD_DIR` | admin 服务 Dashboard 静态资源目录 |
-| `model_catalog_json` | 暴露名、上游模型 ID、上游 API、启停状态和可选 Copilot 有效 token limits（`context_window_tokens`、`max_prompt_tokens`、`max_output_tokens`、`max_non_streaming_output_tokens`）的严格目录合同；非法 JSON、未知字段、负数 limit、空 ID、重复 exposed ID 和未知 API 会在落库前被拒绝 |
+| `model_catalog_json` | 暴露名、上游模型 ID、上游 API、启停状态、可选 Copilot 有效 token limits（`context_window_tokens`、`max_prompt_tokens`、`max_output_tokens`、`max_non_streaming_output_tokens`）和 `long_context_supported` 的严格目录合同；仅当 `/models` 声明 `billing.token_prices.long_context.max_prompt_tokens` 时，Copilot refresh 才写入该能力，并自动采用更大的 prompt limit 和推导后的 context window。非法 JSON、未知字段、负数或溢出 limit、空 ID、重复 exposed ID 和未知 API 会在落库前被拒绝。该字段是目录元数据，客户端仍需选择长上下文请求语义。 |
 | `logging.level` / `logging.format` | 日志级别和格式 |
 
 ## 多账号环境隔离

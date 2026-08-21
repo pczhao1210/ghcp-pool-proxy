@@ -87,6 +87,16 @@ Claude Code 侧可通过 `/model <alias|name>`、启动参数 `claude --model <a
 | 完整模型 ID，例如 `claude-sonnet-5`、`claude-opus-4-8`、`claude-haiku-4-5` | 同客户端会发送的完整 ID | Copilot `/models` 中对应的真实 ID | 如果你在 Claude Code 中钉死完整模型名，就把完整名作为 `exposed`；若 Copilot 返回 ID 完全一致，则 `upstream` 可相同 |
 | 自定义 picker 选项，例如 `my-gateway/claude-opus-4-8` | 同自定义字符串 | 实际要发给 Copilot 的模型 ID | 适用于 `ANTHROPIC_CUSTOM_MODEL_OPTION`；`exposed` 必须与 Claude Code 发出的字符串精确一致 |
 
+Claude Code `2.1.238` 会把 `claude-opus-4-8` 识别为支持 adaptive thinking 的模型，而已验证账号的 Copilot 目录返回 `claude-opus-4.8`。应显式配置以下客户端/上游别名：
+
+```json
+{"exposed":"claude-opus-4-8","upstream":"claude-opus-4.8","vendor":"Anthropic","upstream_api":"anthropic_messages","enabled":true}
+```
+
+Claude Code 的 `model`、`ANTHROPIC_MODEL`，以及需要 Opus 默认值时的 `ANTHROPIC_DEFAULT_OPUS_MODEL` 都应设为 `claude-opus-4-8`。CC Switch 的 Claude provider 会把 `model` 和 `opusModel` 写入这些环境变量，因此两个字段都应使用连字符 exposed ID。其 `reasoningEffort` 字段属于 Codex provider，不能开启 Claude effort。Claude Code 根据模型 ID 判定支持 effort 后，应在 Claude Code 内选择档位或显式传入 `--effort medium`；实测 Claude Code `2.1.238` 会忽略孤立 `settings.json` 中的 `effortLevel:"medium"`，仍发送默认 `high`。
+
+使用 `--effort medium` 时，Claude Code `2.1.238` 会发送 `thinking.type=adaptive`、`thinking.display=omitted`、`output_config.effort=medium`，以及 `mid-conversation-system-2026-04-07`、`effort-2025-11-24` 两个 beta token。该精确请求已由 Copilot 的 `claude-opus-4.8` 成功接受。客户端使用点号 ID `claude-opus-4.8` 或当前自定义 Sonnet `claude-sonnet-4.6` 时仍采用固定 manual thinking，Claude Code 不提供可调 effort。
+
 `upstream` 的权威来源是 Dashboard Models 页的 `Refresh from Copilot` 结果，而不是上表中的示例。不同账号、seat、地区或 Copilot 后端版本可能返回不同 ID；配置时以实际可见模型为准。经过真实文本、流式、工具循环、协议转换和取消验证后，Anthropic vendor 推断默认走原生 Messages。要回滚某个模型，可显式设置 `upstream_api="chat_completions"`。
 
 ## 同协议语义与兼容开关
@@ -194,10 +204,12 @@ logprobs, top_logprobs, service_tier, modalities, audio
 ```text
 temperature, top_p, text, reasoning, reasoning_effort,
 response_format, parallel_tool_calls, stream_options,
-truncation, include, store, service_tier
+truncation, include, store, service_tier, context_management
 ```
 
 `reasoning` 和 `reasoning_effort` 只按原名透传；不会转换为 Anthropic `thinking`。
+
+Responses `context_management` 只接受 `{ "type": "compaction", "compact_threshold": <正整数> }` 组成的数组。Gateway 仅在 Responses -> Responses 路径按原名保留该字段；容器错误、未知 entry type、字段缺失、未知嵌套字段以及非正数或非整数阈值都会在 provider dispatch 前拒绝。跨协议路径会丢弃该参数，因为目标协议不能保留 Responses 服务端 compaction 语义。
 
 Copilot Responses 请求包含 `include=reasoning.encrypted_content` 时，无论客户端是否在白名单内，都会走有界兼容 fallback。Provider 只删除这个不支持的 include 值，列表因此为空时才省略 `include`。`codex_exec/<major>.<minor>.<patch>` 家族 User-Agent 与已认证 `codex-candidate` profile 的组合仍记录为 declared downgrade；运行时白名单不再钉死一个 Codex 版本。其它客户端记录一条结构化 WARN，只包含请求标识、route 和受控的 `provider_include_filtered` reason，同时递增 `applied_compatibility_fallback` 兼容指标。精确 CLI 版本继续作为发布证据身份，不进入请求路由键；其它语义校验保持不变。
 

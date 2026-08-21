@@ -61,7 +61,7 @@ curl --fail --silent --show-error "$GATEWAY_URL/version"
 5. `claude-opus-4.8`，使用 Anthropic Messages API；
 6. `gemini-3.5-flash`，使用 Chat Completions API。
 
-每个可见模型按顺序执行基础文本、流式终态和强制 function tool；两个 GPT 目标追加 reasoning，两个 Claude 目标追加 thinking，共 19 个生成场景。所有请求串行执行，每次请求前默认等待 15 秒；`PROBE_INTERVAL` 最低为 10 秒。模型 ID 必须与 `/models` 返回值精确匹配；目录中不存在的目标记录为 `model_not_visible`，不会用相近模型替代，也不会发送生成请求。
+每个可见模型按顺序执行基础文本、流式终态和强制 function tool；两个 GPT 目标追加 reasoning，两个 Claude 目标追加 manual thinking，`claude-opus-4.8` 再追加 Claude Code `2.1.238` 的 adaptive thinking/effort wire，共 20 个生成场景。所有请求串行执行，每次请求前默认等待 15 秒；`PROBE_INTERVAL` 最低为 10 秒。模型 ID 必须与 `/models` 返回值精确匹配；目录中不存在的目标记录为 `model_not_visible`，不会用相近模型替代，也不会发送生成请求。
 
 前置条件：
 
@@ -90,6 +90,16 @@ COMPOSE_FILE=deploy/docker-compose.vm.yml \
 	./manual_test.sh ACCOUNT_UUID /tmp/ghcp-direct-capabilities.json
 ```
 
+只执行一个精确场景时同时设置模型和场景过滤器，例如验证 adaptive effort：
+
+```bash
+PROBE_MODEL=claude-opus-4.8 \
+	PROBE_SCENARIO=adaptive_thinking \
+	./manual_test.sh ACCOUNT_UUID /tmp/ghcp-adaptive-effort.json
+```
+
+过滤器只接受脚本注册的精确模型 ID 和场景；没有匹配项时在连接数据库或 GitHub 前失败。
+
 脚本同时向标准输出打印 JSON，并以 `0600` 权限写入报告。退出码含义：`0` 表示所有目录可见目标均通过，`2` 表示至少一个目标不可见或探测失败，其它非零值表示配置、credential、数据库、目录请求或执行环境失败。
 
 重点查看：
@@ -97,7 +107,7 @@ COMPOSE_FILE=deploy/docker-compose.vm.yml \
 - `catalog.raw.data`：Copilot 返回的原始模型 ID、展示名和能力元数据；
 - `probes[].catalog_match`：固定目标是否在目录可见；
 - `probes[].upstream_api`：实际使用的原生协议；
-- `probes[].scenario`：`text`、`streaming`、`tool`、`reasoning` 或 `thinking`；
+- `probes[].scenario`：`text`、`streaming`、`tool`、`reasoning`、`thinking` 或 `adaptive_thinking`；
 - `probes[].result`：`supported`、`model_not_visible` 或 `failed`；
 - `probes[].error`：HTTP 状态、Provider 错误类型和诊断细节；
 - `summary`：所有已执行场景的最终计数。

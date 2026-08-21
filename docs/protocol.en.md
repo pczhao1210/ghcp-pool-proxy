@@ -87,6 +87,16 @@ On the Claude Code side, the model can be set with `/model <alias|name>`, the st
 | Full model IDs, for example `claude-sonnet-5`, `claude-opus-4-8`, `claude-haiku-4-5` | The exact full ID the client sends | The matching real ID from Copilot `/models` | If Claude Code is pinned to a full model name, use that full name as `exposed`; if Copilot returns the same ID, `upstream` can be identical |
 | Custom picker values, for example `my-gateway/claude-opus-4-8` | The exact custom string | The real model ID to send to Copilot | Applies to `ANTHROPIC_CUSTOM_MODEL_OPTION`; `exposed` must exactly match the string Claude Code sends |
 
+Claude Code `2.1.238` recognizes `claude-opus-4-8` as adaptive-thinking capable, while the Copilot catalog for the verified account exposes `claude-opus-4.8`. Configure the deliberate client/upstream alias as follows:
+
+```json
+{"exposed":"claude-opus-4-8","upstream":"claude-opus-4.8","vendor":"Anthropic","upstream_api":"anthropic_messages","enabled":true}
+```
+
+Set Claude Code's `model`, `ANTHROPIC_MODEL`, and, when an Opus default is needed, `ANTHROPIC_DEFAULT_OPUS_MODEL` to `claude-opus-4-8`. CC Switch's Claude provider maps its `model` and `opusModel` fields to those environment variables, so both fields should use the exposed hyphenated ID. Its `reasoningEffort` field belongs to Codex providers and does not enable Claude effort. After Claude Code recognizes the model ID as effort-capable, select the level in Claude Code or pass `--effort medium`; an isolated `settings.json` value of `effortLevel:"medium"` was ignored by Claude Code `2.1.238`, which sent its default `high` instead.
+
+With `--effort medium`, Claude Code `2.1.238` sends `thinking.type=adaptive`, `thinking.display=omitted`, `output_config.effort=medium`, and the `mid-conversation-system-2026-04-07` and `effort-2025-11-24` beta tokens. This exact request was accepted by Copilot for upstream `claude-opus-4.8`. The dotted client ID `claude-opus-4.8` and the current custom Sonnet `claude-sonnet-4.6` instead use fixed manual thinking and do not expose adjustable effort in Claude Code.
+
 The authoritative source for `upstream` is the Dashboard Models page after `Refresh from Copilot`, not the examples above. Different accounts, seats, regions, or Copilot backend versions may expose different IDs. Anthropic vendor inference defaults to native Messages after live text, stream, tool-loop, conversion, and cancellation validation. Set `upstream_api="chat_completions"` explicitly to roll back one model.
 
 ## Same-Protocol Semantics And Compatibility Flags
@@ -194,10 +204,12 @@ Passed through to `Params` and written to the upstream body with the same name:
 ```text
 temperature, top_p, text, reasoning, reasoning_effort,
 response_format, parallel_tool_calls, stream_options,
-truncation, include, store, service_tier
+truncation, include, store, service_tier, context_management
 ```
 
 `reasoning` and `reasoning_effort` are passed through by name only; they are not converted to Anthropic `thinking`.
+
+Responses `context_management` accepts only an array of typed compaction entries shaped as `{ "type": "compaction", "compact_threshold": <positive integer> }`. The gateway preserves this field by name only on Responses-to-Responses routes. A wrong container, unknown entry type, missing field, unknown nested field, or non-positive/non-integer threshold is rejected before provider dispatch; cross-protocol routes discard the parameter because they cannot preserve server-managed Responses compaction semantics.
 
 Copilot Responses requests containing `include=reasoning.encrypted_content` use a bounded compatibility fallback regardless of client allowlisting. The provider removes only this unsupported include value; if the list then becomes empty, `include` is omitted. A `codex_exec/<major>.<minor>.<patch>` family User-Agent plus authenticated `codex-candidate` profile retains the declared-downgrade observation; the runtime allowlist does not pin one Codex version. All other clients receive a structured warning containing only request identity, route, and the controlled `provider_include_filtered` reason, plus an `applied_compatibility_fallback` compatibility metric. Exact CLI versions remain release-evidence identities, not request-routing keys. Other semantic validation remains unchanged.
 

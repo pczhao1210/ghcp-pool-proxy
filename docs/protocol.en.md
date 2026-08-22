@@ -146,7 +146,7 @@ Request-side generation controls are normalized only when that exact conversion 
 
 The mapping above preserves generation-depth intent, not protocol identity. `display:"summarized"` is not converted to a Responses summary option because the verified gateway contract advertises `supports_reasoning_summary_parameter:false`. Other directions remain protocol-native unless separately capability-gated; the gateway does not infer Chat provider dialects from a model name.
 
-On the response side, Chat reasoning text can be retained for Chat or rebuilt as a Responses reasoning item. Structured Responses reasoning items cannot be reduced to Chat or Messages, and Anthropic thinking cannot cross protocols because its block/signature contract has no equivalent; its block-start event is rejected before any thinking delta is written. Message phases and any reasoning delta that the selected writer would drop are likewise rejected. This does not imply a unified request-side reasoning level.
+On the response side, Chat reasoning text can be retained for Chat or rebuilt as a Responses reasoning item. When a Chat upstream serves a Messages client, unsigned Chat `reasoning_content` has no safe Anthropic thinking representation: the response policy omits it and continues with final text/tool output instead of synthesizing an unsigned thinking block. Structured Responses reasoning items still cannot be reduced to Chat or Messages, and Anthropic thinking cannot cross protocols because its block/signature contract has no equivalent; its block-start event is rejected before any thinking delta is written. Other reasoning deltas that the selected writer would drop remain rejected. This does not imply a unified request-side reasoning level.
 
 ## Client Protocol Fields
 

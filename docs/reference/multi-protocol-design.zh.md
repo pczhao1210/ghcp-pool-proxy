@@ -768,6 +768,8 @@ Messages 请求携带 `stop_sequences` 且目标为 Responses 时，会由方向
 
 当前实现不在 Chat `reasoning_effort` 与 Responses `reasoning.effort` 之间自动转换。Messages 顶层生成控制 `output_config.effort` / `thinking` 只按精确模型转换 profile 写入目标声明的 `reasoning.effort` 或 `reasoning_effort`；未知模型或未验证 profile 不注入。该映射不转换 `display`，也不触碰历史 thinking block。不能把 Anthropic thinking block 当作 OpenAI reasoning item，也不能伪造 thinking signature。
 
+响应侧的 Chat `reasoning_content` 没有 Anthropic signature，Chat -> Messages 只可把它作为目标不可见的附带 metadata 省略，并继续交付 final text/tool；不得重建为 thinking block。Responses reasoning item 与 Anthropic signed thinking 仍属于不可降级核心语义，继续 fail closed。
+
 ### 13.3 Metadata
 
 metadata 应按“默认不承诺跨协议无损”处理：

@@ -68,6 +68,15 @@
 - 未满足门禁：尚无 schema 提案、策略编译器、shadow evaluator、性能基线、迁移清单或批准的实施 issue；因此该候选不属于当前 release acceptance，也不改变任何 compatibility level。
 - 下一最小步骤：有实施窗口时先提交只包含 schema、能力 ID 命名和 shadow comparison 输出的设计提案，以现有 Messages -> OpenAI effort 映射作为第一个有限样例；取得评审与基准后再决定是否进入代码阶段。
 
+## 2026-08-22 Gemini Messages -> Chat reasoning 响应归一
+
+- 状态：Phase 7 后维护修复已实现。用户报告 `gemini-3.5-flash + /v1/messages + stream:true` 显示错误名称 `null`、错误信息 `[object Object]`。目标 Gateway `/version` 已确认运行当前 revision `9f6db7c4a3168c7a12528a44ee921cbb3d39d581`；本地端到端红灯精确复现 Chat SSE `reasoning_content` 被解析为 canonical `ReasoningDelta` 后，Messages response validator 在已输出 `message_start` 后写入 `event:error` / `api_error`，客户端因未展开 SSE error object 而显示该泛化错误。
+- 修复：新增响应方向 policy，仅在 `chat_completions -> anthropic_messages` 清除 unsigned Chat reasoning text/delta，再执行原有 semantic validator 和 writer；final text、function tool、usage 与成功终态保持不变，stream 正常结束于 `message_stop`。该策略不会把 Chat reasoning 伪造成无签名 Anthropic thinking，也不放宽 Responses reasoning item、Anthropic thinking/signature、refusal、logprobs 或 audio；绕过 policy 直接调用 validator 时仍 fail closed。
+- 性能边界：非流响应只做一次字符串空值/方向判断，流式每事件做同级常量判断；不增加文件/数据库/网络访问、重试、缓冲或序列化轮次。该行为不读取或修改模型转换 matrix，适用于精确的协议方向而非模型名前缀猜测。
+- 验证：红灯响应体为 `message_start` 后紧跟 `event:error`，且缺少 final answer；修复后 `gemini-3.5-flash` 流式回归确认 private reasoning、`thinking_delta` 与 error 均不出现在下游，final answer 和 `message_stop` 正常；非流式回归确认只交付 final answer。原有六方向高级语义拒绝矩阵改用 Chat `logprobs` 继续锁定 Messages -> Chat 的严格边界；response policy 精确方向单测通过。`go test ./... -count=1` 与相关编辑器诊断通过。使用 build `2026.08.18.1` 和仓库外固定 CLI manifest 运行 `make validate` 退出 0：lint、全仓 race、Dashboard 26 tests/build、兼容矩阵、release/start workflow、VM deploy、Kubernetes/cluster 与 Azure Bicep 静态门禁全部通过。
+- 未满足门禁：用户侧看不到原始 HTTP/SSE 与 request ID，Azure VM SSH 被 NSG 超时且 Compute 工具不提供 Run Command，因此没有取得该次线上日志；根因由相同模型/流式方向和完全一致的下游 envelope 做确定性复现。尚未构建/部署新镜像或执行真实 Copilot 重放；不可变 release attestation、Redis Cluster 和实际 Kubernetes 集群未运行。
+- 下一最小步骤：构建并部署新 Gateway；随后用 `gemini-3.5-flash` 最小 Messages 流式请求重放，确认 final text 后正常 `message_stop`，且日志不再出现 `$.reasoning_content: reasoning_delta_not_representable`。
+
 ## 2026-08-22 Cherry Studio summarized thinking 转换
 
 - 状态：Phase 7 后维护修复已实现。真实 Cherry Studio `/v1/messages` 请求使用 `thinking:{"type":"adaptive","display":"summarized"}` 与 `output_config.effort=high`；Gateway 在模型目录选择 Chat/Responses 目标之前于 `$.thinking.display` 返回 `anthropic_messages->canonical invalid_value`，导致两个转换方向都无法进入既有参数删除策略。

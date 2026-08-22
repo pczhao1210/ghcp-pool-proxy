@@ -146,7 +146,7 @@ Parser 和语义门禁错误会包含转换方向、JSON path 和稳定 reason�
 
 上述映射保留的是生成深度意图，不是协议身份。`display:"summarized"` 不会转换为 Responses summary 参数，因为已验证 Gateway 合同明确为 `supports_reasoning_summary_parameter:false`。其它方向仍保持协议原生，除非另有能力门禁；Gateway 不按模型名猜测 Chat provider 方言。
 
-响应方向中，Chat reasoning text 可保留到 Chat，或重建为 Responses reasoning item。结构化 Responses reasoning item 不能降级到 Chat/Messages；Anthropic thinking 的 block/signature 合同在其它协议中没有等价表达，因此在 block-start 就会被拒绝，不会先写出 thinking delta。Message phase 以及任何会被目标 writer 丢弃的 reasoning delta 也会被拒绝。这不代表请求侧存在统一 reasoning level。
+响应方向中，Chat reasoning text 可保留到 Chat，或重建为 Responses reasoning item。Chat 上游服务 Messages 客户端时，unsigned Chat `reasoning_content` 无法安全表示为 Anthropic thinking；response policy 会省略它并继续交付 final text/tool，不会伪造无签名 thinking block。结构化 Responses reasoning item 仍不能降级到 Chat/Messages；Anthropic thinking 的 block/signature 合同在其它协议中没有等价表达，因此在 block-start 就会被拒绝，不会先写出 thinking delta。其它会被目标 writer 丢弃的 reasoning delta 仍会拒绝。这不代表请求侧存在统一 reasoning level。
 
 ## 入口协议字段
 

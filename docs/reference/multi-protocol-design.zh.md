@@ -766,9 +766,11 @@ Messages 请求携带 `stop_sequences` 且目标为 Responses 时，会由方向
 - Anthropic thinking block：具有内容块、预算、模式和可能的 signature；
 - redacted thinking：不能反向构造的受保护内容。
 
-当前实现不在 Chat `reasoning_effort` 与 Responses `reasoning.effort` 之间自动转换。Messages 顶层生成控制 `output_config.effort` / `thinking` 只按精确模型转换 profile 写入目标声明的 `reasoning.effort` 或 `reasoning_effort`；未知模型或未验证 profile 不注入。该映射不转换 `display`，也不触碰历史 thinking block。不能把 Anthropic thinking block 当作 OpenAI reasoning item，也不能伪造 thinking signature。
+当前实现不在 Chat `reasoning_effort` 与 Responses `reasoning.effort` 之间自动转换。Messages 顶层生成控制 `output_config.effort` / `thinking` 只按精确模型转换 profile 写入目标声明的 `reasoning.effort` 或 `reasoning_effort`；Responses → Messages 可按同一精确 profile投影 adaptive thinking，且只有显式 `adaptive_by_default` 的模型会在无 effort 时默认开启。该映射不转换 `display`。不能把任意 Anthropic thinking block 当作 OpenAI reasoning item，也不能伪造 thinking signature。
 
-响应侧的 Chat `reasoning_content` 没有 Anthropic signature，Chat -> Messages 只可把它作为目标不可见的附带 metadata 省略，并继续交付 final text/tool；不得重建为 thinking block。Responses reasoning item 与 Anthropic signed thinking 仍属于不可降级核心语义，继续 fail closed。
+唯一的历史 thinking 例外是工具循环的 opaque replay：完整 signed thinking/redacted-thinking block 可以编码进带 Gateway 专用前缀的 Responses `reasoning.encrypted_content`，下一轮只有结构、前缀和 signature/data 校验通过且能关联到后续 function call 时才恢复。它是 base64 transport envelope，不是加密或通用 reasoning 互转；未知/无签名/无法关联的 item 继续拒绝。
+
+响应侧的 Chat `reasoning_content` 没有 Anthropic signature，Chat -> Messages 只可把它作为目标不可见的附带 metadata 省略，并继续交付 final text/tool；不得重建为 thinking block。普通 Responses reasoning item 与 bridge 合同外的 Anthropic signed thinking 仍属于不可降级核心语义，继续 fail closed。
 
 ### 13.3 Metadata
 

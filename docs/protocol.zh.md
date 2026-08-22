@@ -130,9 +130,9 @@ Gateway 会保留并转发 `previous_response_id`，但 Copilot 可能拒绝有�
 | Chat → Responses | message、image、function tool/result、reasoning text | `message.name` 和无法保真的 typed history 扩展 | 合成 Responses item ID 与 lifecycle |
 | Chat → Messages | message、image、function tool/result、公共 stop reason | `message.name`、reasoning content/delta、非文本 system/developer 内容 | 删除目标无法表达的 Chat 参数；合成 Anthropic block 与 lifecycle；纯文本 system/developer message 转为顶层 `system` |
 | Responses → Chat | message/text/image、function call/output item | `previous_response_id`、结构化 instructions、reasoning/custom/tool-search/refusal item、message phase、tool namespace | 删除目标无法表达的 Responses 参数；省略 Responses item/lifecycle identity |
-| Responses → Messages | message/text/image、function call/output item | 上述 Responses-only 语义，以及 Responses Lite/additional tools 和 reasoning/refusal delta | 省略 Responses item/lifecycle identity |
+| Responses → Messages | message/text/image、function call/output item，以及带 Gateway 专用前缀的 signed Anthropic thinking bridge item | 上述 Responses-only 语义，以及 Responses Lite/additional tools、无法识别的 reasoning item 和 refusal delta | 省略 Responses item/lifecycle identity；识别出的 bridge state 会恢复到匹配的 assistant tool-use turn 之前 |
 | Messages → Chat | text/image、普通文本 tool use/result | thinking/redacted block、signature、`is_error`、非文本 tool result、原生 cache/beta block 语义、来源 stop sequence 和非公共终态 | 删除目标无法表达的 Messages 参数；省略 Anthropic block/lifecycle identity |
-| Messages → Responses | text/image、普通文本 tool use/result | thinking/redacted block、signature、`is_error`、非文本 tool result、原生 cache/beta block 语义、来源 stop sequence 和非公共终态 | 删除目标无法表达的 Messages 参数；省略 Anthropic block/lifecycle identity |
+| Messages → Responses | text/image、普通文本 tool use/result，以及工具回合所需的 signed thinking/redacted-thinking block | 无签名/畸形 thinking、`is_error`、非文本 tool result、原生 cache/beta block 语义、来源 stop sequence 和非公共终态 | signed thinking 包装为带 Gateway 前缀的 opaque `reasoning.encrypted_content` item；其它 Anthropic block/lifecycle identity 省略 |
 
 Request validator 在路由、预算 reservation 和 provider dispatch 前执行，不兼容请求返回 `400 invalid_request_error`。非流式 response validator 在 typed 上游解析后、客户端序列化前执行；不兼容时返回 `502`，且不记录 durable success。Stream validator 在每个 canonical event 进入下游 SSE writer 前执行；不兼容时写入对应入口的 stream error shape，并把 provider attempt 保留为 `outcome_unknown`。
 
@@ -144,9 +144,11 @@ Parser 和语义门禁错误会包含转换方向、JSON path 和稳定 reason�
 
 请求侧生成控制只在该精确 profile 声明已验证目标 wire 参数和合法档位时归一。Messages -> OpenAI 中显式 `output_config.effort` 优先；`adaptive` 请求 `xhigh`，manual budget 小于 4,000 / 小于 16,000 / 其它分别请求 `low` / `medium` / `high`。请求档位合法时原样保留；否则提升到不低于请求的最近合法档，超过模型最高档时取最高档。因此 GPT-5.5 的 `max` 降为 `xhigh`，GPT-5.6 的 `max` 保持不变。`thinking:disabled` 不注入 reasoning。Responses profile 写入 `reasoning.effort`，Chat profile 可写入 `reasoning_effort`；没有精确 profile 时两者都不注入。源 `thinking` 与 `output_config` 在 OpenAI 序列化前仍会删除并记录诊断。
 
+Responses → Messages 还可由精确模型 profile 声明 `adaptive_by_default`。Sonnet 5 默认 adaptive thinking，Opus 4.8 不默认启用。当前参考证据把 Opus 5归入 Opus 4.8这一侧：支持显式 adaptive `xhigh/max`，但在真实 Copilot探针证明前不默认开启。因此 Sonnet 5 首轮会投影 `thinking.type=adaptive`，显式 Responses effort 会按该模型声明的 Anthropic 档位钳位，并删除 Anthropic thinking 不接受的 `temperature`/`top_p`。工具结果续轮只有在恢复了匹配的 signed thinking 历史后才继续 adaptive；缺少该历史时发送 `thinking.type=disabled`，不会构造非法的 interleaved-thinking turn。
+
 上述映射保留的是生成深度意图，不是协议身份。`display:"summarized"` 不会转换为 Responses summary 参数，因为已验证 Gateway 合同明确为 `supports_reasoning_summary_parameter:false`。其它方向仍保持协议原生，除非另有能力门禁；Gateway 不按模型名猜测 Chat provider 方言。
 
-响应方向中，Chat reasoning text 可保留到 Chat，或重建为 Responses reasoning item。Chat 上游服务 Messages 客户端时，unsigned Chat `reasoning_content` 无法安全表示为 Anthropic thinking；response policy 会省略它并继续交付 final text/tool，不会伪造无签名 thinking block。结构化 Responses reasoning item 仍不能降级到 Chat/Messages；Anthropic thinking 的 block/signature 合同在其它协议中没有等价表达，因此在 block-start 就会被拒绝，不会先写出 thinking delta。其它会被目标 writer 丢弃的 reasoning delta 仍会拒绝。这不代表请求侧存在统一 reasoning level。
+响应方向中，Chat reasoning text 可保留到 Chat，或重建为 Responses reasoning item。Chat 上游服务 Messages 客户端时，unsigned Chat `reasoning_content` 无法安全表示为 Anthropic thinking；response policy 会省略它并继续交付 final text/tool，不会伪造无签名 thinking block。Anthropic → Responses 工具循环中，带非空 signature 的完整 `thinking` block 或完整 redacted-thinking block 会以 `ghcp-anthropic-thinking-v1:` 前缀包装进 `reasoning.encrypted_content`，可见 thinking text 可进入 summary；该精确 envelope 在下一轮出现在匹配 function call 前时，Gateway 严格解码并把原 block 恢复到 `tool_use` 之前。payload 只是 base64 transport state，不提供保密性，也不会进入日志。未知前缀、畸形 envelope、无签名 block、无关 Responses reasoning，以及工具历史 bridge 之外的 thinking 继续 fail closed。这不代表请求侧存在统一 reasoning level。
 
 ## 入口协议字段
 

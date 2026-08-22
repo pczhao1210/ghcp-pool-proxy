@@ -10,9 +10,10 @@
 
 1. [数据库迁移](../../migrations/) 决定已部署 schema。
 2. 当前代码和可复现测试决定已实现行为。
-3. [兼容矩阵](../../compatibility/matrix.json) 决定静态客户端合同与最高候选等级。
-4. 外置、未提交的 release-evidence attestation 决定一个不可变 release 的有效等级。
-5. [兼容矩阵说明](../../compatibility/README.md) 说明 evidence 输入与验证命令。
+3. GitHub 的 [supported models 页面](https://docs.github.com/en/copilot/reference/ai-models/supported-models) 决定当前 Copilot 模型名单、发布状态和官方 extended capability；[内嵌模型转换矩阵](../../internal/modelcatalog/conversion_matrix.json) 只决定已有精确 runtime binding 的转换参数 profile，不决定账号可用性。
+4. [兼容矩阵](../../compatibility/matrix.json) 决定静态客户端合同与最高候选等级。
+5. 外置、未提交的 release-evidence attestation 决定一个不可变 release 的有效等级。
+6. [兼容矩阵说明](../../compatibility/README.md) 说明 evidence 输入与验证命令。
 
 ## 已完成边界
 
@@ -44,6 +45,37 @@
 - 验证：全仓库 25 份 Markdown 的本地链接检查通过；运行包 README 按其 staged release root 解析链接；`make release-manifest-test` 通过，确认 staging 包含文档索引与兼容矩阵。
 - 未运行检查：本次只改变文档与本地构建产物，不需要运行 Go、Dashboard、Compose 或 Kubernetes 门禁。
 - 下一最小步骤：仅在新的 release、matrix/schema/build 变化或经批准的新能力出现时创建独立兼容性任务。
+
+## 2026-08-22 模型级协议转换能力矩阵
+
+- 冻结范围：Phase 7 后维护切片只新增静态模型支持事实与转换参数 profile，接入 Gateway 模型解析后的 request policy，并把 Messages 顶层生成控制改为模型级映射；不改变动态模型发布、账号 entitlement、客户端兼容等级、response thinking/signature 边界或路由资格。
+- 状态：已实现 schema 2 内嵌矩阵。`supported_models` 完整记录本次 GitHub 官方页面的 31 个当前模型及 release status/configurable reasoning；`profiles` 只为已有精确 `(upstream_model, upstream_api)` 证据的模型声明参数。Gemini 3.7 Flash、Grok 4.5/4.6、Claude Fable 5、Kimi K2.7 Code/Kimi K3 已进入官方支持清单；GPT-5/5.1/5.2、o3、o4-mini 等已退役模型已移出当前清单与热路径 profile。
+- 事实边界：官方页面不提供 Copilot 内部 wire ID/API 和完整参数枚举，因此不能替代动态 `/models`、`model_catalog_json`、direct probe 或 release contract。上述新模型在精确 runtime binding 未验证前不建立 active conversion profile，也不会因静态清单而被 Gateway 发布。CC Switch 只作为 level/转换机制的二级参考，不裁决 Copilot 支持成员。
+- 请求行为：Gateway 在 exposed model 解析为 exact upstream 后、方向策略前附加不可变 profile。没有 profile 或 profile 未启用 reasoning 时只删除 Anthropic-only 控制，不注入猜测参数；Responses profile 写 `reasoning.effort`，Chat profile 可写 `reasoning_effort`。显式 effort 优先，adaptive/manual budget 生成请求档位，再按模型合法集合取“不低于请求的最近档”，超过最高档则取最高档；GPT-5.5 的 `max` 因而降为 `xhigh`，GPT-5.6 保留 `max`。原生 Messages 对已绑定 Claude profile 校验 thinking type、budget、display 与 effort；未知 profile 保留原有仅允许 `display:omitted` 的保守 fallback。
+- 数据与性能：矩阵由 `go:embed` 在启动时严格解析，拒绝未知字段、错误来源、悬空官方模型引用、重复 runtime key、非法 level/wire/API 组合和能力/参数表不一致。请求热路径只有一次不可变 map lookup 与小 slice 档位扫描，不增加文件 I/O、数据库查询、网络探测、重试或序列化轮次。
+- 验证：schema/source/membership/退役模型/非法数据反例、GPT-5.5 与 GPT-5.6 档位差异、未知模型不注入、未来 Chat `reasoning_effort` profile、Claude native thinking profile、Cherry Studio summarized thinking parser/Gateway/Provider wire 回归均通过；`go test ./... -count=1` 通过。使用 build `2026.08.18.1` 与仓库外固定 CLI manifest 运行 `make validate` 退出 0，覆盖 lint、全仓 race、Dashboard 26 tests/build、兼容矩阵、fixed-CLI fake collector、release manifest、VM/cluster deploy 脚本、Kubernetes 与 Azure Bicep 静态门禁。
+- 未满足门禁：尚未运行真实 Copilot 参数探针、不可变 release attestation、目标 VM、Redis Cluster 或实际 Kubernetes 集群。Gemini 3.7、Grok 4.5/4.6、Fable 5、Kimi K2.7/K3 的精确 Copilot upstream ID/API 与 reasoning wire/levels 尚未形成可提交证据，因此当前只进入官方支持清单，不启用参数注入。
+- 下一最小步骤：从一个隔离账号的 Copilot `/models` 冻结上述未绑定模型的精确 ID/API，并为每个可调模型执行最小合法/非法 level 对照探针。只有证据通过后才以纯 JSON profile 更新启用对应转换。
+
+### Phase 7 后续候选：声明式能力策略编译
+
+- 状态：已记录设计方向，尚未实施，不改变当前 parser、request policy、客户端授权或 Provider 行为。实施必须另开冻结切片，不能把现有 `supported_request_parameters` 直接解释成全局 allowlist。
+- 目标：把模型和客户端频繁变化的参数能力、合法值、协议方向、rename/map/clamp/drop/reject 动作、最低客户端版本与 evidence 具象化为版本化数据，减少新增模型或客户端版本时反复修改转换代码的运维负担。
+- 分层边界：协议 JSON 类型、必填字段、union discriminator、role/tool lifecycle、thinking signature、图片安全、SSE 状态机和响应终态继续由 Go 代码强制；模型转换能力继续归 `conversion_matrix.json`，客户端/版本授权继续归 `compatibility/matrix.json`，动态 `/models` 与账号 capability snapshot 继续决定实际可用性，不把三类事实源合并成无边界的大表。
+- 有效策略：请求能力按“协议硬约束 ∩ 精确模型 profile ∩ 已认证客户端 capability ∩ 账号实时可用性”求交；硬安全拒绝不能被数据配置放宽。客户端矩阵应引用稳定 capability ID，而不是复制一套原始字段列表；未知可选字段可按明确策略删除并记录 path，核心语义仍 fail closed。
+- 执行模型：启动或后台刷新时严格解析并编译为不可变 snapshot，预计算 exact-key map、能力 bitset 和有序 level；请求热路径只读取 snapshot 并做有限 map/bit lookup，不读取 JSON、不查询远端、不运行通用 JSONPath/脚本。若未来支持在线更新，应采用签名、版本化 overlay、后台全量校验、原子切换与 last-known-good 回退，内嵌基线继续作为安全默认值。
+- 分阶段门禁：先定义带 `action/type/allowed_values/on_unsupported/evidence` 的 schema 和离线 validator；再以 shadow mode 同时计算现有代码决策与数据策略，仅记录脱敏差异；差异归零后按单一协议方向和单一模型逐步启用。每阶段都必须有非法配置反例、协议矩阵回归、基准测试与回滚验证，复杂 tool/thinking/stream 语义不得为了数据化而近似处理。
+- 未满足门禁：尚无 schema 提案、策略编译器、shadow evaluator、性能基线、迁移清单或批准的实施 issue；因此该候选不属于当前 release acceptance，也不改变任何 compatibility level。
+- 下一最小步骤：有实施窗口时先提交只包含 schema、能力 ID 命名和 shadow comparison 输出的设计提案，以现有 Messages -> OpenAI effort 映射作为第一个有限样例；取得评审与基准后再决定是否进入代码阶段。
+
+## 2026-08-22 Cherry Studio summarized thinking 转换
+
+- 状态：Phase 7 后维护修复已实现。真实 Cherry Studio `/v1/messages` 请求使用 `thinking:{"type":"adaptive","display":"summarized"}` 与 `output_config.effort=high`；Gateway 在模型目录选择 Chat/Responses 目标之前于 `$.thinking.display` 返回 `anthropic_messages->canonical invalid_value`，导致两个转换方向都无法进入既有参数删除策略。
+- 修复：Messages typed parser 把 `summarized` 加入有界已知 display 枚举。模型目录解析后仅在精确转换 profile 声明目标 wire/level 时映射顶层生成控制：`output_config.effort` 优先，adaptive/manual budget 产生请求档位，再按模型合法集合钳位；GPT-5.5 的 `max -> xhigh`，GPT-5.6 保留 `max`。随后删除完整 `thinking` 与 `output_config`，记录 `$.thinking` / `$.output_config` normalized path。没有 profile 的 Chat/Responses 目标仍删除源字段但不盲发未知方言。原生 Messages 按已绑定模型 profile 校验 thinking 参数；没有 profile 时 semantic gate 只允许保守的 `display:omitted`，任意其它 display 继续 fail closed。
+- 对照结论：CC Switch 对 reasoning-capable OpenAI 模型同样优先使用 `output_config.effort`，并按 thinking budget 档位映射 effort；本修复采用相同的有界生成控制映射，但不把 `display:summarized` 冒充 Responses summary，也不按模型名猜测 Gemini Chat 方言，不提升 native Messages 能力。
+- 验证：parser 红灯同时复现 Chat/Responses 的附件错误；修复后 parser+direction policy 聚焦测试、两个 HTTP protocol-matrix 转换方向、现有 Cherry MCP 工具请求、native `omitted` 正向与未知 `display:"verbose"` 反例通过。`go test ./... -count=1` 通过；使用 build `2026.08.18.1` 与权限 `0600` 的 `/var/tmp/ghcp-p3-cli/cli-binaries.json` 运行 `make validate` 退出 0，覆盖 lint、全仓 race、Dashboard 26 tests/build、静态 matrix、fixed-CLI fake collector、start/release manifest、VM deploy 脚本、Kubernetes/cluster 与 Azure Bicep 静态门禁；相关编辑器诊断为零。
+- 未满足门禁：尚未构建、发布或部署包含本修复的 Gateway，也未以附件原始大工具集在目标 VM 重放；真实 Copilot、不可变 release attestation、Redis Cluster 与实际 Kubernetes 集群未运行。
+- 下一最小步骤：构建/发布/部署新 Gateway，并用附件原请求分别命中 Chat 与 Responses 模型重放；核对响应不再停在 canonical parser，且 sampled `protocol_request_status=normalized` 只记录字段 path、不记录值或正文。
 
 ## 2026-08-22 三协议 3x3 可用性审查
 

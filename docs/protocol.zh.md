@@ -140,9 +140,11 @@ Parser 和语义门禁错误会包含转换方向、JSON path 和稳定 reason�
 
 ## 推理参数策略
 
-`reasoning`、`reasoning_effort`、`thinking` 这类参数不做跨协议归一化。原生路径会把它们作为协议原生参数放入 `Params`，再按原字段名写入最终上游请求；跨协议路径只有在目标 builder 能保留相同字段语义时才接受，否则由语义门禁拒绝。Gateway 不把 Anthropic `thinking` 翻译成 OpenAI `reasoning`，也不把 OpenAI `reasoning_effort` 翻译成 Anthropic thinking budget。
+模型目录完成解析后，Gateway 按精确 `(upstream_model, upstream_api)` 查询不可变的内嵌转换 profile。[GitHub supported models 页面](https://docs.github.com/en/copilot/reference/ai-models/supported-models) 是当前 Copilot 支持名单、发布状态和官方 configurable reasoning 声明的事实源。动态 Copilot `/models` 与 `model_catalog_json` 仍决定账号实际可用性及精确 upstream ID/API；[客户端兼容矩阵](../compatibility/matrix.json) 仍决定客户端/版本合同。内嵌[模型转换矩阵](../internal/modelcatalog/conversion_matrix.json) 不会发布模型，也不会授予客户端能力。
 
-原因是不同模型和上游 API 对推理控制的 shape、level、budget 语义并不一致。例如 OpenAI Responses 可能使用 `reasoning: { ... }`，OpenAI Chat 兼容入口可能使用 `reasoning_effort`，Claude/Anthropic 常见的是 `thinking`。Gateway 只负责保留客户端显式传入的原生字段；字段是否支持、level 是否有效、budget 上限是否合法，由目标模型和 GitHub Copilot 上游决定。
+请求侧生成控制只在该精确 profile 声明已验证目标 wire 参数和合法档位时归一。Messages -> OpenAI 中显式 `output_config.effort` 优先；`adaptive` 请求 `xhigh`，manual budget 小于 4,000 / 小于 16,000 / 其它分别请求 `low` / `medium` / `high`。请求档位合法时原样保留；否则提升到不低于请求的最近合法档，超过模型最高档时取最高档。因此 GPT-5.5 的 `max` 降为 `xhigh`，GPT-5.6 的 `max` 保持不变。`thinking:disabled` 不注入 reasoning。Responses profile 写入 `reasoning.effort`，Chat profile 可写入 `reasoning_effort`；没有精确 profile 时两者都不注入。源 `thinking` 与 `output_config` 在 OpenAI 序列化前仍会删除并记录诊断。
+
+上述映射保留的是生成深度意图，不是协议身份。`display:"summarized"` 不会转换为 Responses summary 参数，因为已验证 Gateway 合同明确为 `supports_reasoning_summary_parameter:false`。其它方向仍保持协议原生，除非另有能力门禁；Gateway 不按模型名猜测 Chat provider 方言。
 
 响应方向中，Chat reasoning text 可保留到 Chat，或重建为 Responses reasoning item。结构化 Responses reasoning item 不能降级到 Chat/Messages；Anthropic thinking 的 block/signature 合同在其它协议中没有等价表达，因此在 block-start 就会被拒绝，不会先写出 thinking delta。Message phase 以及任何会被目标 writer 丢弃的 reasoning delta 也会被拒绝。这不代表请求侧存在统一 reasoning level。
 
@@ -251,7 +253,9 @@ OpenAI Responses 请求中的工具会保留在 canonical tool 记录中，用�
 temperature, top_p, top_k, stop, thinking, output_config, context_management, metadata
 ```
 
-其中 `stop_sequences` 会重命名为 `stop`。`thinking`、`output_config` 和 `context_management` 只在原生 Messages 中按原名透传，转换到 Chat 或 Responses 时删除，不会转换为 OpenAI 等价字段。`tool_choice.disable_parallel_tool_use:true` 映射为 OpenAI `parallel_tool_calls:false`；反向转换时，显式 OpenAI `false` 在存在工具时映射为 Anthropic `tool_choice.disable_parallel_tool_use:true`。原生 Messages 流式响应会把最终 `message_delta` 上 object 类型的 `context_management` 保留在相同位置；非 object 值或其它事件上的同名字段仍视为上游协议错误。Anthropic `metadata` 仍是上游 body 参数；绑定池也会读取 `metadata.user_id` / `metadata.user` 作为 `user_id`，读取 `metadata.session_id` / `metadata.session` 作为 `session_id`。
+其中 `stop_sequences` 会重命名为 `stop`。`thinking` 与 `output_config` 在原生 Messages 保持原样；目标为 OpenAI 时，仅当精确模型 profile 声明 `reasoning.effort` 或 `reasoning_effort` 才投影生成深度意图，随后删除源字段；没有 profile 的目标只删除，不注入 provider 方言。`context_management` 在两个 OpenAI 目标都会删除。`tool_choice.disable_parallel_tool_use:true` 映射为 OpenAI `parallel_tool_calls:false`；反向转换时，显式 OpenAI `false` 在存在工具时映射为 Anthropic `tool_choice.disable_parallel_tool_use:true`。原生 Messages 流式响应会把最终 `message_delta` 上 object 类型的 `context_management` 保留在相同位置；非 object 值或其它事件上的同名字段仍视为上游协议错误。Anthropic `metadata` 仍是上游 body 参数；绑定池也会读取 `metadata.user_id` / `metadata.user` 作为 `user_id`，读取 `metadata.session_id` / `metadata.session` 作为 `session_id`。
+
+Typed parser 识别 `thinking.display` 的 `omitted` 与 `summarized`。`summarized` 仅作为 Cherry Studio 兼容 hint：保留到目标方向确定后，由 Chat/Responses 策略删除完整 Anthropic-only `thinking` 对象，并把 `$.thinking` 记录为 normalized。原生 Copilot Messages 会按精确模型 profile 校验 thinking type、budget、display 与 effort；没有 profile 时保留仅允许 `display:"omitted"` 的保守 fallback。`summarized` 仍在 provider semantic boundary 拒绝，其它 display 值仍属于 parser 错误。
 
 原生保真范围包括 `text`、`image`、`tool_use`、`tool_result`、tool-result `is_error`、带 signature 的 `thinking`、`redacted_thinking`、`cache_control` 和 `context_management`。跨协议投影普通 tool use/result、图片和文本；thinking/redacted-thinking 历史、`is_error` 与 Anthropic cache metadata 会带 path 诊断删除，因为 OpenAI 投影本来就不携带它们。带图片的 tool-result content 在取得已验证的多模态 function-output 合同前继续 fail closed。
 
@@ -266,6 +270,7 @@ temperature, top_p, top_k, stop, thinking, output_config, context_management, me
 | `Format` | endpoint | endpoint | endpoint | `openai_chat` / `openai_responses` / `anthropic_messages` |
 | `UpstreamAPI` | 模型目录 | 模型目录 | 模型目录 | 可为空；provider 会按下游入口兜底 |
 | `Model` | `model` | `model` | `model` | 写入上游前已解析为 upstream model |
+| `ModelConversion` | 无 | 无 | 无 | 模型目录解析后附加的内嵌精确模型参数 profile；不是客户端输入，也不决定运行时可用性 |
 | `Stream` | `stream` | `stream` | `stream` | 只决定下游响应格式；provider 流式请求会强制上游 `stream=true` |
 | `System` | 无独立字段 | `instructions` + `developer/system` input 文本 | `system` | 上游 Chat 会把它前置为一条 system message；上游 Responses 写为 `instructions` |
 | `Messages` | `messages` | `input` | `messages` | 内容 part 会统一为 text/image/tool call/tool result 表达 |

@@ -53,10 +53,11 @@
 
 1. [migrations](../../migrations/) 与 `schema_version` 决定已部署数据契约；
 2. 当前代码和可复现测试决定请求、响应和流的实际行为；
-3. [兼容矩阵](../../compatibility/matrix.json) 决定固定客户端、模型、profile、pool、静态能力合同和最高候选等级；release-evidence attestation 决定一个不可变 release 的有效等级；
-4. [Phase 7 计划](../plans/compatibility-roadmap.zh.md) 记录范围、冻结合同、已完成切片和剩余发布门禁；
-5. [协议实现说明](../../docs/protocol.zh.md) 解释当前 canonical/provider/writer 映射；
-6. 本文给出跨项目可复用的原则、能力边界与调试顺序。
+3. GitHub 的 [supported models 页面](https://docs.github.com/en/copilot/reference/ai-models/supported-models) 决定当前 Copilot 模型名单、发布状态与官方 extended capability；[内嵌转换矩阵](../../internal/modelcatalog/conversion_matrix.json) 只把其中已有精确 upstream ID/API 证据的模型绑定到转换参数 profile；
+4. [兼容矩阵](../../compatibility/matrix.json) 决定固定客户端、模型、profile、pool、静态能力合同和最高候选等级；release-evidence attestation 决定一个不可变 release 的有效等级；
+5. [Phase 7 计划](../plans/compatibility-roadmap.zh.md) 记录范围、冻结合同、已完成切片和剩余发布门禁；
+6. [协议实现说明](../../docs/protocol.zh.md) 解释当前 canonical/provider/writer 映射；
+7. 本文给出跨项目可复用的原则、能力边界与调试顺序。
 
 任何新增协议形状都必须绑定客户端版本、脱敏原始 frame、预期语义和独立 issue。不能只因官方 schema 出现新 union、某次请求返回 `200`，或测试夹具可以构造该字段，就把它追加到当前支持合同。
 
@@ -321,7 +322,7 @@ Claude Code 和 Anthropic SDK 会发送版本、运行时和 Stainless 生成器
 - Chat 的 `max_tokens` 在现代模型上升级为 `max_completion_tokens`；
 - `top_logprobs` 存在而 `logprobs` 缺失时，补充 `logprobs: true`；
 - `serviceTier` 统一为 `service_tier`；
-- Chat 的 `reasoning_effort` 与 Responses 的 `reasoning` 保持各自原生字段语义，当前不会自动互相映射；
+- Chat 的 `reasoning_effort` 与 Responses 的 `reasoning` 保持各自原生字段语义；Messages 顶层 `thinking/output_config` 只在精确 `(upstream_model, upstream_api)` profile 声明 wire 参数时映射，档位按该模型的有序合法集合向上取最近值，超过最高档时取最高档；
 - 某些上游不接受 `xhigh` 时可按明确策略降为 `high`，但不能假设所有模型都允许该降级；
 - Responses function/custom/namespace tool 缺少 description 时补充非空描述；
 - 原生 Responses 只放行经过严格字段校验的 `web_search`，并原样保留其 typed options；`web_search_preview`、带日期后缀、未知或跨协议类型不做猜测性规范化，直接在 dispatch 前拒绝；
@@ -765,7 +766,7 @@ Messages 请求携带 `stop_sequences` 且目标为 Responses 时，会由方向
 - Anthropic thinking block：具有内容块、预算、模式和可能的 signature；
 - redacted thinking：不能反向构造的受保护内容。
 
-当前实现不在 Chat `reasoning_effort` 与 Responses `reasoning.effort` 之间自动转换；只有目标明确支持同名字段时才可原名保留。不能把 Anthropic thinking 当作 OpenAI reasoning item，也不能伪造 thinking signature。
+当前实现不在 Chat `reasoning_effort` 与 Responses `reasoning.effort` 之间自动转换。Messages 顶层生成控制 `output_config.effort` / `thinking` 只按精确模型转换 profile 写入目标声明的 `reasoning.effort` 或 `reasoning_effort`；未知模型或未验证 profile 不注入。该映射不转换 `display`，也不触碰历史 thinking block。不能把 Anthropic thinking block 当作 OpenAI reasoning item，也不能伪造 thinking signature。
 
 ### 13.3 Metadata
 
@@ -1108,7 +1109,7 @@ Anthropic SDK -> /v1/messages -> 原生 Messages 上游
 - `/v1/messages/count_tokens` 仅绑定原生 Messages；
 - 客户端凭据不会被转发为上游凭据。
 
-如果 Messages 路由到 Chat 或 Responses，普通文本和基础 function calling 可以转换，但 SDK 用户不应再期待 document、thinking、cache、server tool 或完整 stop reason。
+如果 Messages 路由到 Chat 或 Responses，普通文本和基础 function calling 可以转换；顶层 thinking 的生成深度仅在 Responses 目标映射为 effort。SDK 用户仍不应期待 document、历史 thinking/signature、cache、server tool 或完整 stop reason 无损保留。
 
 ---
 

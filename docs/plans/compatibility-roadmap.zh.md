@@ -77,6 +77,16 @@
 - 未满足门禁：用户侧看不到原始 HTTP/SSE 与 request ID，Azure VM SSH 被 NSG 超时且 Compute 工具不提供 Run Command，因此没有取得该次线上日志；根因由相同模型/流式方向和完全一致的下游 envelope 做确定性复现。尚未构建/部署新镜像或执行真实 Copilot 重放；不可变 release attestation、Redis Cluster 和实际 Kubernetes 集群未运行。
 - 下一最小步骤：构建并部署新 Gateway；随后用 `gemini-3.5-flash` 最小 Messages 流式请求重放，确认 final text 后正常 `message_stop`，且日志不再出现 `$.reasoning_content: reasoning_delta_not_representable`。
 
+## 2026-08-22 Copilot Responses 原生流 ID 轮换归一
+
+- 状态：Phase 7 后维护修复已实现。Cherry Studio 使用 `/v1/responses` 调用 GPT-5.5 与 GPT-5.6 时，最终消息出现一份完整回答、逐 token 分块回答和多份完整回答；Chat/Messages 与跨协议 Responses 路径不复现。
+- 根因：GitHub Copilot 的真实 Responses SSE 会在同一 `output_index` 上为 `output_item.added`、content part、每个 text/reasoning delta、done 与 terminal snapshot 轮换不同 `item_id`。Gateway 原先把每个未见 ID 重编号为新 output item，使每个 token 成为独立文本块；`output_text.done`、`content_part.done` 和 `response.completed` 随后又分别补出完整文本。Vercel AI 的公开 `github-copilot-id-rotation` fixture 与本地最小反例均复现该 wire 行为。
+- 修复：只有显式 `response.output_item.added` 建立 owner 后，同一 `output_index` 且同 kind 的后续旋转 ID 才归为该 item 的别名，并统一输出首帧 canonical ID。没有 start frame 的两个不同 ID 仍按独立 item 重编号；同 index 的 kind 冲突继续拒绝。下游 Responses writer 同时为每个 JSON event 生成从 0 单调递增的 `sequence_number`；`[DONE]` 不计入序号。标准 done/completed 快照仍完整保留，新增文本只通过 `response.output_text.delta` 发送。
+- 性能边界：每帧只增加常数级 map 查询/别名登记与整数递增，不增加缓冲、正文扫描、网络、存储或重试。状态仅存活于单次流，请求结束后释放。
+- 验证：旋转 ID 红灯原样得到四份 `## Answer\nHello again!`；修复后 parser 累积文本恰为一份，parser -> Responses writer 全链路只有一个 output item 和两个原始 delta。显式多 reasoning item、colliding implicit index、kind 冲突、stream index 漂移和 terminal ID 漂移反例均通过；`go test ./internal/provider/copilot ./internal/protocol ./internal/api/gateway -count=1` 通过。
+- 未满足门禁：尚未运行本切片后的全仓 Go 测试、`make validate`、新镜像部署与 Cherry Studio 真实重放；不可变 release attestation、Redis Cluster 与实际 Kubernetes 集群未运行。
+- 下一最小步骤：运行全仓测试和提交级验证，部署新 Gateway，再用 Cherry Studio 对 GPT-5.5 与一个 GPT-5.6 模型各重放一次 Responses 流，确认最终 UI 只保留一份回答。
+
 ## 2026-08-22 Cherry Studio summarized thinking 转换
 
 - 状态：Phase 7 后维护修复已实现。真实 Cherry Studio `/v1/messages` 请求使用 `thinking:{"type":"adaptive","display":"summarized"}` 与 `output_config.effort=high`；Gateway 在模型目录选择 Chat/Responses 目标之前于 `$.thinking.display` 返回 `anthropic_messages->canonical invalid_value`，导致两个转换方向都无法进入既有参数删除策略。

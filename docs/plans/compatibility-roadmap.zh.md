@@ -2,7 +2,7 @@
 
 > 状态：Phase 7 已完成；仅在新的 release、matrix/schema/build 变化或经批准的新能力出现时创建新的兼容性任务。
 >
-> 最近确认：2026-08-21
+> 最近确认：2026-08-22
 
 ## 事实源
 
@@ -45,6 +45,30 @@
 - 未运行检查：本次只改变文档与本地构建产物，不需要运行 Go、Dashboard、Compose 或 Kubernetes 门禁。
 - 下一最小步骤：仅在新的 release、matrix/schema/build 变化或经批准的新能力出现时创建独立兼容性任务。
 
+## 2026-08-22 三协议 3x3 可用性审查
+
+- 冻结范围：Phase 7 后维护切片只审查 Chat Completions、Responses、Anthropic Messages 的 3 条原生路径和 6 条互转路径；覆盖 request parser/policy/validator、Copilot wire builder、非流响应、SSE 终态、function tool loop 与 usage/cache 口径。静态客户端能力仍由 schema 3 matrix 决定，本轮不提升任何 release/effective level。
+- 状态：有限一轮审查已完成并实现已复现修复。Responses parser 不再把 reasoning/additional-tools 等非 conversation item 投影成幽灵空 user；相邻 assistant 文本与并行 function call 会合并成一个 canonical tool turn。Chat/Responses 转 Messages 的相邻同角色 block 会合并为合法 Anthropic turn，并把并行 tool_result 放在同一 user turn 的普通文本之前；空/纯空白 text block 不进入 Anthropic wire，删除后无有效 message content 时本地返回 400。具体 `stop_sequence` 和 Anthropic response cache-control 作为目标不可见 metadata 可安全省略，不再把成功上游响应变成 502/stream error。
+- 参数与工具控制：真实 Copilot 反例已证明 Responses 上游拒绝 `temperature` / `top_p`，三种来源到 Responses 的删除现统一进入 request policy 与 path 诊断，Provider 仍保留最终防线。OpenAI `parallel_tool_calls:false` 与 Anthropic `tool_choice.disable_parallel_tool_use:true` 双向等价映射；没有工具时 builder 不发送孤立控制字段。Messages -> Chat/Responses 会删除 thinking/redacted-thinking 历史、`tool_result.is_error` 与 cache metadata，但 image 型 tool-result 仍 fail closed。
+- 白名单适配：只有已认证且启用的 `codex-candidate` profile 与合法 `codex_exec/<major>.<minor>.<patch>` User-Agent 同时出现时，Responses 转 Chat/Messages 才可删除无法跨 provider 回放的 reasoning 历史；Messages 目标还会消费私有 Responses-Lite marker，并为 assistant-first compact/resume 历史前置 `(continuing the conversation)`。只有 header、只有 UA、disabled/其它 profile 均不能授权。该能力只覆盖 text/stream resume；matrix 中 Codex `function_tools`、`compact`、WebSocket 仍 disabled，Claude Code `count_tokens` 仍 disabled。Claude Code 没有新增可伪造 header 门，继续使用 authenticated profile、模型目录和原生 Messages 已验证能力。
+- Usage 口径：canonical `InputTokens` 统一为 inclusive 总量（fresh + cache read + cache write）；Anthropic provider 入站会把 fresh input 补成 inclusive，Chat/Responses 下游输出 inclusive total，Messages 下游重新拆成 fresh input 与两个 cache 桶。9 路径矩阵现验证 `fresh + cache_read + cache_creation == canonical input`。
+- 严格边界：Responses/Anthropic thinking signature 没有本项目已验证的跨 provider 往返编码，响应仍 fail closed；refusal 跨协议的非流/流式 writer 尚未形成完整对称生命周期，也继续 fail closed。孤立/不完整工具回合不做全局静默删除；Codex function-tools 尚未进入 matrix 合同。`/v1/messages/count_tokens`、`/v1/responses/compact`、WebSocket 与 image tool-result 映射保持 no-go，不能用近似实现冒充原生能力。
+- 性能边界：新增工作只做已解析 slice 的单次本地遍历、相邻 turn 合并、稳定分区与 map 删除；不增加网络、重试、探测、序列化轮次、存储访问或热路径远端 capability 查询。
+- 验证：新增红灯分别复现 phantom message、并行工具 turn 拆散、verified Codex Lite 前置拒绝、Messages 首回合/空 content 上游 400、cache metadata/stop-sequence 响应误拒绝、Anthropic/OpenAI usage 口径不一致、全缓存命中 fresh input 为零和隐式 sampling 删除；修复后聚焦测试与 `go test ./... -count=1` 通过。使用 build `2026.08.18.1` 和现有权限 `0600` 的 `/var/tmp/ghcp-p3-cli/cli-binaries.json` 运行 `make validate` 退出 0：golangci-lint 零问题、全仓 race tests、Dashboard 26 tests/build、静态 matrix、manifest-aware fixed-CLI fake collector、start/release manifest、VM deploy/migration-repair/reset/start checks、Kubernetes/cluster 与 Azure Bicep 静态门禁全部通过；相关编辑器诊断与 `git diff --check` 为零。
+- 未满足门禁：本机 Compose 当前没有运行容器；尚未执行原始客户端 payload、真实 Copilot、目标环境 clean CLI report、不可变 release attestation、目标 VM 实际部署、Redis Cluster 或实际 Kubernetes 集群。当前 HEAD 后仍有本次全缓存 usage 修复与路线图证据的未提交工作树，不能构成 release evidence。
+- 下一最小步骤：构建并部署包含当前工作树的新 Gateway，用 authenticated `claude-code-candidate` 原生 Messages 和 `codex-candidate` 原生 Responses 各重放 text/stream，再为 Codex 执行一次受控 Responses -> Messages resume。只有取得 function-tools 或 utility endpoint 的独立 capability artifact 后，才另开切片提升对应 matrix 能力。
+
+## 2026-08-22 Messages -> Responses Claude Code 历史归一
+
+- 状态：Phase 7 后维护修复已实现。最小反例证明 Gateway 在 Responses 投影前把 Claude Code 历史中的 `thinking` / `redacted_thinking`、`tool_result.is_error` / `cache_control` 和 `tool_use.cache_control` 判为不可表达，导致本可由 canonical `Messages` 安全降级的请求提前返回 `400`；同一 user turn 的普通文本还会被统一前置到 `function_call_output` 之前，破坏工具调用邻接顺序。
+- 修复：Messages -> Responses 方向策略删除仅属于 Anthropic wire 的 thinking 历史和 system/message/tool/cache metadata，包含 `tool_result.content[]` 的已识别 content part，并把精确 JSON path 聚合到既有 normalized 诊断；`disable_parallel_tool_use:true` 等价映射为 `parallel_tool_calls:false`。Messages parser 现在按 block 顺序刷新普通内容与 tool result，thinking-only 投影不再把原始 Anthropic block 泄漏到 Responses。Responses Provider 边界再次删除 content/tool `cache_control`，防止绕过 Gateway 策略的调用方产生严格上游未知字段。
+- 对照结论：`ghcp-api-console` 的公共接口不做 Messages/Responses 互转，但其 Claude Code 兼容层采用“先清理 cache/thinking/tool-result 形状，再转发”的边界；CC Switch 的 `transform_responses.rs` 同样提升 `tool_use` / `tool_result`、丢弃 `stop_sequences` / `cache_control`、按能力处理或忽略 thinking。当前修复采用相同的有界归一思路，没有复制其 provider 专属 reasoning、error marker、媒体遍历或 ChatGPT OAuth 字段策略。
+- 严格边界：image 型 `tool_result.content` 仍在 `$.messages[*].content[*].content` fail closed；没有当前运行实例 trace 或原始失败正文证明需要放宽，不能把图片静默序列化为普通 JSON 字符串。未知 role/block/image-source、缺失 tool identity 和非法核心类型继续拒绝；顶层 Anthropic thinking 仍按既有跨协议策略删除，不推断 Responses reasoning effort。
+- 性能边界：新增工作只在已解析的 system/message/content/tool slice 上做单次本地遍历和 map 删除，不增加网络、重试、探测、序列化轮次或存储访问。
+- 验证：红灯依次复现 `thinking_block_not_representable`、tool result 被排到 user continuation 之后、Responses content `cache_control` 泄漏，以及嵌套 tool-result cache path 未记录；修复后聚焦测试均通过。`go test ./internal/protocol ./internal/api/gateway ./internal/provider/copilot -count=1` 与 `go test ./... -count=1` 通过，相关编辑器诊断和 `git diff --check` 为零。
+- 未满足门禁：本机 `deploy/docker-compose.yml` 当前没有运行容器，未取得真实失败 trace，也未运行原始客户端 payload、真实 Copilot、`make validate`、不可变 release attestation、目标 VM、Redis Cluster 或实际 Kubernetes 集群门禁；当前 dirty 工作树不构成 release evidence。
+- 下一最小步骤：构建并部署新 Gateway，以原始 Messages -> Responses payload 重放并核对 `protocol_request_status=normalized` 的安全 path 与最终上游 status。若仍失败，只围绕新的精确 path 或安全 upstream status/body hash 建立反例；只有真实请求命中 image tool-result 时，再独立批准并验证 Responses 多模态 function output 映射。
+
 ## 2026-08-21 三协议未知可选字段降级
 
 - 状态：Phase 7 后维护兼容已实现。Chat Completions、Responses 和 Messages 的已识别请求 envelope 现在原地删除未知可选字段并继续转发，覆盖顶层、message/item/block、content part、image、tool/tool choice、thinking/output config、Responses compaction 与 cache-control；字段路径聚合到不参与序列化的 canonical 诊断字段，`Raw` map 不再把未知字段带到 Provider。JSON Schema、tool input/output 和 metadata 等开放业务对象不递归清洗。
@@ -64,8 +88,10 @@
 - 新证据：远端 `/version` 确认 09:43 的重放命中 build `2026.08.18.1`、revision `0374fca07d3003ad631ef4b692e18ba7f59fd692`，该 clean revision 已包含 Responses 删除 `temperature` 的修复，故仍失败的 Luna 请求由 `top_p` 解释。使用同一 active 账号直连 Copilot，复杂 schema 关键字、30 个工具、单个约 `16KB` description、两个失败端点各约 `60KB` 工具 description，以及 30 个工具叠加 `max_tokens=128000` 均为 `supported`；Sonnet 原生 Messages 也接受 `top_p=1`。这已否证 parser/dispatch、复杂关键字本身、工具数量、单项长度、总 description 大小、128K 输出上限及其与工具数量的组合，但尚未否证原始 Cherry 工具集中某个具体 schema/字段组合。对 CC Switch revision `0b5da510168914b251481654a568c3ffacd62cf4` 的源码核对确认：GitHub Copilot 的 Claude 模型将 `/v1/messages` 改写到 `/chat/completions`，Anthropic tools 重建为 Chat function tools；`clean_schema` 仅在根 schema 缺少 `type` 时补 `type: object`（同时按需补空 `properties`），并递归删除 `properties`/`items` 路径上的 `format: uri`，不会清理 `$defs`、`$ref`、`anyOf`、`default` 或 `additionalProperties`。因此 CC Switch 成功首先证明的是 Messages -> Chat 路径可用，不构成原生 Messages schema 兼容证据。
 - 最新公网反例：公网 build `2026.08.18.1`、revision `78b5b0a76f78b601ec429079f4ef98b3abf19b9f` 已包含 Responses `temperature`/`top_p` 删除和 converted message 的 `type:"message"` identity。该版本中 Messages -> Responses 最小非流式仍返回 `502`，最小流式与单工具流式均在 `message_start` 后返回 `stream response unavailable`，因此完整 Cherry 工具集不是必要条件，message identity 也不是该次 502 根因。相同 profile 下原生 Responses 返回 `200/OK`，其真实输出 message item 带 `phase:"final_answer"`；跨协议 response validator 此前把任何 phase 都判为 `message_phase_not_representable`，精确解释了上游成功后非流式 502 和流式中止。现在仅把 `final_answer` 作为可安全丢弃的终态 metadata 允许投影到 Chat/Messages，`commentary` 及 reasoning、refusal、tool namespace 等不可表达语义继续 fail closed。
 - 验证：协议红灯精确命中 `$.output[0].phase: message_phase_not_representable`；修复后 Chat/Messages 两个目标的非流式与流式 `final_answer` 校验通过，`commentary` 拒绝反例保持通过。Gateway 端到端回归模拟真实 Luna Responses 输出，流式按 `output_item.added(final_answer) -> output_text.delta -> done` 重放；Messages 非流式返回 Anthropic message，流式正常输出文本并结束于 `message_stop`，不再产生 `event:error`。受影响三包测试通过；随后以固定 build `2026.08.18.1` 和仓库外权限 `0600` 的 CLI manifest 运行 `make validate`，lint、全 Go race、Dashboard 26 tests/build、compat/fake collector、release manifest、VM deploy、Kubernetes 与 Azure 静态门禁全部通过。
-- 未运行检查：目标 VM 的 SSH 端口不可达，尚未按公网 request ID 取得安全 `path/kind` 日志；`final_answer` 修复尚未构建或部署，因此尚未完成真实 Copilot 修复后重放，也未运行 release attestation、Redis Cluster 或实际 Kubernetes 集群门禁。公网反例与 dirty 工作树验证结果不构成 release evidence。
-- 下一最小步骤：构建并部署 `final_answer` phase 降级修复，再以相同 profile 重放 Messages -> Responses 最小非流式、最小流式和完整 Cherry 形状请求；预期三者均不再出现当前 502/stream error。若仍失败，只按新 request ID 的安全 Provider 日志建立下一个最小反例；Sonnet 原生 Messages 工具 schema 调查继续保持独立。
+- 修复后公网证据：build `2026.08.18.1`、revision `e754fff2d12860b8d397e9d15f0e005beed50854` 已部署。最小 Messages -> Responses 流式请求返回 `200` 并正常结束；Cherry 完整请求 `16e88cb42b6d74f117d0211779bc0164` 则在开流前返回 JSON `502`。Azure VM 安全日志确认 Gateway 已 dispatch 约 `61KB`、30 工具请求，Copilot Responses 返回 HTTP `400 invalid_request`，Gateway 将其映射为通用 502；因此该次失败不是 Gateway 前置拦截，也没有进入 `final_answer` 响应校验。
+- 本地复核：同一 revision、本地真实 Copilot 账号和 `gpt-5.6-luna / responses` 下，`streaming_cherry_names` 的 30 个当前长工具名、现有 `streaming_cherry_payload`、缺少根 `type:"object"` 的 Pydantic 风格 schema 均返回 `supported`。从历史 Cherry 错误记录结构化提取完整 AWS Pricing/AWS Knowledge/Microsoft/Azure/Web schema 后，经本地 `/v1/messages` 重放 28 工具、`60221` 字节请求返回 HTTP `200` 和 `message_stop`；把同一复杂 schema 映射到当前 30 个最长 63 字符的哈希名称后，`58032` 字节请求同样成功；把真实 schema 请求扩到 `77029` 字节仍成功。这已否证 `"[Circular]"` cache-control、`eager_input_streaming`、128K 输出、根 schema type、工具数量、长名称、约 61KB 请求大小以及这些条件与复杂 schema 的稳定组合是当前版本的必现根因。
+- 未满足门禁：当前附件正文没有作为独立文件落盘，故本地重放使用同源历史完整 schema 加当前名称组合，尚未做到对 request ID `16e88cb42b6d74f117d0211779bc0164` 正文逐字节重放。剩余条件只有瞬时上游拒绝、所选账号特定拒绝，或当前附件相对同源历史 schema 的某个细小版本差异；不能据单次失败新增 schema 清洗。不可变 release attestation、Redis Cluster 与实际 Kubernetes 集群门禁也未运行；本地真实账号结果不构成 release evidence。
+- 下一最小步骤：由 Cherry Studio 在当前已部署 revision 原样重放一次并保留新 request/trace ID。若成功，关闭该单次上游 400；若仍失败，只围绕新失败的安全上游 status/body hash、所选账号和可导出的原始 JSON 做逐字节本地二分，在出现可重复红灯前不修改转换规则。
 
 ## 2026-08-21 Claude Code 原生 Messages 流终态修复
 

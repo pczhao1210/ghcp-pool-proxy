@@ -144,7 +144,25 @@ After model-catalog resolution, the gateway looks up an immutable embedded conve
 
 Request-side generation controls are normalized only when that exact conversion profile declares a verified target wire parameter and legal levels. For Messages -> OpenAI, explicit `output_config.effort` wins; `adaptive` requests `xhigh`, while manual budgets request `low` below 4,000, `medium` below 16,000, otherwise `high`. The requested level is retained when legal, otherwise raised to the nearest supported level, or capped at the model's highest level when the request exceeds it. Thus `max` becomes `xhigh` for GPT-5.5 but remains `max` for GPT-5.6. `thinking:disabled` injects no reasoning control. A Responses profile writes `reasoning.effort`; a Chat profile may write `reasoning_effort`. With no exact profile, the gateway injects neither. The source `thinking` and `output_config` fields are still removed and diagnosed before OpenAI serialization.
 
-Only a downstream `/v1/responses` request resolved to an Anthropic Messages upstream can activate the Sonnet bridge, and only when the exact profile declares `adaptive_by_default`. Sonnet 5 currently meets those conditions; native `/v1/messages` and Messages -> Responses never activate it. A first authorized Sonnet 5 request projects `thinking.type=adaptive`; explicit Responses effort is clamped to the model's declared Anthropic effort levels, and `temperature`/`top_p` are removed because Anthropic does not accept those sampling controls with thinking. A tool-result continuation enables adaptive thinking only when the matching signed thinking history was restored; without that history the route-local policy sends `thinking.type=disabled` rather than constructing an invalid interleaved-thinking turn. `disabled` is not added to the native Sonnet 5 Messages profile.
+Only a downstream `/v1/responses` request resolved to an Anthropic Messages upstream can activate the adaptive-thinking bridge, and only when the exact profile declares `adaptive_by_default`. Sonnet 5 and the temporary reference-backed Opus 5 profile currently meet those conditions; native `/v1/messages` and Messages -> Responses never activate it. A first authorized request projects `thinking.type=adaptive`; explicit Responses effort is clamped to the model's declared Anthropic effort levels, and `temperature`/`top_p` are removed because Anthropic does not accept those sampling controls with thinking. A tool-result continuation enables adaptive thinking only when the matching signed thinking history was restored; without that history the route-local policy sends `thinking.type=disabled` rather than constructing an invalid interleaved-thinking turn. Native `disabled` is accepted only when the exact Messages profile declares it.
+
+The embedded catalog currently contains these 11 Anthropic entries. "Catalog only" means that GitHub lists the model, but the repository has no exact Copilot runtime binding and therefore creates no active conversion profile or routing eligibility.
+
+| Model | Repository state | Effective thinking declaration |
+| --- | --- | --- |
+| Claude Fable 5 | Catalog only | No active profile; Anthropic's always-on adaptive behavior remains reference information only |
+| Claude Haiku 4.5 | Catalog only | No active profile; extended thinking remains reference information only |
+| Claude Opus 4.5 | Catalog only | No active profile; extended thinking remains reference information only |
+| Claude Opus 4.6 | Reference profile | `adaptive`, deprecated `enabled`, `disabled`; budget tokens; `low/medium/high/max` |
+| Claude Opus 4.7 | Reference profile | `adaptive`, `disabled`; `low/medium/high/xhigh/max` |
+| Claude Opus 4.8 | Direct-probe-bound profile | `adaptive`, `disabled`; `low/medium/high/xhigh/max` |
+| Claude Opus 4.8 fast | Catalog only | No exact fast-mode binding or active profile |
+| Claude Opus 5 | Reference profile | Temporarily identical to Sonnet 5: adaptive by default, `disabled`, and all five effort levels |
+| Claude Sonnet 4.5 | Catalog only | No active profile; extended thinking remains reference information only |
+| Claude Sonnet 4.6 | Direct-probe-bound profile | `adaptive`, deprecated `enabled`, `disabled`; budget tokens; `low/medium/high/max` |
+| Claude Sonnet 5 | Reference profile | Adaptive by default, `disabled`; `low/medium/high/xhigh/max` |
+
+All six active profiles accept native `display` values `omitted` and `summarized` without value rewriting. The matrix no longer carries the earlier provisional `summarized -> omitted`, `low -> medium`, or `high -> xhigh` mappings. Opus 5 remains unprobed against Copilot and is intentionally kept identical to Sonnet 5 for now; the direct Claude API's Opus-only restriction on combining `thinking:disabled` with `xhigh` or `max` is not representable by the current independent-field schema and is not claimed as Copilot runtime evidence.
 
 The mapping above preserves generation-depth intent, not protocol identity. `display:"summarized"` is not converted to a Responses summary option because the verified gateway contract advertises `supports_reasoning_summary_parameter:false`. Other directions remain protocol-native unless separately capability-gated; the gateway does not infer Chat provider dialects from a model name.
 

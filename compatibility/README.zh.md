@@ -5,7 +5,7 @@
 ## 当前边界
 
 - Codex `0.147.0 + gpt-5.5 + Responses` 的静态等级为 `candidate_native`。模型发现或单次真实请求不会改变该等级。
-- Claude Code `2.1.225`、`2.1.226` 和 `2.1.233` 在 `--resume` 请求未签约的 `claude-opus-5`，当前均为 `unsupported`。网关不会用 Sonnet 首轮成功伪造多轮兼容。
+- Claude Code `2.1.225`、`2.1.226` 和 `2.1.233` 在 `--resume` 请求未签约的 `claude-opus-5`，当前均为 `unsupported`。支持目录与内嵌转换矩阵现已包含 Opus 5 的静态条目和 reference profile，但兼容性矩阵仍没有对应的 Claude Code runtime contract、pool、entitlement、fixed-CLI workflow evidence 或 release attestation；网关不会用 Sonnet 首轮成功伪造多轮兼容。
 - `count_tokens`、`compact`、WebSocket 和 Codex 动态工具回调都不在当前 HTTP 网关合同内。
 - `require_fresh` profile 会使用不可变请求快照，要求候选账号对解析后的模型/API 具有当前完整证据；`allow_unknown` 是显式兼容策略。
 

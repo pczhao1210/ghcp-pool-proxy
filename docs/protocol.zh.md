@@ -144,7 +144,25 @@ Parser 和语义门禁错误会包含转换方向、JSON path 和稳定 reason�
 
 请求侧生成控制只在该精确 profile 声明已验证目标 wire 参数和合法档位时归一。Messages -> OpenAI 中显式 `output_config.effort` 优先；`adaptive` 请求 `xhigh`，manual budget 小于 4,000 / 小于 16,000 / 其它分别请求 `low` / `medium` / `high`。请求档位合法时原样保留；否则提升到不低于请求的最近合法档，超过模型最高档时取最高档。因此 GPT-5.5 的 `max` 降为 `xhigh`，GPT-5.6 的 `max` 保持不变。`thinking:disabled` 不注入 reasoning。Responses profile 写入 `reasoning.effort`，Chat profile 可写入 `reasoning_effort`；没有精确 profile 时两者都不注入。源 `thinking` 与 `output_config` 在 OpenAI 序列化前仍会删除并记录诊断。
 
-Sonnet bridge只有在下游入口为 `/v1/responses`、模型目录目标为 Anthropic Messages、且精确 profile声明 `adaptive_by_default` 时才启用；当前仅 Sonnet 5满足条件。原生 `/v1/messages` 与 Messages → Responses绝不会进入该逻辑。获授权的 Sonnet 5首轮会投影 `thinking.type=adaptive`，显式 Responses effort按模型声明档位钳位，并删除 Anthropic thinking不接受的 `temperature`/`top_p`。工具结果续轮只有在恢复了匹配的 signed thinking历史后才继续 adaptive；缺少历史时由该 route-local policy发送 `thinking.type=disabled`。`disabled`不会加入 Sonnet 5原生 Messages profile。
+adaptive-thinking bridge 只有在下游入口为 `/v1/responses`、模型目录目标为 Anthropic Messages、且精确 profile 声明 `adaptive_by_default` 时才启用；当前 Sonnet 5 与临时采用 reference 配置的 Opus 5 满足条件。原生 `/v1/messages` 与 Messages -> Responses 绝不会进入该逻辑。获授权的首轮会投影 `thinking.type=adaptive`，显式 Responses effort 按模型声明档位钳位，并删除 Anthropic thinking 不接受的 `temperature`/`top_p`。工具结果续轮只有在恢复了匹配的 signed thinking 历史后才继续 adaptive；缺少历史时由 route-local policy 发送 `thinking.type=disabled`。原生 `disabled` 只有在精确 Messages profile 声明后才会被接受。
+
+内嵌目录当前包含以下 11 个 Anthropic 条目。“仅目录”表示 GitHub 已列出该模型，但仓库没有精确 Copilot runtime binding，因此不会建立 active conversion profile，也不会获得路由资格。
+
+| 模型 | 仓库状态 | 当前 thinking 声明 |
+| --- | --- | --- |
+| Claude Fable 5 | 仅目录 | 无 active profile；Anthropic 文档中的 always-on adaptive 仅作参考 |
+| Claude Haiku 4.5 | 仅目录 | 无 active profile；extended thinking 仅作参考 |
+| Claude Opus 4.5 | 仅目录 | 无 active profile；extended thinking 仅作参考 |
+| Claude Opus 4.6 | reference profile | `adaptive`、已弃用的 `enabled`、`disabled`；budget tokens；`low/medium/high/max` |
+| Claude Opus 4.7 | reference profile | `adaptive`、`disabled`；`low/medium/high/xhigh/max` |
+| Claude Opus 4.8 | direct-probe-bound profile | `adaptive`、`disabled`；`low/medium/high/xhigh/max` |
+| Claude Opus 4.8 fast | 仅目录 | 没有精确 fast-mode binding 或 active profile |
+| Claude Opus 5 | reference profile | 暂时与 Sonnet 5 完全一致：默认 adaptive、`disabled`、完整五档 effort |
+| Claude Sonnet 4.5 | 仅目录 | 无 active profile；extended thinking 仅作参考 |
+| Claude Sonnet 4.6 | direct-probe-bound profile | `adaptive`、已弃用的 `enabled`、`disabled`；budget tokens；`low/medium/high/max` |
+| Claude Sonnet 5 | reference profile | 默认 adaptive、`disabled`；`low/medium/high/xhigh/max` |
+
+六个 active profile 都原样接受 `display` 的 `omitted` 与 `summarized`，不再做值改写。matrix 已移除早期临时使用的 `summarized -> omitted`、`low -> medium` 与 `high -> xhigh` 映射。Opus 5 仍无法通过 Copilot 实模探测，当前按要求保持与 Sonnet 5 完全一致；Claude 直连 API 中 Opus 5 对 `thinking:disabled` 与 `xhigh/max` 组合的独有限制无法由现有独立字段 schema 表达，也不作为 Copilot runtime evidence 声明。
 
 上述映射保留的是生成深度意图，不是协议身份。`display:"summarized"` 不会转换为 Responses summary 参数，因为已验证 Gateway 合同明确为 `supports_reasoning_summary_parameter:false`。其它方向仍保持协议原生，除非另有能力门禁；Gateway 不按模型名猜测 Chat provider 方言。
 

@@ -51,11 +51,20 @@
 - 冻结范围：Phase 7 后维护切片只新增静态模型支持事实与转换参数 profile，接入 Gateway 模型解析后的 request policy，并把 Messages 顶层生成控制改为模型级映射；不改变动态模型发布、账号 entitlement、客户端兼容等级、response thinking/signature 边界或路由资格。
 - 状态：已实现 schema 3 内嵌矩阵。`supported_models` 完整记录本次 GitHub 官方页面的 31 个当前模型及 release status/configurable reasoning；`profiles` 只为已有精确 `(upstream_model, upstream_api)` 证据的模型声明参数和有界值映射。Gemini 3.7 Flash、Grok 4.5/4.6、Claude Fable 5、Kimi K2.7 Code/Kimi K3 已进入官方支持清单；GPT-5/5.1/5.2、o3、o4-mini 等已退役模型已移出当前清单与热路径 profile。
 - 事实边界：官方页面不提供 Copilot 内部 wire ID/API 和完整参数枚举，因此不能替代动态 `/models`、`model_catalog_json`、direct probe 或 release contract。上述新模型在精确 runtime binding 未验证前不建立 active conversion profile，也不会因静态清单而被 Gateway 发布。CC Switch 只作为 level/转换机制的二级参考，不裁决 Copilot 支持成员。
-- 请求行为：Gateway 在 exposed model 解析为 exact upstream 后、方向策略前附加不可变 profile。没有 profile 或 profile 未启用 reasoning 时只删除 Anthropic-only 控制，不注入猜测参数；Responses profile 写 `reasoning.effort`，Chat profile 可写 `reasoning_effort`。显式 effort 优先，adaptive/manual budget 生成请求档位，再按模型合法集合取“不低于请求的最近档”，超过最高档则取最高档；GPT-5.5 的 `max` 因而降为 `xhigh`，GPT-5.6 保留 `max`。GPT-5.4、GPT-5.5 与 GPT-5.6 保持独立 target profile，不共享一个按模型名分支的转换模板；Chat 入口只为这五个精确 Responses profile 省略 unsigned assistant reasoning history，并把 `reasoning_effort` 投影为各自合法的 `reasoning.effort`。响应侧 GPT-5.4 对 Messages 目标省略不可表示的 reasoning item/delta，GPT-5.5/5.6 明确保持严格拒绝。原生 Messages 在校验前只应用目标 profile 显式声明的值映射：Sonnet 5 与 Opus 4.8 将 Cherry Studio 的 `display:summarized` 映射为 `omitted`、`effort:high` 映射为 `xhigh`；没有映射或没有 profile 时不改写，继续 fail closed。
+- 请求行为：Gateway 在 exposed model 解析为 exact upstream 后、方向策略前附加不可变 profile。没有 profile 或 profile 未启用 reasoning 时只删除 Anthropic-only 控制，不注入猜测参数；Responses profile 写 `reasoning.effort`，Chat profile 可写 `reasoning_effort`。显式 effort 优先，adaptive/manual budget 生成请求档位，再按模型合法集合取“不低于请求的最近档”，超过最高档则取最高档；GPT-5.5 的 `max` 因而降为 `xhigh`，GPT-5.6 保留 `max`。GPT-5.4、GPT-5.5 与 GPT-5.6 保持独立 target profile，不共享一个按模型名分支的转换模板；Chat 入口只为这五个精确 Responses profile 省略 unsigned assistant reasoning history，并把 `reasoning_effort` 投影为各自合法的 `reasoning.effort`。响应侧 GPT-5.4 对 Messages 目标省略不可表示的 reasoning item/delta，GPT-5.5/5.6 明确保持严格拒绝。原生 Messages 在校验前只应用目标 profile 显式声明的值映射；当前六个 Anthropic active profile 均原样接受 `display:summarized` 与其声明的合法 effort，不再使用临时值映射。没有 profile 时仍不猜测 wire 能力并继续 fail closed。
 - 数据与性能：矩阵由 `go:embed` 在启动时严格解析，拒绝未知字段、错误来源、悬空官方模型引用、重复 runtime key、非法 level/wire/API 组合、映射来源未知、映射目标未被模型声明和能力/参数表不一致。请求热路径只有一次不可变 map lookup 与小 slice 档位扫描，不增加文件 I/O、数据库查询、网络探测、重试或序列化轮次。
 - 验证：schema/source/membership/退役模型/非法数据反例、GPT-5.5 与 GPT-5.6 档位差异、未知模型不注入、未来 Chat `reasoning_effort` profile、Claude native thinking profile、Cherry Studio summarized thinking parser/Gateway/Provider wire 回归均通过；`go test ./... -count=1` 通过。使用 build `2026.08.18.1` 与仓库外固定 CLI manifest 运行 `make validate` 退出 0，覆盖 lint、全仓 race、Dashboard 26 tests/build、兼容矩阵、fixed-CLI fake collector、release manifest、VM/cluster deploy 脚本、Kubernetes 与 Azure Bicep 静态门禁。
 - 未满足门禁：尚未运行真实 Copilot 参数探针、不可变 release attestation、目标 VM、Redis Cluster 或实际 Kubernetes 集群。Gemini 3.7、Grok 4.5/4.6、Fable 5、Kimi K2.7/K3 的精确 Copilot upstream ID/API 与 reasoning wire/levels 尚未形成可提交证据，因此当前只进入官方支持清单，不启用参数注入。
 - 下一最小步骤：从一个隔离账号的 Copilot `/models` 冻结上述未绑定模型的精确 ID/API，并为每个可调模型执行最小合法/非法 level 对照探针。只有证据通过后才以纯 JSON profile 更新启用对应转换。
+
+## 2026-08-22 Anthropic 全模型能力校正
+
+- 冻结范围：只整理当前 GitHub 支持目录中的 11 个 Anthropic 模型及已有六个精确 `anthropic_messages` profile；不新增 Mythos，不为缺少 exact Copilot binding 的模型创建 active profile，也不改变 pool、entitlement、客户端合同或发布等级。
+- 目录分层：Fable 5、Haiku 4.5、Opus 4.5、Opus 4.8 fast 与 Sonnet 4.5 仅保留静态目录成员身份。Sonnet 4.6、Opus 4.6、Opus 4.7、Opus 4.8、Opus 5 与 Sonnet 5 保持独立 exact model/profile ID。
+- profile 校正：Opus/Sonnet 4.6 声明 `adaptive/enabled/disabled`、budget tokens 和 `low/medium/high/max`；Opus 4.7/4.8 声明 `adaptive/disabled` 与完整五档；Opus 5/Sonnet 5 声明默认 adaptive、`disabled` 与完整五档。六个 profile 均接受 `omitted/summarized`，且没有 display/effort value mapping。
+- Opus 5 边界：官方 Anthropic 资料表明 Opus 5 与 Sonnet 5 共享默认 adaptive 和完整 effort 表，因此当前按用户要求保持两者 thinking 配置完全一致，并启用同一 Responses -> Messages signed-thinking bridge。账号当前没有 Opus 5，故这仍是 reference profile，不是 Copilot direct probe、pool、entitlement、fixed-CLI 或 release evidence。Claude 直连 API 的 Opus-only `disabled + xhigh/max` 条件限制尚不能由当前 schema 表达。
+- 取代关系：本节取代下方历史切片中的 `summarized -> omitted`、`low -> medium/xhigh`、`high -> xhigh` 临时映射，以及“Opus 5 更接近 Opus 4.8 且不默认 adaptive”的旧判断；历史故障、request ID 与当时验证结果保留，不再定义当前合同。
+- 验证：模型目录表驱动测试锁定 11 个目录成员、六个 active profile 和 Opus 5/Sonnet 5 深比较；原生 Messages 黑盒逐模型确认 `summarized/low` 原样到达 Provider；协议与 Gateway 两轮工具黑盒确认 Sonnet 5、Opus 5 均可生成、包装并恢复 signed thinking。尚未执行 Opus 5 实模请求或发布 attestation。
 
 ## 2026-08-22 GPT-5.4 Messages -> Responses 空响应
 
@@ -84,6 +93,8 @@
 - 下一最小步骤：仅在未来 `claude-*` 型号出现不同 path/kind 时另开修复，不扩大本 fallback 字段集合；若 Anthropic 将来提供可验证的 unsigned reasoning 回放合同，再以显式能力覆盖评审是否保留而非省略。
 
 ## 2026-08-22 Claude 原生 Messages low effort 映射
+
+> 历史切片：其中的临时 value mapping 已由“Anthropic 全模型能力校正”取代；故障与当时重放结果仅作追溯。
 
 - 冻结范围：本切片只处理 `anthropic_messages -> anthropic_messages` 的 Sonnet 5 与 Opus 4.8 `output_config.effort:"low"`；Chat 入口 parser/request/response policy、Chat 模型模板和已验证的 Chat -> Responses/Claude 路由全部冻结，不作代码或数据行为修改。Gemini/GPT Messages 转换路径由用户确认正常，也不进入本切片。
 - 状态：附件 request `6bb03d9747313e5603261ba6b9baea2a`、trace `97fc5e8d067e7500c50689f84166b1db` 在原生 Sonnet 5 请求中已将 `display:summarized` 成功映射为 `omitted`，随后因 `low` 不在 profile 的 `effort_levels` 而于 `$.output_config.effort` 返回 `provider_thinking_effort_not_supported`；Opus 4.8 同样复现。
@@ -123,6 +134,8 @@
 
 ## 2026-08-22 Sonnet 5 Responses -> Messages signed-thinking 工具循环
 
+> 历史切片：bridge 机制仍有效，但当前 `adaptive_by_default` profile 已扩展到临时与 Sonnet 5 同配置的 Opus 5。
+
 - 状态：Phase 7 后维护修复已实现。Cherry Studio 通过 `/v1/responses` 调用 `claude-sonnet-5 -> anthropic_messages` 时普通对话可用，但网页搜索/function tool 回合只有处理状态而无回复；相同请求的 Claude Opus 4.8 正常。端到端红灯证明 Sonnet 5 的 Anthropic stream 在 `tool_use` 前输出 thinking/signature，旧 validator 立即写 `response.failed`，function call 从未到达客户端。
 - 模型差异：CC Switch 的可复现合同明确 `adaptive_thinking_is_default("claude-sonnet-5")`，Responses -> Anthropic 测试期望 Sonnet 5 自动生成 `thinking.type=adaptive`，而 Opus 4.8 同请求不生成 thinking。内嵌模型转换矩阵因此新增显式 `adaptive_by_default`，只为 Sonnet 5 开启；`disabled`仅作为获授权 Responses -> Anthropic route的内部降级，不加入原生 Messages模型类型。不从模型名前缀或单纯 `types:[adaptive]` 推断默认行为。
 - 修复：模型转换 matrix revision `2026-08-22.3` 只为 Sonnet 5声明 adaptive default。Gateway只有在原始入口为 Responses、解析后目标为 Anthropic Messages、且该 exact profile为 adaptive default时设置内部 bridge授权；原生 Messages与 Messages -> Responses不设置。获授权首轮按 profile投影 adaptive thinking，显式 Responses effort按 `xhigh/max`钳位，并删除 thinking模式不接受的 `temperature/top_p`。返回的完整 signed thinking或 redacted-thinking block以 `ghcp-anthropic-thinking-v1:`前缀和 base64url包装进 Responses `reasoning.encrypted_content`；工具续轮在同一路由恢复原 block并置于 `tool_use`前。缺少可恢复 history时 route-local发送 `thinking.type=disabled`。Opus 4.8及其它路径维持原行为。
@@ -134,6 +147,8 @@
 
 ### Opus 5 无实模判断
 
+> 已取代：官方 Anthropic 资料支持 Opus 5 使用 Sonnet 5 基线；下列内容保留为当时无实模条件下的历史判断，不再定义当前 matrix。
+
 - 判断：当前更接近 Opus 4.8，而不是 Sonnet 5。GitHub 官方页面确认 Opus 5为 GA且支持 configurable reasoning；CC Switch Pi profile为 Opus 5声明 adaptive `xhigh/max`，但其 `adaptive_thinking_is_default` 名单只包含 Sonnet 5/Fable/Mythos，不含 Opus 5。故 matrix 保持 `types:[adaptive]`、`effort_levels:[xhigh,max]`、`adaptive_by_default:false`。
 - 运行行为：当前 Gateway不为 Opus 5设置 Sonnet route授权，因此不会因本切片改变 Opus 5、原生 Messages或 Messages -> Responses行为。底层候选 policy在显式授权时支持 `xhigh/max` adaptive和同一 opaque bridge，但必须等待真实模型探针与独立批准后才能启用；普通/未知 reasoning仍 fail closed。
 - 验证：静态 matrix测试锁定 Opus 5不默认 adaptive且档位为 `xhigh/max`；request policy测试锁定无 effort不注入、显式 `max`生成 `thinking.type=adaptive + output_config.effort=max`。相关 `internal/modelcatalog` 与 `internal/protocol` 聚焦测试通过。
@@ -141,6 +156,8 @@
 - 下一最小步骤：未来账号可见 Opus 5时先跑 text、streaming tool和 explicit `none/xhigh/max` 三组最小探针；只有无 effort请求也稳定返回 signed thinking时，才单独评审是否把 Opus 5改为 `adaptive_by_default:true`。
 
 ## 2026-08-22 Cherry Studio summarized thinking 转换
+
+> 历史切片：parser 与精确 profile 门禁仍有效，但 Sonnet 5/Opus 4.8 的临时 display/effort mapping 已被当前原样支持集合取代。
 
 - 状态：Phase 7 后维护修复已实现。真实 Cherry Studio `/v1/messages` 请求使用 `thinking:{"type":"adaptive","display":"summarized"}` 与 `output_config.effort=high`；Gateway 在模型目录选择 Chat/Responses 目标之前于 `$.thinking.display` 返回 `anthropic_messages->canonical invalid_value`，导致两个转换方向都无法进入既有参数删除策略。
 - 修复：Messages typed parser 把 `summarized` 加入有界已知 display 枚举。模型目录解析后仅在精确转换 profile 声明目标 wire/level 时映射顶层生成控制：`output_config.effort` 优先，adaptive/manual budget 产生请求档位，再按模型合法集合钳位；GPT-5.5 的 `max -> xhigh`，GPT-5.6 保留 `max`。随后删除完整 `thinking` 与 `output_config`，记录 `$.thinking` / `$.output_config` normalized path。没有 profile 的 Chat/Responses 目标仍删除源字段但不盲发未知方言。原生 Messages 同样由精确目标 profile 决定模板：Sonnet 5 与 Opus 4.8 对附件中的 `summarized/high` 分别映射为已声明支持的 `omitted/xhigh`，记录两个字段 path 后再执行严格校验；没有 profile 或未声明映射的值继续 fail closed。

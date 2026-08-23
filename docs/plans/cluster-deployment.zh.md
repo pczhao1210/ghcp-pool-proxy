@@ -155,6 +155,8 @@ flowchart LR
 
 2026-08-20 本地 Compose 基线维护：开发 Compose 的 migration target/phase 现分别默认跟随当前 schema `19` 与 `expand`，因此直接运行 `docker compose ... ps/exec/logs` 不再要求先导出只供 migration 使用的变量；`start.sh` 的显式迁移值仍覆盖默认值。`env -u MIGRATION_TARGET_VERSION -u MIGRATION_PHASE docker compose -f deploy/docker-compose.yml config --quiet`、`ps` 和 active-credential PostgreSQL `exec` 查询均通过。`scripts/release_parity_validate.sh` 新增默认 target 与 `migrations/schema_version` 一致性断言；完整 `make release-validate`、VM、Redis Cluster 和 Kubernetes 门禁本次未运行。下一最小步骤是在下次 schema 升级时由 release parity 同步阻止 Compose 默认值漂移。
 
+2026-08-23 分支集成维护：从 `cluster-deployment` 删除 7 个误提交的运行日志，并通过 `.gitignore` 拒绝后续 `*.log` 和根目录 `filtered_logs.txt` 生成物。`git check-ignore`、`git diff --check` 和变更范围检查通过；本次未运行运行时门禁，因为没有修改应用、部署或测试代码。下一最小步骤是提交清理并将该提交正常合入 `main`，不重写已发布历史。
+
 ## 计划交付物状态
 
 下表区分已提交的仓库产物与仍待环境批准的交付。已提交的 Kubernetes 清单仅可通过渲染和受控集群验证；它们不表示已经创建了任何 Azure 或 Kubernetes 资源。

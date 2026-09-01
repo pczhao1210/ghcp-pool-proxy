@@ -158,6 +158,14 @@ flowchart LR
 - Hides upstream error-code differences and normalizes 401, 403, 429, 5xx, and network timeouts.
 - Handles upstream access only and does not perform client protocol adaptation.
 
+### Upstream Authentication Profiles
+
+- Upstream authentication profiles are credential metadata and are independent of downstream client profiles. Codex still enters through Responses and Claude Code still enters through Messages; neither client selects or overrides the upstream identity.
+- The encrypted credential payload carries `auth_profile` and `token_mode`. Legacy payloads default to the VS Code identity, using Copilot exchange when a GitHub OAuth token is present and static bearer mode otherwise.
+- The `vscode` profile exchanges the GitHub OAuth token for a short-lived Copilot bearer and sends the fixed VS Code/Copilot Chat identity. The `opencode` profile uses its GitHub OAuth token directly and sends the fixed OpenCode identity.
+- Gateway and Worker carry the resolved profile with the existing cached token and credential generation. Normal requests add no profile lookup, probe, retry, or network call; unknown profile or mode values fail closed.
+- A direct-OAuth `401` expires the rejected generation under an account lock and broadcasts credential-cache invalidation. The generation comparison protects a newer credential, while expiring all older active credentials prevents silent fallback to a previous VS Code identity.
+
 ### Admin / Worker
 
 - Admin handles accounts, credential import, pools, client profiles, settings, GitHub org sync request entrypoints, audit queries, and dashboard static assets.

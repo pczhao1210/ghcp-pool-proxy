@@ -220,6 +220,7 @@ The recommended Copilot compatibility flags are `copilot_compat_anthropic_beta_e
 | `CREDENTIAL_MASTER_KEY` | Credential encryption master key |
 | `github.oauth_client_id` | Optional override for the GitHub OAuth App client ID used by dashboard Device Flow. Defaults to the built-in GitHub OAuth Client ID. |
 | `github.oauth_scopes` | Device Flow scopes, default `read:user` |
+| `github.opencode_device_flow_enabled` / `GITHUB_OPENCODE_DEVICE_FLOW_ENABLED` | Enables the additional fixed OpenCode upstream Device Flow profile. Default `false`; changing it requires restarting Admin, Gateway, and Worker. The OpenCode client ID, scope, User-Agent, and GitHub API version are controlled constants rather than client input. |
 | `github.login_base_url` | GitHub login base URL, default `https://github.com` |
 | `github.api_base_url` | GitHub API base URL, default `https://api.github.com` |
 | `github.copilot_token_url` | Copilot bearer token exchange endpoint |
@@ -246,7 +247,7 @@ flowchart TD
 ```
 
 - Each account is a separate `accounts` row, credentials are bound through `credentials.account_id`, and no global Copilot token is used.
-- After Device Flow, the account's own GitHub OAuth token and Copilot bearer token are stored as encrypted payload under that account only.
+- After VS Code Device Flow, the account's GitHub OAuth token and exchanged short-lived Copilot bearer are stored as encrypted payload under that account. After OpenCode Device Flow, the GitHub OAuth token is stored as the direct Copilot bearer with `auth_profile=opencode` and no synthetic expiry.
 - Before a request, the gateway reads `account_id` from router selection, then loads and caches the token by that `account_id`.
 - Pool membership is managed by `pool_accounts`; each account belongs to at most one pool and each client profile points to exactly one pool.
 - Redis sticky keys include pool, model, request format, and affinity hash; sticky only affects account reuse within the same scope.
@@ -452,30 +453,39 @@ sequenceDiagram
   participant C as Copilot Token API
   participant P as PostgreSQL
 
-  D->>A: POST /admin/accounts/{id}/device-flow/start
-  A->>G: Request device code
+  D->>A: start {auth_profile: vscode|opencode}
+  A->>G: Request device code with fixed profile contract
   G-->>A: user_code / verification_uri
-  A-->>D: return code and URL
+  A-->>D: return code, URL, and auth_profile
   D->>G: operator authorizes on GitHub
-  D->>A: POST /admin/accounts/{id}/device-flow/complete
+  D->>A: complete {device_code, auth_profile}
   A->>G: Poll OAuth token
   G-->>A: GitHub access token
-  A->>C: Exchange Copilot bearer token
-  C-->>A: Copilot token / expires_at
-  A->>P: encrypt under credentials.account_id
+  alt vscode profile
+    A->>C: Exchange Copilot bearer token
+    C-->>A: Copilot token / expires_at
+  else opencode profile
+    A->>C: Validate /models with direct OAuth bearer
+    C-->>A: visible model list
+  end
+  A->>P: encrypt token, profile, and mode under account
 ```
+
+The Dashboard queries `/admin/auth-profiles` and exposes separate **VS Code** and **OpenCode** actions only when each profile is enabled. OpenCode start is available only when `github.opencode_device_flow_enabled` is true. An empty start body and a complete body without `auth_profile` retain the legacy `vscode` default. Always echo the profile returned by start when completing a new integration.
 
 API examples:
 
 ```bash
 curl -s http://localhost:8001/admin/accounts/{account_id}/device-flow/start \
   -H "Authorization: Bearer dev-admin-token" \
+  -H "Content-Type: application/json" \
+  -d '{"auth_profile":"opencode"}' \
   -X POST
 
 curl -s http://localhost:8001/admin/accounts/{account_id}/device-flow/complete \
   -H "Authorization: Bearer dev-admin-token" \
   -H "Content-Type: application/json" \
-  -d '{"device_code":"DEVICE_CODE_FROM_START"}'
+  -d '{"device_code":"DEVICE_CODE_FROM_START","auth_profile":"opencode"}'
 ```
 
 If complete returns `202` with `error=authorization_pending`, the user has not finished GitHub authorization yet; call complete again later. If it returns `409 expired_token`, start again.
@@ -570,7 +580,8 @@ GitHub Copilot login credentials can expire or become invalid. PATs may have cus
 
 - Check whether `credentials.expires_at` is approaching.
 - Warn administrators before tokens expire so they can refresh or reimport credentials.
-- After invalidation, degrade the account first, then reimport a new token and restore `active`.
+- VS Code credentials automatically exchange a new short-lived Copilot bearer while their stored GitHub OAuth token remains valid. OpenCode direct-OAuth credentials have no local refresh expiry.
+- An OpenCode `401` conditionally expires the rejected credential generation and all older active credentials for the account, then publishes cache invalidation. A delayed response cannot expire a newer generation, and the gateway does not fall back to an older VS Code credential. Start a new OpenCode Device Flow to restore the account.
 
 ## Alert Priority
 

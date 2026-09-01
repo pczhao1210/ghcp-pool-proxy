@@ -12,6 +12,7 @@
 
 - [Cluster deployment plan](plans/cluster-deployment.zh.md)
 - [Compatibility roadmap](plans/compatibility-roadmap.zh.md)
+- [OpenCode upstream authentication plan](plans/opencode-upstream-auth.zh.md)
 - [Manual validation](runbooks/manual-validation.zh.md)
 - [Ultra performance proposal](proposals/ultra-performance.zh.md)
 

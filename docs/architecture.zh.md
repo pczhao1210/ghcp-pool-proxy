@@ -158,6 +158,14 @@ flowchart LR
 - 屏蔽上游错误码差异，标准化 401、403、429、5xx 和网络超时。
 - 只处理上游接入，不承担客户端协议适配。
 
+### 上游认证 Profile
+
+- 上游认证 profile 是凭据元数据，与下游 client profile 完全分离。Codex 仍走 Responses，Claude Code 仍走 Messages；二者都不能选择或覆盖上游身份。
+- 加密 credential payload 保存 `auth_profile` 和 `token_mode`。旧 payload 默认使用 VS Code 身份：存在 GitHub OAuth token 时采用 Copilot exchange，否则采用 static bearer。
+- `vscode` profile 会把 GitHub OAuth token 兑换为短期 Copilot bearer，并发送固定 VS Code/Copilot Chat 身份；`opencode` profile 直接使用 GitHub OAuth token，并发送固定 OpenCode 身份。
+- Gateway 与 Worker 让解析后的 profile 随现有 token cache 和 credential generation 一起流转。正常请求不增加 profile 查询、探测、重试或网络调用；未知 profile 或 mode 会 fail closed。
+- direct OAuth 收到 `401` 后，在账号锁内按 generation 失效并广播 credential cache invalidation。generation 比较保护较新的凭据，同时使更早的 active credential 一并过期，避免静默回退到旧 VS Code 身份。
+
 ### 控制面与任务面
 
 - Admin 负责账号、凭据导入、池、客户端 profile、settings、GitHub org 同步入口、审计查询和 Dashboard 静态资源服务。

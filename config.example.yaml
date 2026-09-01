@@ -24,6 +24,8 @@ provider:
 
 github:
   # GitHub OAuth Device Flow and Copilot token exchange configuration.
+  # Enables the fixed OpenCode OAuth identity in addition to the VS Code identity.
+  opencode_device_flow_enabled: "false"
   oauth_client_id: "Iv1.b507a08c87ecfe98"
   oauth_scopes: "read:user"
   login_base_url: "https://github.com"

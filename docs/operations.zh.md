@@ -220,6 +220,7 @@ Dashboard Events 默认打开聚焦后的 `Changes` 视图，在分页前排除�
 | `CREDENTIAL_MASTER_KEY` | 凭据加密主密钥 |
 | `github.oauth_client_id` | Dashboard Device Flow 登录 Copilot 账号的 GitHub OAuth App client ID，可选覆盖项；默认使用内置 GitHub OAuth Client ID。 |
 | `github.oauth_scopes` | Device Flow scopes，默认 `read:user` |
+| `github.opencode_device_flow_enabled` / `GITHUB_OPENCODE_DEVICE_FLOW_ENABLED` | 启用额外的固定 OpenCode 上游 Device Flow profile。默认 `false`；修改后需要重启 Admin、Gateway 和 Worker。OpenCode client ID、scope、User-Agent 与 GitHub API version 都是受控常量，不能由客户端注入。 |
 | `github.login_base_url` | GitHub 登录域名，默认 `https://github.com` |
 | `github.api_base_url` | GitHub API 域名，默认 `https://api.github.com` |
 | `github.copilot_token_url` | Copilot bearer token 换取端点 |
@@ -246,7 +247,7 @@ flowchart TD
 ```
 
 - 每个账号是一条独立 `accounts` 记录，凭据通过 `credentials.account_id` 绑定，不使用全局 Copilot token。
-- Device Flow 完成后保存的是该账号自己的 GitHub OAuth token 和 Copilot bearer token，加密 payload 只挂在该账号下。
+- VS Code Device Flow 完成后，会把该账号的 GitHub OAuth token 与兑换出的短期 Copilot bearer 保存到加密 payload；OpenCode Device Flow 则把 GitHub OAuth token 作为 direct Copilot bearer 保存，并写入 `auth_profile=opencode`，不伪造过期时间。
 - Gateway 在请求前从 router selection 取 `account_id`，再按该 `account_id` 读取和缓存 token。
 - pool membership 使用 `pool_accounts` 管理；每个账号最多属于一个 pool，每个 client profile 必须指向一个 pool。
 - Redis sticky key 包含 pool、model、request format 和 affinity hash，sticky 只影响同一 scope 下的账号复用。
@@ -452,30 +453,39 @@ sequenceDiagram
   participant C as Copilot Token API
   participant P as PostgreSQL
 
-  D->>A: POST /admin/accounts/{id}/device-flow/start
-  A->>G: Request device code
+  D->>A: start {auth_profile: vscode|opencode}
+  A->>G: 按固定 profile 合同申请 device code
   G-->>A: user_code / verification_uri
-  A-->>D: 返回授权码和 GitHub URL / return code and URL
-  D->>G: 管理员在 GitHub 页面授权 / operator authorizes on GitHub
-  D->>A: POST /admin/accounts/{id}/device-flow/complete
+  A-->>D: 返回授权码、GitHub URL 和 auth_profile
+  D->>G: 管理员在 GitHub 页面授权
+  D->>A: complete {device_code, auth_profile}
   A->>G: Poll OAuth token
   G-->>A: GitHub access token
-  A->>C: Exchange Copilot bearer token
-  C-->>A: Copilot token / expires_at
-  A->>P: 加密保存到 credentials.account_id / encrypt under credentials.account_id
+  alt vscode profile
+    A->>C: Exchange Copilot bearer token
+    C-->>A: Copilot token / expires_at
+  else opencode profile
+    A->>C: 使用 direct OAuth bearer 验证 /models
+    C-->>A: 可见模型列表
+  end
+  A->>P: 按账号加密保存 token、profile 与 mode
 ```
+
+Dashboard 查询 `/admin/auth-profiles`，只对已启用的 profile 提供独立的 **VS Code** 与 **OpenCode** 操作入口。只有 `github.opencode_device_flow_enabled=true` 时才能启动 OpenCode 登录。start 空 body 和 complete 不带 `auth_profile` 时继续默认 `vscode`，以兼容旧调用；新接入应在 complete 时原样回传 start 返回的 profile。
 
 API 示例
 
 ```bash
 curl -s http://localhost:8001/admin/accounts/{account_id}/device-flow/start \
   -H "Authorization: Bearer dev-admin-token" \
+  -H "Content-Type: application/json" \
+  -d '{"auth_profile":"opencode"}' \
   -X POST
 
 curl -s http://localhost:8001/admin/accounts/{account_id}/device-flow/complete \
   -H "Authorization: Bearer dev-admin-token" \
   -H "Content-Type: application/json" \
-  -d '{"device_code":"DEVICE_CODE_FROM_START"}'
+  -d '{"device_code":"DEVICE_CODE_FROM_START","auth_profile":"opencode"}'
 ```
 
 如果 complete 返回 `202` 且 `error=authorization_pending`，表示用户还没有在 GitHub 页面完成授权；稍后再次调用 complete。若返回 `409 expired_token`，重新 start。
@@ -570,7 +580,8 @@ GitHub Copilot 登录凭据存在过期和失效风险。PAT 可能有自定义�
 
 - 检查 `credentials.expires_at` 是否即将到期。
 - 对即将失效的 token 提前提醒管理员刷新或重新导入。
-- 失效后先做账号降级，再用新 token 重新导入并恢复 `active`。
+- VS Code credential 在已保存的 GitHub OAuth token 仍有效时，会自动兑换新的短期 Copilot bearer；OpenCode direct OAuth credential 没有本地刷新过期时间。
+- OpenCode 收到 `401` 后，会按 generation 条件失效被拒绝的凭据和该账号更早的 active credential，再发布 cache invalidation。延迟响应不能失效较新的 generation，Gateway 也不会回退到旧 VS Code credential。通过新的 OpenCode Device Flow 恢复账号。
 
 ## 告警优先级
 

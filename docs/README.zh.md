@@ -12,6 +12,7 @@
 
 - [集群部署计划](plans/cluster-deployment.zh.md)
 - [兼容性路线图](plans/compatibility-roadmap.zh.md)
+- [OpenCode 上游认证计划](plans/opencode-upstream-auth.zh.md)
 - [人工验证](runbooks/manual-validation.zh.md)
 - [Ultra 性能提案](proposals/ultra-performance.zh.md)
 

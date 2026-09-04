@@ -675,6 +675,19 @@ config_integer_value() {
   printf '%s' "$value"
 }
 
+# Emits an unquoted YAML boolean; the gateway rejects quoted "true"/"false" strings for bool fields.
+config_boolean_value() {
+  local key="$1"
+  local fallback="$2"
+  local value="${!key:-$fallback}"
+  value="${value,,}"
+  case "$value" in
+    true|1|yes|on) printf 'true' ;;
+    false|0|no|off) printf 'false' ;;
+    *) die "$key must be a boolean (true/false), got: $value" ;;
+  esac
+}
+
 config_decimal_value() {
   local key="$1"
   local fallback="$2"
@@ -738,7 +751,7 @@ provider:
 github:
   # GitHub OAuth Device Flow and Copilot token exchange configuration.
   # Enables the fixed OpenCode OAuth identity in addition to the VS Code identity.
-  opencode_device_flow_enabled: $(config_string_value GITHUB_OPENCODE_DEVICE_FLOW_ENABLED false)
+  opencode_device_flow_enabled: $(config_boolean_value GITHUB_OPENCODE_DEVICE_FLOW_ENABLED false)
   oauth_client_id: $(config_string_value GITHUB_OAUTH_CLIENT_ID Iv1.b507a08c87ecfe98)
   oauth_scopes: $(config_string_value GITHUB_OAUTH_SCOPES read:user)
   login_base_url: $(config_string_value GITHUB_LOGIN_BASE_URL https://github.com)
@@ -747,7 +760,7 @@ github:
   copilot_token_url: $(config_string_value COPILOT_TOKEN_URL "")
 
 health:
-  enabled: $(config_string_value HEALTH_ENABLED true)
+  enabled: $(config_boolean_value HEALTH_ENABLED true)
   scheduler_poll_interval: $(config_string_value HEALTH_SCHEDULER_POLL_INTERVAL 1s)
   active_token_probe_interval: $(config_string_value HEALTH_ACTIVE_TOKEN_PROBE_INTERVAL 60m)
   degraded_token_probe_interval: $(config_string_value HEALTH_DEGRADED_TOKEN_PROBE_INTERVAL 60s)

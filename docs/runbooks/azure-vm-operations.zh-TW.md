@@ -697,7 +697,61 @@ resp = client.chat.completions.create(
 print(resp.choices[0].message.content)
 ```
 
-### 8.7 綁定模式所需欄位
+Anthropic SDK 同理，只需覆寫 `base_url`：
+
+```python
+from anthropic import Anthropic
+client = Anthropic(base_url="http://127.0.0.1:8000", api_key="<Client API Key>")
+resp = client.messages.create(
+    model="claude-sonnet-5", max_tokens=1024,
+    metadata={"user_id": "alice"},          # user_binding Pool 需要此欄位
+    messages=[{"role": "user", "content": "hello"}],
+)
+print("".join(b.text for b in resp.content if b.type == "text"))
+```
+
+### 8.7 程式直接呼叫（不用 SDK）
+
+Gateway 就是一般 HTTP API，任何語言的 HTTP client 都能呼叫。要點：
+
+1. `Authorization: Bearer <Client API Key>`（Anthropic 端點也接受 `x-api-key`）
+2. `user_binding` Pool 一律帶 `X-GHCP-User` header 最省事，兩種 API 都適用
+3. **模型選 API**：`gpt-*` / `gemini-*` / `grok-*` 走 `/v1/chat/completions`；**`claude-*` 走 `/v1/messages`**（原因見 8.9）
+4. Anthropic 回應 `content` 是區塊陣列，只取 `type == "text"` 的區塊；`thinking` 區塊可忽略
+5. 出錯時記下回應 header `X-Request-ID`，管理員可用它在 gateway log 對應到內部原因
+
+Node.js 18+（內建 `fetch`，不需安裝套件）：
+
+```javascript
+const BASE = "http://127.0.0.1:8000", KEY = "<Client API Key>", USER = "alice";
+const H = { Authorization: `Bearer ${KEY}`, "Content-Type": "application/json", "X-GHCP-User": USER };
+
+// OpenAI 相容：gpt / gemini / grok
+async function chatOpenAI(model, prompt) {
+  const r = await fetch(`${BASE}/v1/chat/completions`, { method: "POST", headers: H,
+    body: JSON.stringify({ model, messages: [{ role: "user", content: prompt }], max_tokens: 4096 }) });
+  if (!r.ok) throw new Error(`${r.status} ${r.headers.get("x-request-id")} ${await r.text()}`);
+  return (await r.json()).choices[0].message.content;
+}
+
+// Anthropic 相容：claude
+async function chatClaude(model, prompt) {
+  const r = await fetch(`${BASE}/v1/messages`, { method: "POST",
+    headers: { ...H, "anthropic-version": "2023-06-01" },
+    body: JSON.stringify({ model, messages: [{ role: "user", content: prompt }], max_tokens: 4096 }) });
+  if (!r.ok) throw new Error(`${r.status} ${r.headers.get("x-request-id")} ${await r.text()}`);
+  return (await r.json()).content.filter(b => b.type === "text").map(b => b.text).join("");
+}
+
+const ask = (model, prompt) => model.startsWith("claude") ? chatClaude(model, prompt) : chatOpenAI(model, prompt);
+console.log(await ask("claude-sonnet-5", "用一句話介紹台北"));
+```
+
+串流：Chat Completions 加 `"stream": true`，回應為 SSE（每行 `data: {...}`，結尾 `data: [DONE]`），逐行 `JSON.parse` 後取 `choices[0].delta.content`。
+
+Python 3 標準庫版（`urllib.request`）結構相同：組 JSON、`Request(url, data, headers, method="POST")`、`urlopen` 後 `json.loads`；PowerShell 用 `Invoke-WebRequest` 再以 UTF-8 解碼 `RawContentStream`，避免中文亂碼。
+
+### 8.8 綁定模式所需欄位
 
 | Pool 模式 | 必須提供 | 來源 |
 | --- | --- | --- |
@@ -706,7 +760,7 @@ print(resp.choices[0].message.content)
 
 缺少時回 `400 invalid_request_error`（`user identifier is required`）。
 
-### 8.8 客戶端會看到的錯誤
+### 8.9 客戶端會看到的錯誤
 
 | HTTP | code | 意義 | 客戶端應對 |
 | --- | --- | --- | --- |
@@ -715,10 +769,16 @@ print(resp.choices[0].message.content)
 | 400 | `invalid_request_error` | 缺 user/session id、請求體 > 32 MiB | 補欄位或縮小請求 |
 | 429 | `rate_limited` | RPM 命中或**無可用帳號** | 指數退避重試 |
 | 429 | `budget_exhausted` | 每日 token / Credits 用盡 | 隔日或請管理員調整 |
-| 502 | `upstream_error` | Copilot 上游錯誤 | 重試；持續發生請通知管理員 |
+| 502 | `upstream_error` | Copilot 上游錯誤，**或協定轉換失敗**（見下） | 重試；持續發生請通知管理員 |
 | 503 | `service_unavailable` | Pool 未設定或依賴不可用 | 通知管理員 |
 
 每個回應都帶 `X-Request-ID`，回報問題時請附上。
+
+**Claude 模型走 `/v1/chat/completions` 常見的 `502 model provider error`**：Claude 對開放式問題（如「你可以做什麼」）會先輸出 *thinking* 區塊；Gateway 把 Anthropic 回應轉回 OpenAI 格式時無法對應此區塊，會安全失敗並回 `502 upstream_error`（gateway log 顯示 `internal_message: semantic_compatibility_error`）。串流時則表現為 `stream_error`。簡單問題通常不會觸發，所以症狀是「時好時壞」。解法擇一：
+
+1. **Claude 模型改用 `/v1/messages`**（推薦，原生協定不需轉換）
+2. 該用途改用 `gpt-*` 等非 Claude 模型
+3. 管理員在 **Dashboard → Models** 把該模型的 `upstream_api` 改為 `chat_completions`（Copilot 端直接以 OpenAI 格式服務，不會產生 thinking 區塊，但可能損失部分 Claude 功能）
 
 ---
 
@@ -937,6 +997,18 @@ docker system df
 ### 11.8 Device Flow 卡在 `authorization_pending`
 
 使用者尚未在 GitHub 頁面完成授權。確認是用**正確的 GitHub 帳號**（有 Copilot 授權的那個）登入 GitHub 後輸入 code。code 有效期約 15 分鐘，過期後重新 start。
+
+### 11.9 Claude 模型回 `502 model provider error`，但 gpt 正常
+
+1. 用回應的 `X-Request-ID` 查 gateway log：
+
+   ```bash
+   sudo docker logs ghcp-proxy-gateway-1 2>&1 | grep 'gateway error mapped' | grep <request-id>
+   ```
+
+2. 若 `internal_message` 為 `semantic_compatibility_error`（串流為 `stream_error`），表示客戶端用 **Chat Completions** 呼叫 Claude、而模型回了 thinking 區塊，Gateway 無法轉換而安全失敗——不是帳號或 Copilot 故障。
+3. 處置：請客戶端改走 `/v1/messages`；或在 Dashboard → Models 將該模型 `upstream_api` 設為 `chat_completions`。詳見 8.9。
+4. 若 `internal_message` 是其他值（如上游 5xx、帳號 401），才依 11.3 / 11.4 檢查帳號狀態。
 
 ---
 

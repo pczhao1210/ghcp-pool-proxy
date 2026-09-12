@@ -3,7 +3,7 @@
 
 这是 GHCP Pool Proxy 的纯运行期发布仓库，使用预构建 Docker Hub 镜像，支持 Linux VM Docker Compose、本地单节点 Kind，以及 AKS + Azure PostgreSQL/Managed Redis；不包含应用源码和本地构建工具。
 
-中文 | [English](README.en.md)
+简体中文 | [English](README.en.md) | [繁體中文](README.zh-TW.md)
 
 ## 目录
 

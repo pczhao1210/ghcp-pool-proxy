@@ -170,6 +170,10 @@ deploy/deploy-cluster.sh azure apply
 
 配置分为两类权威来源。本地源码部署使用 `start.sh` 创建且被 Git 忽略的仓库 `config.yaml`；VM 部署使用 `deploy.sh generate-config` 创建的 `~/ghcp_proxy/config.yaml`。Provider/OAuth 端点、超时、连接池与队列容量和日志是 YAML 启动配置，Dashboard 只读展示 effective value，修改后必须重启。部署密钥、宿主机路径、端口、监听地址以及 PostgreSQL/Redis 地址保存在 `~/ghcp_proxy/.env`。自定义部署遵循“环境变量 > YAML > 内置默认值”；VM Compose 从 `.env` 注入部署值，并从 YAML 读取应用启动配置。
 
+修改 VM 启动配置后，应在维护窗口停止新流量，再执行 `deploy/deploy.sh stop && deploy/deploy.sh start`，期间会停机。单独执行 `start` 使用 Compose `up`，仅修改挂载的 YAML 内容不保证容器重启。本地源码部署则使用 `./start.sh restart`。
+
+旧版生成的 YAML 可能把 `github.opencode_device_flow_enabled` 或 `health.enabled` 写为带引号的字符串。请保留原本的开关选择，改为无引号的 `true`/`false` 后重启；更新脚本不会重写已有配置。停机备份与还原步骤见[繁体中文 VM 手册](runbooks/azure-vm-operations.zh-TW.md#5-備份還原與搬遷)。
+
 预算、Feature Flags、模型目录、Gateway Public URL、Client/GitHub fallback key 和 usage retention 存在 PostgreSQL，可在 Dashboard 热更新。Retention 的优先级为 DB 覆盖值高于 YAML/环境变量启动 fallback，再高于内置默认值。Worker 会在每次 maintenance pass 前刷新 retention，当前周期为 5 分钟，无需重启。缩短非零窗口可能永久删除更老的完整分区；设为 `0` 表示关闭该层清理。
 
 Dashboard Events 默认打开聚焦后的 `Changes` 视图，在分页前排除例行的凭据过期通知和自动回池启动通知；`All events` 仍可查看完整审计流水。凭据告警 worker 现在对每个 `credential_id + expires_at` 最多写一条审计事件，凭据续期后会进入新的告警周期。已有重复行会保留，不做删除。

@@ -3,7 +3,7 @@
 
 This is the runtime-only release of GHCP Pool Proxy. It deploys prebuilt Docker Hub images to Linux VM Docker Compose, local single-node Kind, or AKS with Azure PostgreSQL and Managed Redis. It does not include application source or local build tooling.
 
-[中文](README.zh.md) | English
+[简体中文](README.zh.md) | English | [繁體中文](README.zh-TW.md)
 
 ## Contents
 

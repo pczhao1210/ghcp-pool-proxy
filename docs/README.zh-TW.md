@@ -23,11 +23,15 @@
 | 客戶端相容合同 | [Compatibility](../compatibility/README.md) | [兼容矩阵](../compatibility/README.zh.md) |
 | Kubernetes 部署基線 | [Kubernetes](../deploy/k8s/README.en.md) | [Kubernetes](../deploy/k8s/README.zh.md) |
 
-## 計畫與歷史
+## 有效計畫與提案
 
 - [集群部署計畫（簡體中文）](plans/cluster-deployment.zh.md)
 - [相容性路線圖（簡體中文）](plans/compatibility-roadmap.zh.md)
-- [OpenCode 上游認證計畫（簡體中文）](plans/opencode-upstream-auth.zh.md)
-- [歷史與參考索引（簡體中文）](README.zh.md#参考与历史)
+- [OpenCode 認證：剩餘目標環境驗收（簡體中文）](plans/opencode-upstream-auth.zh.md)
+- [Ultra 性能提案（尚未實作，簡體中文）](proposals/ultra-performance.zh.md)
 
-計畫與歷史記錄不是當前生產支援承諾；實作、測試、migration 與指定發布版本的相容證據決定實際行為。
+計畫與提案不是生產支援承諾；程式碼、可重現測試與 migration 決定實作及資料契約，matrix 決定候選能力，指定不可變發布的外置 attestation 決定有效相容等級。
+
+## 維護原則
+
+每項詳細規則由上方對應文件維護，入口與翻譯不另複製模型、API 或驗證清單。計畫只保留尚未完成的工作與驗收門檻；完成後將必要的設計理由移入正式文件，刪除過程日誌，舊紀錄由 Git 歷史保留。完整[維護規則（簡體中文）](README.zh.md#维护规则)亦適用於繁體中文文件。

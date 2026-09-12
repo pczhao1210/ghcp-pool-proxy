@@ -12,7 +12,7 @@ This is the primary gateway routing document. It covers fixed client-to-pool ass
 - [Sticky Affinity](#sticky-affinity)
 - [Sticky Overflow And Concurrency](#sticky-overflow-and-concurrency)
 - [Risk Score And Account State](#risk-score-and-account-state)
-- [Budgets And Limits](#budgets-and-limits)
+- [Rate Limits And Concurrency](#rate-limits-and-concurrency)
 - [Metrics](#metrics)
 - [Tuning Guidance](#tuning-guidance)
 
@@ -23,17 +23,18 @@ flowchart TD
   A["Gateway receives request"] --> B["Authenticate API key / client profile"]
   B --> C["Protocol parser -> CanonicalRequest"]
   C --> D["Model catalog exposed -> upstream"]
-  D --> E["Global RPM / token / AI credit checks"]
+  D --> E["Validate canonical request semantics"]
   E --> F["Use client profile pool_id"]
   F --> G{"pool allocation_mode"}
-  G -->|"user_binding"| H["standard user identifier -> DB/Redis binding"]
+  G -->|"user_binding / session_binding"| H["standard identifier -> DB/Redis binding"]
   G -->|"shared"| I["Compute affinity key / read sticky target"]
   H --> J["Select bound account"]
   I --> K["Preferred sticky or load-balanced selection"]
   J --> L["Redis concurrency lease"]
   K --> L
-  L --> M["Account RPM / token / AI credit checks"]
-  M --> N["Call Copilot provider"]
+  L --> M["Journal attempt and atomically admit global + account RPM"]
+  M -->|"admitted and journal acknowledged"| N["Call Copilot provider"]
+  M -->|"account rejection; shared or newly created binding"| G
   N --> O["Record usage / risk / sticky metrics"]
 ```
 
@@ -74,7 +75,7 @@ For binding pools:
 - First binding selects an unbound account ordered by low account `priority`, low `risk_score`, high pool membership `weight`, and low account `id`.
 - Each hit refreshes `last_used_at` and `expires_at`; defaults are 7 idle days for `user_binding` and 5 idle minutes for `session_binding`; pool `binding_ttl_seconds` may override this.
 - Binding pools use pool `binding_max_concurrency` as the effective concurrency limit, defaulting to 10, without changing the account's original `max_concurrency`.
-- Release happens only by expiration or manual Dashboard `Release` from the expanded pool detail.
+- Admitted bindings are released by expiration or manual Dashboard `Release`; a newly created binding is rolled back if admission fails.
 - If the bound account is unavailable or at concurrency limit, the request fails instead of rebinding.
 - Shared pools avoid accounts occupied by active bindings.
 
@@ -94,7 +95,7 @@ All ordinary and required-account selections must pass these filters.
 
 An empty candidate set enters gateway error mapping; see [operations.en.md](operations.en.md) for the client-facing status and internal routing reason mapping.
 
-The model catalog controls the models exposed by the gateway. Schema 19 stores per-account discovery and probe evidence. A client profile explicitly selects `model_entitlement_policy=allow_unknown` or `require_fresh`. Strict requests capture one immutable allowlist from the latest fully completed evidence version; ordinary, sticky, required-account, Redis concurrency rebinding, budget retry, and user/session binding create/restore all reuse it. An existing binding whose account is no longer eligible fails closed without creating a second binding. Evidence expiry is evaluated when the request plan is created. `allow_unknown` is the compatibility default and does not filter by evidence, so those pools should remain model-homogeneous.
+The model catalog controls the models exposed by the gateway. Schema 19 stores per-account discovery and probe evidence. A client profile explicitly selects `model_entitlement_policy=allow_unknown` or `require_fresh`. Strict requests capture one immutable allowlist from the latest fully completed evidence version; ordinary, sticky, required-account, Redis concurrency rebinding, RPM retry, and user/session binding create/restore all reuse it. An existing binding whose account is no longer eligible fails closed without creating a second binding. Evidence expiry is evaluated when the request plan is created. `allow_unknown` is the compatibility default and does not filter by evidence, so those pools should remain model-homogeneous.
 
 ## Load Balancing
 
@@ -110,13 +111,13 @@ If a sticky target remains in the candidate set, the router selects it before st
 
 ## Sticky Affinity
 
-Sticky mappings are stored in Redis as:
+Sticky mappings are scoped by pool, model and the hashed affinity input. Under the current Redis protocol v2, the forward key is:
 
 ```text
-sticky:{pool_id}:{model}:{affinity_key_hash} -> account_id
+ghcp:v2:e<epoch>:{sticky:<affinity_hash>}:forward:<pool_id>:<model> -> account_id
 ```
 
-Successful requests write or refresh the target. Redis also keeps a `sticky_account:{account_id}` reverse index so disabling an account can delete its sticky keys.
+Successful requests write or refresh the target. Per-account reverse and expiry indexes support invalidation and pruning. These are versioned internal keys, not an operator API; legacy `sticky:*` keys belong to protocol v1 and must not be mixed into v2 recovery.
 
 Sticky policy (`sticky_mode`):
 
@@ -150,7 +151,7 @@ With `session_then_prefix`, a missing session key falls back to a prefix hash. `
 
 ## Sticky Overflow And Concurrency
 
-Concurrency has two layers: the router's process-local counter is a fast filter and ordering signal; the Redis lease is the hard gate across gateway instances. After selecting an account, the gateway reserves a lease in `concurrency_leases:{account_id}`. A failed reservation means the account is full across instances.
+Concurrency has two layers: the router's process-local counter is a fast filter and ordering signal; the Redis lease is the hard gate across gateway instances. After selecting an account, the gateway reserves a lease in the current protocol/epoch account namespace (`ghcp:v2:e<epoch>:{acct:<account_id>}:concurrency` for v2). A capacity rejection means the account is full across instances; Redis errors instead fail closed as dependency failures.
 
 In soft sticky mode, if the sticky target is eligible, the gateway checks load that existed before the current request:
 
@@ -188,15 +189,21 @@ Thresholds:
 
 The current state machine supports `active -> degraded` and `degraded -> quarantined`, but not direct `active -> quarantined` jumps.
 
-## Budgets And Limits
+## Rate Limits And Concurrency
 
-Before routing, the gateway checks global RPM, daily tokens, and daily AI credits. After selecting an account, it checks account-level RPM, tokens, and AI credits. Budget failures return rate-limit or budget errors and do not try another account.
+After account selection and concurrency admission, the gateway atomically checks and consumes global and account RPM capacity in Redis. A rejected account does not consume global capacity. Global rate-limit rejections stop immediately. An account-level rejection may try another eligible account in the same immutable route plan, excluding previously rejected accounts; it never falls back to another pool or retries an upstream call. Existing user/session bindings fail closed on their bound account. A newly created binding can be rolled back only while no concurrent request has adopted it. Exhausting candidates returns the original rate-limit error; dependency failures return 503. Provider attempts remain journaled for dispatch ownership and usage persistence.
 
-Daily token and AI Credits budgets are disabled by default. Configure them from the Dashboard Config page or set `BUDGET_MAX_DAILY_TOKENS_PER_ACCOUNT`, `BUDGET_MAX_DAILY_TOKENS_GLOBAL`, `BUDGET_MAX_DAILY_NANO_AIU_PER_ACCOUNT`, or `BUDGET_MAX_DAILY_NANO_AIU_GLOBAL` to a value greater than `0` to enable those caps. RPM protection remains enabled through `BUDGET_MAX_RPM_PER_ACCOUNT=60` and the 100-account aggregate cap `BUDGET_MAX_RPM_GLOBAL=6000`; set either value to `0` to disable that RPM check. RPM uses an atomic Redis sliding window: a full window returns 429 immediately without waiting in the gateway, and rejected attempts do not consume more capacity in that window. Gateway refreshes Dashboard-saved budget settings periodically, while environment values are startup defaults. A previously saved database value continues to override the startup default.
+The proxy has no monetary or Token quotas. Billing and consumption limits are managed in GitHub. RPM protection remains enabled through `BUDGET_MAX_RPM_PER_ACCOUNT=60` and the 100-account aggregate cap `BUDGET_MAX_RPM_GLOBAL=6000`; set either value to `0` to disable that RPM check. RPM uses an atomic Redis sliding window: a full window returns 429 immediately without waiting in the gateway. Gateway refreshes Dashboard-saved RPM settings periodically, while environment values are startup defaults. A previously saved database RPM value continues to override the startup default. Retired quota settings are ignored and hidden from the Admin API and Dashboard.
 
-When daily token budgets are disabled, an explicit client output limit is retained as the reservation amount and is not rejected merely because it exceeds the `4096` fallback used for requests that omit an output limit. When either daily token budget is enabled, `BUDGET_MAX_RESERVATION_INPUT_TOKENS` and `BUDGET_MAX_RESERVATION_OUTPUT_TOKENS` are conservative hard bounds; set the output bound at least as high as the largest client `max_tokens` or `max_output_tokens` value that should be admitted. This preserves fail-closed daily-budget accounting while allowing RPM-only deployments to accept coding clients that request larger output windows.
+Valid explicit client output limits remain unchanged, including `max_tokens`, Chat `max_completion_tokens`, and Responses `max_output_tokens`. Omitted limits retain provider behavior; the proxy does not impose a quota-derived output cap. Model context/output limits, protocol validation, and thinking `budget_tokens` remain model/request semantics, not consumption quotas.
 
-The router itself does not read budget ledgers; it handles the assigned pool, account status, seats, reservations, and concurrency.
+Token usage, cache usage, reasoning tokens, and token type/count details remain available for monitoring and reconciliation. There are no Token reservations, settlements, refunds, compensation workers, or daily-quota reconstruction during Redis recovery. Request journals, usage outbox/ledger writes, and rollups remain; removing quotas does not eliminate all per-request database work.
+
+Redis dataset recovery/cutover remains an operator-controlled maintenance operation: drain writers and observe the RPM/lease safety window before reopening traffic. The coordinator rebuilds binding state but does not automatically wait for that quiet window or reconstruct daily Token counters.
+
+Dispatch ownership has a one-minute PostgreSQL lease, renewed every 20 seconds while a request is active. A valid lease prevents stale-attempt reconciliation from ending a long stream; ownership loss cancels upstream work and surfaces an explicit failure without penalizing the account. Binding adoption and dispatch commit together. Bound dispatch adds three PostgreSQL round trips relative to unbound dispatch; lease maintenance adds one update per 20 seconds per active attempt. Protocol-v2 affinity writes prune expired reverse-index entries and preserve the TTL of remaining live entries.
+
+The router itself does not read usage ledgers; it handles the assigned pool, account status, seats, reserved bindings, and concurrency.
 
 ## Metrics
 

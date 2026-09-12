@@ -53,7 +53,7 @@ spec:
             - name: WORKER_SHUTDOWN_TIMEOUT
               value: 5s
             - name: WORKER_ROLES
-              value: credential-warning,health,usage-rollup,provider-attempts,budget-recovery,binding-expiry
+              value: credential-warning,health,usage-rollup,provider-attempts,binding-expiry
             - name: CAPABILITY_SYNC_MATRIX_PATH
               value: /srv/ghcp/compatibility/matrix.json
           volumeMounts:

@@ -37,7 +37,7 @@ spec:
             - name: MIGRATION_POSTGRES_DSN_FILE
               value: /var/run/secrets/ghcp/migration/postgres-dsn
             - name: MIGRATION_TARGET_VERSION
-              value: "19"
+              value: "21"
             - name: MIGRATION_PHASE
               value: expand
             - name: MIGRATION_LOCK_TIMEOUT

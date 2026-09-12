@@ -30,7 +30,7 @@ deploy/deploy.sh start
 Gateway 和 Admin 默认只绑定 VM 回环接口。请在工作站通过 SSH 转发：
 
 ```bash
-ssh -N -L 8000:127.0.0.1:8000 -L 8001:127.0.0.1:8001 <user>@<server>
+ssh -N -L 8000:127.0.0.1:8000 -L 8001:127.0.0.1:8001 '<user>@<server>'
 ```
 
 随后通过 `http://127.0.0.1:8001/` 访问 Dashboard，通过 `http://127.0.0.1:8000/` 调用模型 API。若私有反向代理位于另一台主机，可将 `GATEWAY_BIND_ADDR` 和 `ADMIN_BIND_ADDR` 设置为经审核的私网接口，并强制使用 TLS 和防火墙限制。不要在不可信网络上明文发布 Admin。
@@ -82,7 +82,7 @@ deploy/deploy-cluster.sh azure apply
 
 - `~/ghcp_proxy/config.yaml`：Provider 端点、超时、连接与队列容量、维护 fallback 和日志配置。
 - `~/ghcp_proxy/.env`：自动生成的密钥、宿主机路径、回环监听地址、端口以及 PostgreSQL/Redis 地址。
-- PostgreSQL：Dashboard 管理的预算、feature flags、模型目录、URL、key 和 retention override。
+- PostgreSQL：Dashboard 管理的 RPM 限制、feature flags、模型目录、URL、key 和 retention override。
 
 请保护好 `.env`。已有凭据数据后，不要随意替换 `CREDENTIAL_MASTER_KEY`。
 

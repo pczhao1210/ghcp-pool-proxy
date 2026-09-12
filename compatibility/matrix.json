@@ -1,8 +1,8 @@
 {
   "schema_version": 3,
   "revision": "phase7c-2026-08-18.1",
-  "gateway_build": "2026.08.18.1",
-  "target_schema": 19,
+  "gateway_build": "2026.09.12.1",
+  "target_schema": 21,
   "runtime_contracts": [
     {
       "id": "claude-code-messages-claude-sonnet-4-20250514",

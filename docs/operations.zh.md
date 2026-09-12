@@ -14,7 +14,7 @@
 - [发布与迁移](#发布与迁移)
 - [日常检查](#日常检查)
 - [Gateway 错误映射](#gateway-错误映射)
-- [用量、费用与 Cache 观测](#用量费用与-cache-观测)
+- [用量与 Cache 观测](#用量与-cache-观测)
 - [运维流程](#运维流程)
 - [告警优先级](#告警优先级)
 - [常见故障](#常见故障)
@@ -53,7 +53,7 @@ deploy/deploy.sh --start
 - 已有持久化目录中 YAML 缺失时会停止启动，避免静默恢复默认配置。
 - 校验随包非敏感 release manifest 与 schema 一致，从 manifest 派生并直接拉取四个 runtime `repository@sha256:...` 引用，同时拉取 PostgreSQL/Redis 镜像。
 - 启动 PostgreSQL 和 Redis，等待健康检查通过。
-- 使用 file-mounted DSN 运行专用 manifest-backed migration 镜像。空库应用 `001_init.sql`；已识别的 schema 版本 1 到 9 通过 `010_legacy_schema_reconciliation.sql` 修复；版本 10 及以上使用对应编号 migration 路径。部分 schema，以及缺少 marker 但带有版本 10 及以上特征的 schema，会 fail-closed。
+- 使用 file-mounted DSN 运行专用 manifest-backed migration 镜像。空库应用 `001_init.sql`，然后继续增量迁移至目标 schema；已识别的 schema 版本 1 到 9 通过 `010_legacy_schema_reconciliation.sql` 修复；版本 10 及以上使用对应编号 migration 路径。部分 schema，以及缺少 marker 但带有版本 10 及以上特征的 schema，会 fail-closed。
 - 启动 gateway、admin 和 worker。
 - 启动日志采集器，把 compose 日志按小时写入 `~/ghcp_proxy/logs/ghcp-proxy-YYYYMMDD-HH.log`，默认保留 30 天。
 
@@ -76,7 +76,7 @@ GHCP_RESET_CONFIRM=reset deploy/deploy.sh --reset
 deploy/deploy.sh --start
 ```
 
-本地开发环境使用 `./start.sh --reset`，它会执行 Docker Compose volume reset 后按当前 `migrations/001_init.sql` 重建数据库。
+本地开发环境使用 `./start.sh --reset`，它会执行 Docker Compose volume reset 后，按初始快照及 manifest 指定的后续迁移重建数据库。
 
 源码树验证可使用 `./start.sh --new`。它默认运行 Go 测试，除非显式传入 `--skip-tests`，随后重建应用镜像、重建 gateway/admin/worker 容器并执行 HTTP smoke check。smoke client profile 有具体 `pool_id`：`PROVIDER=fake` 时指向本地 seed 的 smoke pool；`PROVIDER=copilot` 时优先指向第一个 active shared pool。smoke payload 会带稳定的 `user` 和 `session` 标识，便于定位 binding pool 错误。
 
@@ -95,7 +95,7 @@ VM Docker 持久化：
 
 当前账号表、Admin API 和 Dashboard 没有账号总数硬上限，100 个账号不需要扩大数据库字段或解除批量限制。账号记录本身占用很小；容量应按同时活跃的模型请求和 SSE 流估算，而不是按已录入账号数估算。新账号默认并发为 `6`，100 个账号理论上有 600 个 shared 账号槽位；绑定池默认并发为 `10`，100 个各自绑定一个账号的用户理论上有 1000 个绑定槽位。这些都是账号侧上限，不是单机推荐工作点。
 
-单账号 RPM 默认为 `60`，全局为 `6000`，与 100 个账号的账号级上限总和对齐。全局值表示滚动一分钟最多接纳 6000 次启动，若均匀分布最多约 100 次/秒。Redis Lua 脚本会原子完成过期清理、计数和接纳，某个窗口已经拒绝的尝试不会继续占用该窗口额度。Gateway 不在服务端排队等待窗口；窗口满时立即返回 429，由客户端退避并加入抖动后重试，避免等待请求继续占用连接和内存。RPM 只限制启动量，不能限制活跃流；当前客户端流量仍没有 gateway 级全局 active-request lease。Daily token 和 AI Credits 预算默认关闭，可按需单独启用。
+单账号 RPM 默认为 `60`，全局为 `6000`，与 100 个账号的账号级上限总和对齐。全局值表示滚动一分钟最多接纳 6000 次启动，若均匀分布最多约 100 次/秒。Redis Lua 脚本会原子完成过期清理、双窗口检查和接纳，被拒绝的尝试不会占用任一窗口容量。Gateway 不在服务端排队等待窗口；窗口满时立即返回 429，由客户端退避并加入抖动后重试，避免等待请求继续占用连接和内存。RPM 只限制启动量，不能限制活跃流；当前客户端流量仍没有 gateway 级全局 active-request lease。费用和 Token 配额已移除，费用与消费额度由 GitHub 后台管理。
 
 以下规格假设 PostgreSQL、Redis、gateway、admin 和 worker 都运行在同一台 VM，流量形态为交互式编程而非持续批处理。它们是压测前的起始建议，不是未经实测的吞吐保证。
 
@@ -115,7 +115,7 @@ VM Docker 持久化：
 | 单账号 / 全局 RPM | `60` / `6000` | 允许 100 个账号各自达到账号级 RPM；滑动窗口原子拒绝超额启动，不提供服务端等待队列 |
 | PostgreSQL pool | 每进程 `12`，gateway/admin/worker 合计最多 `36` | 为 PostgreSQL 常见连接预算留余量，并降低连接内存压力 |
 | Token probe | 并发 `5`、每秒启动 `2` | 约一分钟清空 100 账号启动积压，避免外部 API 突发 |
-| Usage writer | queue `10000`、batch `500`、threshold `100`、interval `250ms` | 现有批处理已经保守；只根据队列年龄、丢弃和 COPY 延迟调整 |
+| Usage writer | queue `10000`、batch `500`、threshold `100`、interval `250ms` | 根据队列年龄、入队拒绝和物化延迟调整 |
 | 日志 | `info`、成功请求采样 `0.01` | 保留错误信息，同时限制 CPU 与磁盘放大 |
 
 Migration 018 只修改数据库列默认值，不会重写现有账号或 pool 的并发配置。Dashboard 已保存的 `budget_max_rpm_global` 也会继续覆盖新的 `6000` 启动 fallback，因此已有部署若保存过 `600`，需要显式修改。
@@ -124,23 +124,16 @@ Azure 上推荐把 PostgreSQL、Redis AOF 和应用日志放到独立数据盘�
 
 目标是在稳定压测中让磁盘 IOPS 持续低于配额的 60–70%，并同时满足 PostgreSQL commit latency p95 `<5 ms`、磁盘队列无持续增长。若 3000 IOPS 下无法满足这些指标，应先确认 ledger 是否已批量写入、rollup 是否仍重复扫描和成功日志是否已采样，再考虑提高磁盘档位。生产环境还应预留快照、WAL 和备份空间，不能把整块数据盘都分配给 PostgreSQL。
 
-以 `6000 RPM` 持续跑满、稳定完成 `100 RPS` 为磁盘上界进行估算。2026-08-06 在 PostgreSQL 16 的当前 schema 上用代表性成功记录实测：ledger heap 行约 `360 B`；100 行和 500 行批次分别产生 `40000 B` 和 `196760 B` WAL，即约 `394–400 B/请求`；一次带索引的 user-binding TTL touch 产生约 `568 B` WAL。当前 user-binding 热路径通常在请求进入和结束时各 touch 一次，长流还会每 30 秒续租一次。
+容量估算必须绑定实际发布 schema 和实测负载，覆盖 provider-attempt/派发所有权、usage outbox/物化、binding touch/续租、rollup、checkpoint 与 Redis AOF。只测 ledger 行不能推导完整 WAL 或 IOPS 上界；删除消费配额后 journal 与 outbox 仍会写入。派发续租开销见[限流与并发](routing.zh.md#限流与并发)。
 
-| 写入来源 | `100 RPS` 持续估算 | 说明 |
-| --- | --- | --- |
-| Raw ledger heap | 约 `35 KiB/s`、`3.11 GB/天`、7 天约 `21.8 GB` | 每个完成请求一行；BRIN 索引增量很小 |
-| Ledger WAL | 约 `39 KiB/s`、`3.46 GB/天` | threshold 100 时通常约每秒一次 COPY commit，而不是每请求一次事务 |
-| User-binding touch WAL | 约 `111 KiB/s`、`9.81 GB/天` | 按每请求两次 touch；另加 `active_streams / 30` 次续租/秒 |
-| PostgreSQL WAL 合计 | 通常约 `150–170 KiB/s`、`13–15 GB/天` | 包含 256 条活跃长流的续租余量；不含 checkpoint full-page image、vacuum 和 rollup 突发 |
-
-WAL 默认循环复用，`13–15 GB/天` 不等于每天永久增加这些空间；若启用 WAL 归档并保存在同一数据盘，则必须额外按“归档天数 × 每天 WAL”预留，生产上更适合把归档放到独立存储。物理 I/O 还会受到 group commit、页缓存、checkpoint 和 autovacuum 合并影响：该负载的稳态经验预算约 `200–600 IOPS`，rollup、vacuum、checkpoint 和 AOF rewrite 突发预算约 `1500 IOPS`。因此单机共置部署仍以 `3000 IOPS / 125 MB/s` 为推荐下限，目标是持续使用不超过配额的 60–70%；`128 GB` 是最低可运营容量，`256 GB` 更适合保留 WAL、Redis AOF、日志、快照和恢复余量。若请求平均时长使并发或单 gateway 的 256 个上游连接先饱和，实际可持续 RPS 和磁盘写入会低于上述上界。
+WAL 通常循环复用，归档 WAL 则需要按“归档天数 × 实测每日 WAL”单独预留空间，还需考虑 Redis AOF、日志、快照与恢复。上方规格表只是压测起点，不是吞吐保证；账号并发、上游连接限制或请求时长可能先于磁盘带宽饱和。
 
 主要瓶颈及扩展顺序：
 
-1. **磁盘容量和写延迟**：Gateway 通过有界队列和 PostgreSQL `COPY` 批量写 `usage_ledger`，PostgreSQL 仍会产生数据页和 WAL；Redis 使用 AOF `everysec`，Docker JSON 日志和按小时收集的日志也会占盘。Worker 默认保留 7 天 UTC 日分区 raw 数据、90 天 UTC 日分区 hourly rollup，以及当前月加之前 13 个完整自然月的 monthly-partitioned daily rollup；清理只 `DROP` 完整分区。20 GB 仍缺少 WAL、快照和故障恢复余量，应扩到至少 128–256 GiB，并为磁盘使用率设置 70% 告警。持续 100 RPS 的优化目标是压测后稳定运行在 3000 IOPS 基线内，不是未经实测的吞吐承诺。
+1. **磁盘容量和写延迟**：Gateway 持久化 attempt，并通过有界队列加速批量物化到 `usage_ledger`，两者都会产生 PostgreSQL 数据页和 WAL；Redis 使用 AOF `everysec`，Docker JSON 日志和按小时收集的日志也会占盘。Worker 默认保留 7 天 UTC 日分区 raw 数据、90 天 UTC 日分区 hourly rollup，以及当前月加之前 13 个完整自然月的 monthly-partitioned daily rollup；清理只 `DROP` 完整分区。20 GB 仍缺少 WAL、快照和故障恢复余量，应扩到至少 128–256 GiB，并为磁盘使用率设置 70% 告警。持续 100 RPS 的优化目标是压测后稳定运行在 3000 IOPS 基线内，不是未经实测的吞吐承诺。
 2. **RAM**：4 GiB 需要同时容纳宿主机、五个容器、PostgreSQL cache、Redis 数据、连接 buffer 和请求体。长会话、并发流和 Dashboard 聚合会增加峰值。常驻内存持续超过 75%、开始使用 swap 或出现 OOM 时升到 16 GiB；不要依赖 swap 承载正常流量。
 3. **CPU**：账号数量本身几乎不消耗 CPU；JSON 协议转换、SSE 事件转发、日志、数据库查询和后台 rollup 随请求/事件速率增长。2 核容易让 gateway 与 PostgreSQL/worker 相互争抢。CPU 持续超过 70% 或 run queue 持续高于 vCPU 数时，从 4 核升到 8 核，或把数据服务迁出 VM。
-4. **Redis/PostgreSQL 往返与连接**：一次模型请求会经过多次 Redis 路由、并发、sticky/binding 操作，binding 流量还会访问 PostgreSQL 刷新或分配绑定。usage 先进入 Gateway 的有界内存队列，积压达到 100 条时立即组批、单批最多 500 条，否则最多等待 250 ms 后 `COPY`。gateway、admin、worker 默认各自最多打开 12 个 PostgreSQL 连接，单机理论合计 36 个；连接获取等待或数据库延迟升高时，先检查慢查询、binding 流量、队列丢弃和存储延迟，再决定是否增大连接池。
+4. **Redis/PostgreSQL 往返与连接**：一次模型请求会经过多次 Redis 路由、并发、sticky/binding 操作，以及持久化 attempt、派发和终结写入；binding 流量还会访问 PostgreSQL 刷新或分配绑定。物化队列积压达到 100 条时立即组批、单批最多 500 条，否则每 250 ms 调度未满批次；数据库阻塞会延长实际驻留时间。gateway、admin、worker 默认各自最多打开 12 个 PostgreSQL 连接，单机理论合计 36 个；连接获取等待或数据库延迟升高时，先检查慢查询、binding 流量、队列丢弃和存储延迟，再决定是否增大连接池。
 5. **长连接和网络**：SSE 大部分时间不消耗整核 CPU，但会长期占用 socket、内存和账号并发。Copilot HTTP transport 单主机默认最多 256 个连接，所以 600 个 shared 槽位或 1000 个 binding 槽位都不能由一个 gateway 进程同时兑现。4C8G 上 `ghcp_copilot_active_streams` 持续超过 80 时应开始排查；约 128 条应视为偏保守的扩容边界，而不是先提高 256 的 transport ceiling。继续增长时先拆分 gateway 与 PostgreSQL/Redis，再水平扩展 gateway。
 
 使用持续 10–15 分钟的信号，不按一分钟尖峰扩容：CPU 超过 70%、常驻内存超过 75% 或出现 swap、活跃流超过 80、PostgreSQL pool 接近 12 且出现获取等待、Redis p95 高于约 `5 ms`、usage queue 超过 2000 或最老记录超过一秒、以及任何 usage record 丢弃。这些是排查和压测触发线，不表示只能通过升级 VM 解决。
@@ -174,7 +167,7 @@ deploy/deploy-cluster.sh azure apply
 
 旧版生成的 YAML 可能把 `github.opencode_device_flow_enabled` 或 `health.enabled` 写为带引号的字符串。请保留原本的开关选择，改为无引号的 `true`/`false` 后重启；更新脚本不会重写已有配置。停机备份与还原步骤见[繁体中文 VM 手册](runbooks/azure-vm-operations.zh-TW.md#5-備份還原與搬遷)。
 
-预算、Feature Flags、模型目录、Gateway Public URL、Client/GitHub fallback key 和 usage retention 存在 PostgreSQL，可在 Dashboard 热更新。Retention 的优先级为 DB 覆盖值高于 YAML/环境变量启动 fallback，再高于内置默认值。Worker 会在每次 maintenance pass 前刷新 retention，当前周期为 5 分钟，无需重启。缩短非零窗口可能永久删除更老的完整分区；设为 `0` 表示关闭该层清理。
+RPM 限流、Feature Flags、模型目录、Gateway Public URL、Client/GitHub fallback key 和 usage retention 存在 PostgreSQL，可在 Dashboard 热更新。Retention 的优先级为 DB 覆盖值高于 YAML/环境变量启动 fallback，再高于内置默认值。Worker 会在每次 maintenance pass 前刷新 retention，当前周期为 5 分钟，无需重启。缩短非零窗口可能永久删除更老的完整分区；设为 `0` 表示关闭该层清理。
 
 Dashboard Events 默认打开聚焦后的 `Changes` 视图，在分页前排除例行的凭据过期通知和自动回池启动通知；`All events` 仍可查看完整审计流水。凭据告警 worker 现在对每个 `credential_id + expires_at` 最多写一条审计事件，凭据续期后会进入新的告警周期。已有重复行会保留，不做删除。
 
@@ -189,7 +182,7 @@ Dashboard Events 默认打开聚焦后的 `Changes` 视图，在分页前排除�
 | `gateway.idle_timeout` | keep-alive 空闲超时，默认 `120s` |
 | `GATEWAY_BIND_ADDR` / `ADMIN_BIND_ADDR` | VM 发布 Gateway/Admin 端口使用的宿主机接口；两者默认均为 `127.0.0.1`。应使用 SSH 转发或终止 TLS 的私有入口，绝不能在不可信网络上明文暴露 Admin。 |
 | `WORKER_METRICS_ADDR` | Worker 健康检查和 retention 指标监听地址，默认 `:8002`；VM Compose 仅映射到宿主机 `127.0.0.1` |
-| `WORKER_ROLES` | 逗号分隔的 Worker 循环：`all`（默认）、`credential-warning`、`health`、`metrics-sync`、`usage-rollup`、`provider-attempts`、`budget-recovery`、`binding-expiry` 或 `capability-sync`。两套 Compose 基线都会透传该变量。Kubernetes 将 `metrics-sync` 放入专用 `ghcp-org-sync-worker`；只有 production Copilot overlay 会在 general Worker 中增加 `capability-sync`，fake-provider overlay 不启用。`budget-recovery` 必须依赖 Redis 就绪；能力 fencing 使用 PostgreSQL，不要求 Redis。 |
+| `WORKER_ROLES` | 逗号分隔的 Worker 循环：`all`（默认）、`credential-warning`、`health`、`metrics-sync`、`usage-rollup`、`provider-attempts`、`binding-expiry` 或 `capability-sync`。两套 Compose 基线都会透传该变量。Kubernetes 将 `metrics-sync` 放入专用 `ghcp-org-sync-worker`；只有 production Copilot overlay 会在 general Worker 中增加 `capability-sync`，fake-provider overlay 不启用。能力 fencing 使用 PostgreSQL，不要求 Redis。 |
 | `ORG_SYNC_ENABLED` | 是否开启 GitHub 组织 Metrics 与 seat 同步，默认 `false`。关闭时 Worker 不会处理同步任务，相关 Admin API 返回 `404`。VM 会补写缺失值但不替换已有 `.env` 值；Kind 和 Azure 也会将同一环境变量传入 Kustomize runtime ConfigMap。 |
 | `CAPABILITY_SYNC_MATRIX_PATH` | `capability-sync` 使用的版本化兼容矩阵；源码默认 `compatibility/matrix.json`，打包 Worker 默认 `/srv/ghcp/compatibility/matrix.json` |
 | `CAPABILITY_SYNC_INTERVAL` / `CAPABILITY_SYNC_RUN_TIMEOUT` / `CAPABILITY_SYNC_LEASE_DURATION` | 能力采集周期和 fencing deadline；默认分别为 `1h`、`10m`、`11m` |
@@ -212,11 +205,11 @@ Dashboard Events 默认打开聚焦后的 `Changes` 视图，在分页前排除�
 | `maintenance.daily_retention_months` | daily rollup 完整自然月保留 fallback，默认 `13`，另保留当前月；设为 `0` 关闭自动清理 |
 | `maintenance.partition_ahead_days` | Worker 提前创建 ledger 日分区的天数，默认 `7` |
 | `usage_writer.queue_size` | Gateway usage 内存队列容量，默认 `10000` |
-| `usage_writer.batch_size` | 单次 COPY 最大记录数，默认 `500` |
+| `usage_writer.batch_size` | 单批物化最大记录数，默认 `500` |
 | `usage_writer.flush_threshold` | 突发积压达到该数量时立即组批，默认 `100`，不会超过 batch size |
 | `usage_writer.flush_interval` | 未达到 threshold 时的最长等待，默认 `250ms`；`100ms` 仅作为低延迟压测 profile |
 | `usage_writer.enqueue_timeout` | 队列满时单次入队最长等待，默认 `50ms` |
-| `usage_writer.write_timeout` | 单次 COPY 写入超时，默认 `5s` |
+| `usage_writer.write_timeout` | 单批物化尝试超时，默认 `5s` |
 | `logging.success_sample_rate` | 成功 access log 采样率，默认 `0.01`；错误请求始终记录 |
 | `provider.type` | 上游 provider 类型，VM 部署默认 `copilot` |
 | `provider.base_url` / `provider.timeout` | 可选 Copilot 端点覆盖与上游超时 |
@@ -301,8 +294,12 @@ flowchart TD
 ```
 
 - 迁移顺序应先数据库后服务。
-- 变更 pool membership、client profile 和预算阈值应优先通过 admin 完成。
-- 多实例部署时，Redis 和 PostgreSQL 必须先于服务可用。Redis 初始 ping 或后续命令失败时，readiness 返回 `503`；预算和分布式并发检查 fail-closed，sticky 亲和与绑定缓存则回退到普通路由或 PostgreSQL。保留的 Redis client 会在依赖恢复后自动恢复正常操作。
+- 本次目标 schema 为 `21`：迁移 `020` 将刷新中的 capability 证据与已发布代次分离，`021` 增加请求生命周期所有权。历史迁移和金额列保留。新库与升级都应使用 migration runner；仅执行初始快照不再能创建目标 schema。升级前先排空旧 Gateway 请求并停止旧 Worker，再部署配套版本的 Gateway/Admin/Worker；不支持新旧生命周期或 capability 写入逻辑混跑。
+- 停止旧 Worker 前，先完成待处理请求和 usage 对账并排空旧 Gateway 请求。启动本版本前，从显式 `WORKER_ROLES` 中移除 `budget-recovery`，并删除旧 daily-token/reservation 环境配置。历史配额列和设置保留但不再生效；不要清空共享 Redis 或删除 usage 历史。PostgreSQL 容量规划需计入[路由文档](routing.zh.md#限流与并发)说明的派发续租开销。
+- 变更 pool membership、client profile 和 RPM 阈值应优先通过 admin 完成。
+- 创建客户端和轮换 Key 会将鉴权哈希、可取回的加密 Key 和审计记录一起提交；加密或持久化失败时操作失败，不会只轮换一半。客户端仍属于原来的停用池时允许维护或禁用；新建、换池和重新启用仍要求活跃池。换池与绑定创建/续期串行协调，存在活跃绑定时拒绝换池。
+- Dashboard 刷新保留未保存的配置/模型草稿，并隔离过时响应。影响提示区分池/客户端范围和破坏性的保留策略修改；保存成功只代表配置已持久化，不代表每个 Gateway 都已加载，需另行查看观察结果。
+- 多实例部署时，Redis 和 PostgreSQL 必须先于服务可用。Redis 初始 ping 或后续命令失败时，readiness 返回 `503`；RPM 和分布式并发检查 fail-closed，sticky 亲和与绑定缓存则回退到普通路由或 PostgreSQL。保留的 Redis client 会在依赖恢复后自动恢复正常操作。
 - 当前 schema contract 中，`backend_pools.allocation_mode` 允许 `shared`、`user_binding`、`session_binding`；user binding 使用 `user_id_*` 列，session binding 使用独立的 `account_session_bindings` 表。
 
 ## 日常检查
@@ -311,9 +308,9 @@ flowchart TD
 | --- | --- |
 | `GET /healthz` | 存活检查 |
 | `GET /readyz` | 就绪检查 |
-| `GET /version` | 公开的 Gateway `version` 与 `build_time`，不包含 commit、配置或凭据 |
+| `GET /version` | 公开的 Gateway `version`、`build_time` 和 `git_revision`，不包含 schema、配置或凭据 |
 | `GET /metrics` | 携带 `Authorization: Bearer <ADMIN_TOKEN>` 的 Gateway 指标检查 |
-| Dashboard | 查看账号状态、池状态、错误事件、用量、费用、cache 命中率和同步状态 |
+| Dashboard | 查看账号状态、池状态、错误事件、token 用量、cache 命中率和同步状态 |
 
 每个 Gateway 响应都会返回 `X-Request-ID`。访问日志和 `provider request dispatch` 事件使用同一 `request_id`；后者还包含 `request_format`、`model`、`upstream_api`、`pool_id`、`account_id`、`client_profile_id`、`client_version`、`runtime_version`、`responses_lite` 和 `stream`，但不记录请求 body、credential、Authorization 或配置内容。可先确认运行版本，再按客户端看到的 request ID 检索 VM 小时日志：
 
@@ -334,32 +331,39 @@ grep -R --fixed-strings '<request-id>' ~/ghcp_proxy/logs
 | `400 missing_user_id` / `400 invalid_user_id` | user-binding pool 缺少或传入非法 `user_id` | `400 invalid_request_error` | `user identifier is required` / `user identifier is invalid` | 优先传 OpenAI `user` 或 Anthropic `metadata.user_id` / `metadata.user` |
 | `400 missing_session_id` / `400 invalid_session_id` | session-binding pool 缺少或传入非法 `session_id` | `400 invalid_request_error` | `session identifier is required` / `session identifier is invalid` | 优先传 `metadata.session_id` / `metadata.session`，或 header `X-GHCP-Session-ID` |
 | `503 user_binding_unavailable` / `503 session_binding_unavailable` | 绑定依赖 PostgreSQL 或缓存访问失败 | `503 service_unavailable` | `service temporarily unavailable` | 检查 PostgreSQL、Redis 和绑定表状态 |
-| `503 budget_unavailable` | 限流或预算状态不可读 | `503 service_unavailable` | `gateway limit state unavailable` | 检查 budget checker、Redis/PostgreSQL 和配置同步 |
+| `503 rate_limit_unavailable` | 限流状态不可读 | `503 service_unavailable` | `gateway limit state unavailable` | 检查 RPM checker、Redis/PostgreSQL 和配置同步 |
 | `429 global_rate_limited` / `429 account_rate_limited` | 全局或内部资源级 RPM 命中 | `429 rate_limited` | `rate limit exceeded; please retry later` | 对外不暴露资源层级；日志保留 global/account 粒度 |
-| `429 global_budget_exhausted` / `429 account_budget_exhausted` | 全局或内部资源级 token / AI Credits 日预算耗尽 | `429 budget_exhausted` | `quota exceeded` | 对外按标准配额耗尽处理；日志保留预算层级 |
 | `502 upstream_error` | 上游模型提供方错误 | `502 upstream_error` | `model provider error` | 内部日志和 usage ledger 保留原始错误分类 |
 | `500 stream_error` | SSE writer 或流式响应初始化失败 | `500 stream_error` | `stream response unavailable` | 检查响应写出、代理和客户端连接状态 |
 | 未显式映射的 internal code | 其它走映射函数的错误 | 与 internal 相同 | 与 internal 相同 | 默认透传；新增错误类型时应评估是否需要中性化 |
 
 上游 Copilot 4xx 响应会先分类，再决定是否影响账号健康。认证、权限、限流、配额、网络和 5xx 失败仍可能增加 risk；`invalid_request` 和通用 `upstream_4xx` 会记录到指标和 usage，但不会增加账号 risk，因为它们通常来自请求形态、模型兼容性或客户端参数，而不是账号健康问题。模型权限拒绝可能表现为 `403 permission_denied`；Gateway 会把它记录到被选账号且不会换号。流式请求中，上游 SSE 读取错误，或在完成标记前提前 EOF，都会按失败请求处理，不能伪装成成功的 `[DONE]` 结束事件。客户端取消会中断阻塞的流事件发送、关闭上游响应，并释放本地和 Redis 并发占用。Chat 接受 `[DONE]`，或在已校验的非空最终 `finish_reason` 后以 EOF 完成。Responses 必须收到 `response.completed` 或 `response.incomplete`；`response.output_text.done`、`response.content_part.done` 和 `response.output_item.done` 都不能单独证明 response 已完成。
 
-如果客户端收到 `budget_exhausted`，先看 gateway 日志里的 `internal_code`、`account_id` 和 `pool_id`，再检查 Redis 计数，例如 `budget:daily:account:<account_id>:<yyyymmdd>` 和 `budget:daily:global:<yyyymmdd>`。Daily token 和 AI Credits 上限只有在 Dashboard Config 值或对应 `BUDGET_MAX_DAILY_*` 环境变量大于 `0` 时才会启用。
+如果客户端收到本地 `rate_limited`，先看 gateway 日志里的 `internal_code`、`account_id` 和 `pool_id`，再检查全局/账号 RPM 配置并退避重试。上游 GitHub 的配额错误仍会分类处理，但代理不再提供可调整的本地 Token 日限额或费用配额。
 
-## 用量、费用与 Cache 观测
+## 用量与 Cache 观测
 
-Gateway 在请求完成后把 proxy-side usage 放入有界队列，按最多 500 条或 250 ms 使用 PostgreSQL `COPY` 写入按日分区的 `usage_ledger`。真实 Copilot provider 会解析上游响应中的 `usage` 和 `copilot_usage`，记录 input、cached input、cache write、output、reasoning tokens、`nano_aiu`、估算 AI Credits 和估算 USD。
+请求完成时，provider-attempt 终结事务会持久化用量物化 outbox。Gateway 有界队列仅加速这些指定 attempt 的批量物化（单批最多 500 条，未满批次间隔 250 ms），不是事实来源。共享物化器在同一个 PostgreSQL 事务内插入 ledger 并完成已领取 outbox 批次，Worker 补偿也复用它恢复队列遗漏的记录。这条路径使用集合式 SQL，而非 PostgreSQL `COPY`。真实 Copilot provider 会解析上游 token 用量，记录 input、cached input、cache write、output 和 reasoning tokens。
+
+费用与消费额度交给 GitHub 后台控制。代理不再执行费用或 Token 配额、配额预留与结算、费用估算或金额展示。为保护历史数据，旧配额数据库列不删除，但当前运行时代码不再读写它们；部署配置应移除旧配额环境变量。Token 用量统计和客户端 usage 输出继续保留。运行时配置读取失败会明确返回错误，不再把默认限额伪装成成功读取的当前值。
+
+Worker 物化独立每五秒运行一轮，每轮最多十批、每批 500 条，并受两秒工作预算约束，以先达到的边界为准。这是追赶工作量边界，不是实测吞吐承诺。Rollup、保留清理和积压聚合指标仍按五分钟维护周期执行。Dashboard 单独展示 `/admin/usage/materialization` 的积压、错误/冲突数、最老待处理年龄及最后成功物化时间；物化延迟不等于没有请求发生。
+
+池诊断通过鉴权后的 `GET /admin/pools/{id}/diagnostics` 提供，可选参数必须成对传入 `model=<上游模型 ID>&upstream_api=<API>`。诊断观察账号/席位/成员状态、活跃绑定占用、模型证据、Redis 并发租约和 RPM 计数。Redis 检查只读、使用 pipeline、最多 200 个账号、超时两秒；整个接口超时五秒。不探测 Copilot，不预占容量。Redis 不可用时不会当作零负载；RPM 耗尽仅按有效数据库覆盖值判断，未保存的限额及 Gateway 启动默认值视为未知。诊断不是原子的 Gateway 快照或准入保证：绑定账号仍可服务其拥有者，模型证据仅对 `require_fresh` 强制，配置传播状态也未得到确认。
 
 Dashboard Metrics 页按窗口展示以下关键指标：
 
 | 指标 | 运维用途 |
 | --- | --- |
-| AI Credits / Estimated USD | 估算当前窗口的 Copilot usage-based billing 消耗 |
+| Requests / Input / Output | 观察窗口内请求量和 token 消耗 |
 | Cache Hit Rate | 观察 sticky/cache affinity 是否带来 cache read 命中 |
-| Cached Input / Cache Write | 区分 cache read 收益和 cache 写入成本 |
-| Reasoning Tokens | 识别 reasoning 模型或高推理请求的成本来源 |
-| Token Details | 通过 ledger 中的 `token_details` 保留上游 token type、count 和 batch cost |
+| Cached Input / Cache Write | 区分 cache read 与 cache write 的 token 用量 |
+| Reasoning Tokens | 识别 reasoning 模型的 token 消耗 |
+| Token Details | 保留上游 token type 和 count，不含金额元数据 |
 
-Prometheus 文本指标中也包含 cached/cache read tokens、cache write tokens、reasoning tokens、nano AIU、AI Credits micro、estimated USD micros 和 cache hit ratio permille。若 cache hit rate 持续偏低，应检查 client profile sticky policy、affinity strategy、session header 以及 rebind/overflow 指标。
+Prometheus 文本指标中也包含 cached/cache read tokens、cache write tokens、reasoning tokens 和 cache hit ratio permille。若 cache hit rate 持续偏低，应检查 client profile sticky policy、affinity strategy、session header 以及 rebind/overflow 指标。
+
+Dashboard 保存账号、池和客户端时，会保留旧保存请求等待期间产生的新草稿。生成的 Codex 启动脚本使用单次 `-c` 覆盖参数，不会替换用户已有的 Codex 配置文件。
 
 验证 3000 IOPS 目标时，还应同时观察 Gateway 的 usage 写队列：
 
@@ -367,9 +371,9 @@ Prometheus 文本指标中也包含 cached/cache read tokens、cache write token
 | --- | --- |
 | `ghcp_usage_queue_depth` / `ghcp_usage_queue_capacity` | 深度不应持续增长或长期接近容量 `10000` |
 | `ghcp_usage_queue_rejected_total{reason="full"}` | 稳态压测应保持 `0`；增长表示数据库吞吐已经落后于请求速率 |
-| `ghcp_usage_records_dropped_total` | 所有 reason 均应为 `0`；包含入队失败和关闭 drain 超时造成的明确丢弃 |
-| `ghcp_usage_batches_total{status="error"}` | 应保持 `0`；增长表示 COPY 超时或数据库写失败 |
-| `ghcp_usage_batch_duration_count` / `ghcp_usage_batch_duration_microseconds_total` / `ghcp_usage_batch_duration_microseconds_max` | 用于观察 COPY 次数、平均值和最坏值；持续抬升时关联 PostgreSQL commit latency 与磁盘队列 |
+| `ghcp_usage_records_dropped_total` | 快速路径队列拒绝/丢弃计数，应为 `0`；排查入队、关闭 drain 与 outbox 物化，不能仅凭队列丢弃认定持久用量已丢失 |
+| `ghcp_usage_batches_total{status="error"}` | 应保持 `0`；增长表示物化超时或数据库写失败 |
+| `ghcp_usage_batch_duration_count` / `ghcp_usage_batch_duration_microseconds_total` / `ghcp_usage_batch_duration_microseconds_max` | 用于观察物化批次数、平均值和最坏值；持续抬升时关联 PostgreSQL commit latency 与磁盘队列 |
 | `ghcp_usage_queue_oldest_age_milliseconds` / `ghcp_usage_queue_residence_microseconds_max` | 不应跨多个 flush 周期持续增长 |
 | `ghcp_usage_batch_retries_total` / `ghcp_usage_batch_consecutive_failures` | 稳态应无增长且连续失败为 `0` |
 | `ghcp_usage_batch_last_success_timestamp` | 应持续更新，避免“队列看似较浅但写入已停止” |
@@ -401,7 +405,7 @@ Retention 指标从 Worker 的 `http://127.0.0.1:8002/metrics` 抓取；Usage Wr
 | `daily` | 查询 UTC 月分区的 `usage_rollup_daily`，默认保留当前月和之前 13 个完整自然月，适合长期趋势和账务对账 |
 | `auto` | 1h 内使用 raw，90 天内使用 hourly，超过 90 天使用 daily；默认 24h Dashboard 不扫描整日 raw ledger |
 
-Admin API 支持绝对日期范围：`/admin/usage/summary?from=2026-06-01&to=2026-06-23&granularity=auto`。日期格式的 `to` 会按闭开区间处理为下一天 00:00 UTC，因此 `to=2026-06-23` 会包含 6 月 23 日整天。Usage Rollup Worker 每 5 分钟处理到 `now()-2m`，避免刚写入的请求产生边界抖动；raw 清理使用 `min(now-retention, rollup watermark)` 作为安全边界，hourly/daily 则只删除完整 UTC 日/月分区。schema `19` 不再保留辅助 legacy ledger 或兼容 view；若升级前 legacy ledger 尚未被前一保留窗口清空，migration 会拒绝继续执行。
+Admin API 支持绝对日期范围：`/admin/usage/summary?from=2026-06-01&to=2026-06-23&granularity=auto`。日期格式的 `to` 会按闭开区间处理为下一天 00:00 UTC，因此 `to=2026-06-23` 会包含 6 月 23 日整天。Usage Rollup Worker 每 5 分钟处理到 `now()-2m`，避免刚写入的请求产生边界抖动；raw 清理使用 `min(now-retention, rollup watermark)` 作为安全边界，hourly/daily 则只删除完整 UTC 日/月分区。从 schema `19` 起不再保留辅助 legacy ledger 或兼容 view；若升级前 legacy ledger 尚未被前一保留窗口清空，migration 会拒绝继续执行。
 
 Retention 可在 Dashboard Config 中直接修改，无需重启。若新的非零值缩短当前窗口，界面会要求二次确认，因为下一轮 maintenance 执行后的分区删除不可恢复。
 
@@ -433,7 +437,7 @@ stateDiagram-v2
 | --- | --- |
 | `pending` | 创建账号后待验证 |
 | `active` | 凭据有效，可用于路由 |
-| `degraded` | 短期失败或风险上升，降权或限流 |
+| `degraded` | 不再接收路由请求，等待上游重新入池探针或显式恢复成功 |
 | `recovery` | 恢复任务处理中 |
 | `quarantined` | 暂停路由，等待恢复或重新导入凭据 |
 | `revoked` | 彻底下线，不再自动恢复 |
@@ -514,7 +518,7 @@ curl -s http://localhost:8001/admin/accounts/{account_id}/model-capabilities/ref
 
 1. 创建 pool，并选择 allocation mode 与 load-balancing strategy。
 2. 在 Pool 页添加或移动账号，确认最大并发、权重和 binding 状态；移动前先 Release active binding。
-3. 给每个 Client 分配一个具体 pool。Sticky 只在该 pool 内生效，不能覆盖健康、预算和 seat 有效性。
+3. 给每个 Client 分配一个具体 pool。Sticky 只在该 pool 内生效，不能覆盖健康、RPM 限流和 seat 有效性。
 
 账号下线:
 
@@ -552,7 +556,7 @@ flowchart TD
 
 GitHub Copilot 上游 endpoint 采用混合选择，不是全局默认 Responses。服务端会规范化显式 `upstream_api`；非发布条目省略该字段时，由唯一的服务端目录合同根据 `vendor`、`upstream`、`name` 和 `exposed` 推断。Admin GET 返回规范化目录和 `upstream_api_explicit`，Dashboard 只消费该 DTO，不再维护自己的 vendor 或 API 推断规则。
 
-模型目录是全局配置。对于 `require_fresh` client profile，Router 和 binding 路径还会要求逐账号的新鲜模型证据；`allow_unknown` profile 保留旧的宽松策略。发布校验要求 matrix/profile/pool 引用精确匹配，并覆盖每个 active 或 binding-reserved 账号的新鲜证据。
+模型目录是全局配置。对于 `require_fresh` client profile，Router 和 binding 路径还会要求逐账号的新鲜模型证据；`allow_unknown` profile 保留宽松策略。可选目标环境采集要求 matrix/profile/pool 引用精确匹配，并覆盖每个 active 或 binding-reserved 账号的新鲜证据；这不表示无凭据发布门禁必须访问真实账号，详见[兼容证据](../compatibility/README.zh.md)。
 
 ```mermaid
 flowchart LR
@@ -596,7 +600,7 @@ flowchart TD
   B -->|"否"| D["处理同步延迟、指标偏离、配置问题"]
   C --> E{"涉及凭据或 seat 失效?"}
   E -->|"是"| F["账号恢复或摘除"]
-  E -->|"否"| G["检查路由、并发和预算"]
+  E -->|"否"| G["检查路由、并发和 RPM"]
 ```
 
 | Priority | 说明 |
@@ -607,11 +611,25 @@ flowchart TD
 
 ## 常见故障
 
+### 协议分层定位
+
+| 现象 | 首查层 |
+| --- | --- |
+| 带字段 path 的 `400` | parser/方向策略、必填类型与精确 source/target 路由 |
+| 模型未暴露或没有合格账号 | catalog、client profile、固定 pool，再查 `require_fresh` 账号 allowlist |
+| fake upstream 没收到请求 | 请求校验与 provider support gate，先不要修改路由 |
+| 上游 `200`、下游 `502` | typed envelope、item identity、状态与终态校验 |
+| SSE 部分输出后失败 | 来源事件状态机与下游投影；不得重放已部分交付的请求或伪造完成 |
+| 文本正确但 usage/health 异常 | delivery outcome、usage source（`upstream`/`estimated`/`missing`），再查 journal/outbox 物化 |
+| 固定 CLI 通过但发布阻断 | matrix、build、schema、manifest、报告有效期与该 release 的 attestation |
+
+保留一个最小反例，沿客户端/版本 → source format → exposed/upstream model → target API → profile/pool → canonical 数据 → 上游事件 → 下游交付逐层比较，不以开放式全协议审计替代定位。共享诊断只保留脱敏标识和元数据；原始报告边界见[人工验证](runbooks/manual-validation.zh.md)。
+
 ### 账号不可路由
 
 1. 检查账号是否仍为 `active`。
 2. 检查并发是否达到上限。
-3. 检查预算、risk score 和 seat 状态。
+3. 检查 RPM 限流、risk score 和 seat 状态。
 4. 检查 sticky target 是否需要重绑定。
 
 ### sticky 命中率偏低
@@ -649,15 +667,7 @@ flowchart TD
 
 ## 回滚原则
 
-```mermaid
-flowchart TD
-  A["发现故障"] --> B{"可通过配置回退?"}
-  B -->|"是"| C["回退 client pool / budget 配置"]
-  B -->|"否"| D["回滚服务版本"]
-  C --> E["复核指标恢复"]
-  D --> E
-```
-
-- 优先回退配置，再回退二进制。
-- 回滚后要复核请求成功率、路由分布和账号状态。
-- 任何恢复或摘除操作都应保留审计痕迹。
+- 优先限定范围的配置回退，并确认刷新/重启要求。
+- 二进制回退必须选择完整旧 release 及其不可变 image digest，先检查 schema 兼容性；旧镜像不一定能安全读取新数据库，migration runner 也不是通用降级工具。
+- 切换前 drain 请求并停止不兼容的 writer。如需恢复数据库，使用一致的备份及配套配置/master key，不复制运行中的数据库目录，见[冷备份与恢复](runbooks/azure-vm-operations.zh-TW.md)。
+- 恢复后核对 build 身份、schema、readiness、请求成功率、路由分布与账号状态，并保留操作者审计痕迹。

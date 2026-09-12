@@ -1,6 +1,6 @@
 # 架构设计
 
-GHCP Pool Proxy 的核心目标是把下游模型协议入口和上游 Copilot 账号资源解耦。客户端只看到 OpenAI / Anthropic 兼容接口，内部通过 canonical DTO、router、provider adapter 和 control plane 协同完成账号选择、健康管理、预算控制和可观测治理。
+GHCP Pool Proxy 的核心目标是把下游模型协议入口和上游 Copilot 账号资源解耦。客户端只看到 OpenAI / Anthropic 兼容接口，内部通过 canonical DTO、router、provider adapter 和 control plane 协同完成账号选择、健康管理、限流和可观测治理。
 
 ## 目录
 
@@ -19,7 +19,7 @@ GHCP Pool Proxy 的核心目标是把下游模型协议入口和上游 Copilot �
 
 - 对外暴露模型协议，不暴露通用 GitHub CLI 或 SDK 操作 API。
 - Gateway 保持无状态，热状态进入 Redis，冷状态进入 PostgreSQL。
-- 路由决策优先考虑健康、预算、风险、并发和 seat 状态，sticky 亲和只是软优先级。
+- 路由决策优先考虑健康、RPM 限流、风险、并发和 seat 状态，sticky 亲和只是软优先级。
 - 账号生命周期、恢复、org/seat 同步和 Copilot Metrics 同步放在控制面和 worker，避免进入请求热路径。
 
 ## 项目范围
@@ -69,15 +69,15 @@ sequenceDiagram
   participant U as GitHub Copilot
 
   C->>G: POST /v1/chat/completions or /v1/responses or /v1/messages
-  G->>G: 解析协议并生成 canonical request / parse protocol and build canonical request
-  G->>G: 认证 Client 并解析必填 pool / authenticate client and resolve required pool
-  G->>R: 在指定 pool 内选择账号和 sticky target / select account and sticky target within assigned pool
-  R-->>G: 返回 selection / return selection
-  G->>P: 发起上游请求 / call upstream adapter
-  P->>U: 访问 Copilot 上游 / call Copilot upstream
-  U-->>P: 返回响应或错误 / return response or error
+  G->>G: 认证 Client 并解析必填 pool
+  G->>G: 解析协议并生成 canonical request
+  G->>R: 在指定 pool 内选择账号和 sticky target
+  R-->>G: 返回 selection
+  G->>P: 发起上游请求
+  P->>U: 访问 Copilot 上游
+  U-->>P: 返回响应或错误
   P-->>G: canonical response
-  G-->>C: 按下游协议格式返回 / return in downstream protocol format
+  G-->>C: 按下游协议格式返回
 ```
 
 ## 配置刷新与恢复链路
@@ -91,42 +91,22 @@ flowchart TD
   Snapshot --> Router["请求路由"]
 
   Admin -->|"恢复账号"| Task[(recovery_tasks)]
-  Task -->|"每 60s 扫描"| Worker["Recovery Worker"]
-  Worker --> Cred{"active credential 可用?"}
-  Cred -->|"是"| Active["重置风险并恢复 active"]
-  Cred -->|"否"| Quarantined["保持或进入 quarantined"]
+  Task -->|"带 lease 认领到期任务"| Worker["Recovery Worker"]
+  Worker --> Cred{"token 获取与上游探针均成功?"}
+  Cred -->|"是，且 fence 有效"| Active["重置风险并恢复 active"]
+  Cred -->|"账号失败"| Quarantined["恢复 degraded 或 quarantined"]
+  Cred -->|"系统故障或限流"| Retry["释放 claim 并延后重试"]
 ```
+
+仅获取 token 不会让 degraded 账号重新入池。探针调度、恢复状态与操作步骤由[运维](operations.zh.md#1-账号上线分组与下线)维护，路由资格由[路由规则](routing.zh.md#候选账号过滤)维护。
 
 ## 模型目录链路
 
-```mermaid
-flowchart LR
-  CopilotModels["Copilot /models capabilities.limits"] -->|"Refresh from Copilot"| Admin["Dashboard / Admin API"]
-  Admin["Dashboard / Admin API"] -->|"PATCH /admin/settings/model_catalog_json"| Settings[(system_settings)]
-  Settings -->|"读取 model_catalog_json"| Catalog["Gateway Model Catalog"]
-  Catalog --> Models["GET /v1/models 返回 exposed 模型"]
-  Catalog --> Resolve["请求模型 exposed -> upstream"]
-  Resolve --> Provider["Copilot Provider Adapter"]
-  Resolve -->|"未启用或不存在"| Invalid["400 invalid_model"]
-```
-
-模型刷新会把 Copilot 当前有效的 context、prompt、output 和 non-streaming output limits 导入严格目录；Dashboard 在 Models 页面展示并在保存时保留这些值。缺失 limit 保持未知，目录不按名称推测模型原生规格；这些展示字段不会改变请求校验、路由或预算 reservation。
+Admin 将 Copilot 模型元数据导入全局目录，Gateway 将 exposed 名称解析为 upstream ID/API。目录可见性与逐账号 entitlement 分离；刷新/编辑步骤由[运维](operations.zh.md#2-模型-id-映射别名与隐藏模型)维护，推断与转换规则由[协议](protocol.zh.md#上游-api-选择)维护。
 
 ## Copilot Metrics 同步链路
 
-```mermaid
-flowchart LR
-  Admin["Admin 手动 sync POST"] --> Queue[(org_sync_requests)]
-  Scheduler["Metrics scheduler"] --> Flag{"copilot_metrics_sync_enabled?"}
-  Flag -->|"是"| Queue
-  Flag -->|"否"| Skip["跳过定时入队"]
-  Queue --> Worker["Metrics Sync Worker claim/lease"]
-  Worker --> Token{"GITHUB_TOKEN_FILE?"}
-  Token -->|"缺失"| Retry["释放并等待 retry"]
-  Token -->|"可用"| GitHub["最新 28 天 report 或 seats"]
-  GitHub --> Commit["带 fence 的 snapshot upsert 或 seat generation 写入"]
-  Commit --> Dashboard["任务状态与 audit"]
-```
+Admin 与调度器写入持久同步请求，Worker 使用 lease/fence 认领后保存 GitHub metrics 或 seat snapshot。这是异步控制面流程，不作为请求路由依赖；调度与故障处理详见[运维](operations.zh.md#用量与-cache-观测)。
 
 ## 分层职责
 
@@ -134,7 +114,7 @@ flowchart LR
 
 - 接收 OpenAI Chat Completions、OpenAI Responses API 和 Anthropic Messages 请求。
 - 统一转换成 canonical request。
-- 执行认证、全局预算检查、模型目录映射、路由、账号级预算检查、流式转发和错误回写。
+- 执行认证、模型目录映射、路由、全局及账号级 RPM 原子准入、流式转发和错误回写。
 - 启动时加载 router 快照，并定期从 PostgreSQL 刷新 pool、账号关系和 active binding。
 - 记录 trace、latency、token、sticky、provider error 和 usage ledger。
 
@@ -182,20 +162,22 @@ flowchart TD
   Hot --> Affinity["Sticky affinity map"]
   Hot --> RateLimit["短周期限流计数"]
   Cold --> Accounts["账号与凭据元数据"]
-  Cold --> Policies["池、Client、预算、审计"]
+  Cold --> Policies["池、Client、RPM 设置、审计"]
 ```
 
-- PostgreSQL 保存账号、凭据元数据与版本、池、Client、持久 binding、provider attempt/reservation、预算、审计、恢复任务、组织同步请求和 usage ledger/rollup。
+- PostgreSQL 保存账号、凭据元数据与版本、池、Client、持久 binding、provider attempt、RPM 设置、审计、恢复任务、组织同步请求和 usage ledger/rollup。
 - PostgreSQL 还保存 `system_settings`、模型目录配置、GitHub org 信息、metrics snapshots 与持久 Redis coordination epoch。
-- Redis protocol v2 保存 budget reservation/finalization、并发 lease、短 TTL affinity/binding、限流计数、分布式锁、失效事件和 active coordination manifest。
+- Redis protocol v2 保存并发 lease、短 TTL affinity/binding、RPM 和 probe 限流计数、分布式锁、失效事件和 active coordination manifest。
 - Gateway 的本地 Router 快照、排序计数、token cache 或有界 usage materialization 队列可以丢失，不会丢失事实源或跨实例协调状态。
 - 凭据明文不入库，敏感内容必须经过加密和脱敏流程。
 
 ## 关键边界
 
+- Admin 使用配置的 bearer token，不提供 JWT/OIDC/企业 SSO；控制面写操作与 Secret 展示需要持久审计。通用策略引擎、多区域路由和租户 BI 仍不在范围内。
+- Credential payload 使用部署 master key 下的 AES-256-GCM 加密；Client 鉴权使用 key 哈希，可再次展示的 Secret 材料加密保存。Sticky/prompt-prefix 输入仅存哈希，不在日志中保存正文或凭据。
 - 数据面不直接执行通用 GitHub 操作。
 - 路由决策使用代理侧实时状态，不依赖 Copilot Metrics 做热路径判断。
-- sticky session 是软约束，健康、预算、风险和 seat 有效性始终优先。
+- sticky session 是软约束，健康、RPM 限流、风险和 seat 有效性始终优先。
 - 运行包同时支持单机 Docker Compose 与集群部署入口。Kubernetes 提供单副本 production、双 Gateway staging，以及包含集群内 PostgreSQL/Redis 的明确一次性 `test` overlay。Azure Bicep 向导仅覆盖 VNet/subnet、AKS、PostgreSQL 和 Managed Redis，不是包含 Ingress、监控、备份、evidence inventory 或 destroy 自动化的完整多副本生产平台。
 - release manifest 将公开 app version、Git SHA、四个 runtime role digest 与 migration schema 绑定；兼容 evidence 使用该 app version，VM 与 Kubernetes 都直接部署 manifest digest。
 - 模型目录是全局配置；`require_fresh` profile 会使用不可变请求快照中的账号模型/API 证据过滤候选，`allow_unknown` profile 保持兼容行为。

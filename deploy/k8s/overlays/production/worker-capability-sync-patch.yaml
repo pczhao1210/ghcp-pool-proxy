@@ -9,4 +9,4 @@ spec:
         - name: worker
           env:
             - name: WORKER_ROLES
-              value: credential-warning,health,usage-rollup,provider-attempts,budget-recovery,binding-expiry,capability-sync
+              value: credential-warning,health,usage-rollup,provider-attempts,binding-expiry,capability-sync

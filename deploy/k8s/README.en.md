@@ -1,6 +1,6 @@
 # Kubernetes deployment baseline
 
-This package completes the phase-2 single-replica baseline from the [cluster transformation plan](../../docs/plans/cluster-deployment.zh.md), phase 3 staging Gateway high availability, the phase 4 dedicated organization-sync Worker, phase 5 Redis protocol-v2 runtime contract, and phase 6 schema-19/release-set identity contract. Production keeps one Gateway, one Admin, one general Worker, and one organization-sync Worker; staging changes only Gateway to two replicas with rolling updates, a PDB, and hostname topology spread.
+This package defines the current Kubernetes baseline; remaining production acceptance is governed by the [cluster deployment plan](../../docs/plans/cluster-deployment.zh.md). Production keeps one Gateway, one Admin, one general Worker, and one organization-sync Worker; staging changes only Gateway to two replicas with rolling updates, a PDB, and hostname topology spread.
 
 English | [中文](README.zh.md)
 
@@ -36,7 +36,7 @@ RELEASE_MANIFEST=/secure/path/release-manifest.env \
   deploy/k8s/apply.sh test
 ```
 
-For a fully disposable local Kind run, which builds and loads the four application images locally, use:
+For a fully disposable local Kind run, which builds and loads the four application images locally, run this from the source checkout:
 
 ```bash
 make k8s-test
@@ -57,7 +57,7 @@ One Kubernetes node with one PostgreSQL instance and one Redis instance is suppo
   - `worker`
   - `migration`
 
-Build and push the four Dockerfile targets as one release set from a clean Git commit:
+From a clean source checkout, build and push the four Dockerfile targets as one release set (runtime bundles do not include `start.sh` or the Dockerfile):
 
 ```bash
 IMAGE_REPOSITORY="$REGISTRY/ghcp-pool-proxy" ./start.sh --push
@@ -179,11 +179,11 @@ deploy/k8s/apply.sh "$ENVIRONMENT"
 
 Set `KUBE_CONTEXT`, `MIGRATION_TIMEOUT`, or `ROLLOUT_TIMEOUT` when required. Never apply the migration Job and application Deployments as one unordered operation.
 
-The default pool limit is 12 PostgreSQL connections per process. Production can consume 36 application connections and staging with two Gateways can consume 48, plus migration and operational headroom; retain at least 20 percent capacity.
+The default pool limit is 12 PostgreSQL connections per process. Including the dedicated organization-sync Worker, production can consume 48 application connections and staging with two Gateways can consume 60, plus migration and operational headroom; retain at least 20 percent capacity.
 
 ## Verify
 
-Before connecting to a cluster, run the local manifest gate:
+Before connecting to a cluster, run the local manifest gate from the source checkout:
 
 ```bash
 make k8s-validate
@@ -193,9 +193,9 @@ It renders the staging, production, and self-contained test overlays. It verifie
 
 The two-hostname staging topology deliberately uses `maxUnavailable: 1` and `maxSurge: 0`. A surge Pod would create a `2:1` hostname distribution and is rejected by the strict `maxSkew: 1` spread rule, which would stall the rollout. The PDB still preserves one ready Gateway while the replacement is scheduled on the vacated hostname. The migration lock timeout is `5m`, using Go duration syntax; `5min` is invalid.
 
-Phase 3 was exercised in an isolated three-node Kind cluster with external PostgreSQL and Redis: an active SSE on the terminating Gateway reached `[DONE]`, an explicit Gateway rollout restart completed, a normal node drain evicted one Gateway through the PDB while the Service continued serving SSE, and uncordoning restored two Gateway Pods across hostnames. Phase 4 was validated in the same topology from an empty database: the consolidated migration created schema `19`, all four Deployments became ready, the GitHub token volume appeared only in `ghcp-org-sync-worker`, and Admin queue requests coalesced, exposed status, and rejected request-level tokens. Repeat the applicable checks in each approved target staging environment before promotion; this local evidence is not cloud-environment acceptance.
+In each approved target staging environment, verify active SSE drain, explicit Gateway rollout, PDB-respecting node eviction, and restoration of the two-hostname spread. Also verify migration to the release target, readiness of all four Deployments, the organization token's restricted mount, and fenced/idempotent sync tasks. Historical local results are not target-environment acceptance.
 
-Phase 5 validated the v2 Store contract against a disposable three-primary, three-replica Redis Cluster with `make test-redis-cluster`; it exercised Cluster slot coverage, per-primary inventory, budget reservation/finalization, account binding/concurrency, sticky cleanup, fail-closed/recovery after the budget-slot primary was paused, and `{budget}` load at 500/1000 RPS. The final local p95 values were `0.537 ms` and `0.689 ms`, against a `50 ms` threshold. `make k8s-test` (also available as `make test-phase5-single-node`) creates a disposable single-node Kind cluster and deploys the `test` overlay with in-cluster PostgreSQL, Redis, and central test Secrets. It validates migration, four ready Deployments, `/readyz`, and fake-provider three-protocol smoke before deleting the cluster. Cluster Secrets must use one revision or an optional Key Vault CSI source, never separately maintained per-Pod or per-node environment values.
+`make test-redis-cluster` exercises the v2 Store against a disposable three-primary/three-replica Cluster, including slot inventory, RPM, concurrency/binding, sticky cleanup and fail-closed recovery. The retained `{budget}` hash tag serves RPM, not removed daily consumption quotas. Rerun applicable capacity/failover checks against the selected service; old local p95 numbers are not production guarantees. `make k8s-test` covers the disposable single-node path described above and cleans up its cluster.
 
 ```bash
 kubectl -n "$NAMESPACE" get pods,services

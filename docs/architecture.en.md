@@ -1,6 +1,6 @@
 # Architecture
 
-GHCP Pool Proxy decouples downstream model protocol endpoints from upstream Copilot account resources. Clients see OpenAI / Anthropic-compatible APIs, while the system internally coordinates canonical DTOs, router, provider adapter, and control plane for account selection, health management, budget control, and observability.
+GHCP Pool Proxy decouples downstream model protocol endpoints from upstream Copilot account resources. Clients see OpenAI / Anthropic-compatible APIs, while the system internally coordinates canonical DTOs, router, provider adapter, and control plane for account selection, health management, rate limiting, and observability.
 
 ## Contents
 
@@ -19,7 +19,7 @@ GHCP Pool Proxy decouples downstream model protocol endpoints from upstream Copi
 
 - Expose model protocols externally, not a general GitHub CLI or SDK operation API.
 - Keep the gateway stateless; put hot state in Redis and source-of-truth state in PostgreSQL.
-- Routing decisions prioritize health, budget, risk, concurrency, and seat status; sticky affinity is only a soft preference.
+- Routing decisions prioritize health, RPM limits, risk, concurrency, and seat status; sticky affinity is only a soft preference.
 - Account lifecycle, recovery, org/seat sync, and Copilot Metrics sync live in the control plane and worker, outside the request hot path.
 
 ## Project Scope
@@ -69,8 +69,8 @@ sequenceDiagram
   participant U as GitHub Copilot
 
   C->>G: POST /v1/chat/completions or /v1/responses or /v1/messages
-  G->>G: parse protocol and build canonical request
   G->>G: authenticate client and resolve required pool
+  G->>G: parse protocol and build canonical request
   G->>R: select account and sticky target within assigned pool
   R-->>G: return selection
   G->>P: call upstream adapter
@@ -91,42 +91,22 @@ flowchart TD
   Snapshot --> Router["request routing"]
 
   Admin -->|"recover account"| Task[(recovery_tasks)]
-  Task -->|"scan every 60s"| Worker["Recovery Worker"]
-  Worker --> Cred{"active credential valid? / active credential available?"}
-  Cred -->|"yes"| Active["reset risk and restore active"]
-  Cred -->|"no"| Quarantined["remain or enter quarantined"]
+  Task -->|"claim due task with lease"| Worker["Recovery Worker"]
+  Worker --> Cred{"token acquisition and upstream probe pass?"}
+  Cred -->|"yes, current fence"| Active["reset risk and restore active"]
+  Cred -->|"account failure"| Quarantined["restore degraded or quarantined"]
+  Cred -->|"system failure or limiter"| Retry["release claim and retry later"]
 ```
+
+Token acquisition alone does not re-admit a degraded account. Probe scheduling, recovery states, and operator actions are owned by [operations](operations.en.md#account-onboarding-grouping-and-offboarding); routing eligibility is owned by [routing](routing.en.md#candidate-filtering).
 
 ## Model Catalog Flow
 
-```mermaid
-flowchart LR
-  CopilotModels["Copilot /models capabilities.limits"] -->|"Refresh from Copilot"| Admin["Dashboard / Admin API"]
-  Admin["Dashboard / Admin API"] -->|"PATCH /admin/settings/model_catalog_json"| Settings[(system_settings)]
-  Settings -->|"read model_catalog_json"| Catalog["Gateway Model Catalog"]
-  Catalog --> Models["return exposed models"]
-  Catalog --> Resolve["resolve exposed -> upstream"]
-  Resolve --> Provider["Copilot Provider Adapter"]
-  Resolve -->|"disabled or missing"| Invalid["400 invalid_model"]
-```
-
-Model refresh imports Copilot's effective context, prompt, output, and non-streaming output limits into the strict catalog. Dashboard displays these values on the Models page and preserves them when saving. Missing limits remain unknown; the catalog does not infer native model specifications from names, and these display fields do not alter request validation, routing, or budget reservation.
+Admin imports Copilot model metadata into the global catalog; Gateway resolves exposed names to upstream IDs/APIs. Catalog visibility is separate from per-account entitlement. [Operations](operations.en.md#model-id-mapping-aliases-and-hidden-models) owns refresh/edit procedures; [protocol](protocol.en.md#upstream-api-selection) owns inference and conversion rules.
 
 ## Copilot Metrics Sync Flow
 
-```mermaid
-flowchart LR
-  Admin["Admin manual sync POST"] --> Queue[(org_sync_requests)]
-  Scheduler["Metrics scheduler"] --> Flag{"copilot_metrics_sync_enabled?"}
-  Flag -->|"yes"| Queue
-  Flag -->|"no"| Skip["skip scheduled enqueue"]
-  Queue --> Worker["Metrics Sync Worker claim/lease"]
-  Worker --> Token{"GITHUB_TOKEN_FILE?"}
-  Token -->|"missing"| Retry["release for retry"]
-  Token -->|"available"| GitHub["latest 28-day report or seats"]
-  GitHub --> Commit["fenced snapshot upsert or seat generation write"]
-  Commit --> Dashboard["request status and audit"]
-```
+Admin and the scheduler enqueue durable synchronization requests. Worker claims them with leases and fencing before persisting GitHub metrics or seat snapshots. This is an asynchronous control-plane workflow, never a request-routing dependency; operational timing and failure handling are in [operations](operations.en.md#usage-and-cache-observability).
 
 ## Layer Responsibilities
 
@@ -134,7 +114,7 @@ flowchart LR
 
 - Receives OpenAI Chat Completions, OpenAI Responses API, and Anthropic Messages requests.
 - Converts requests into a canonical request model.
-- Handles authentication, global budget checks, model catalog mapping, routing, account-level budget checks, streaming proxying, and error mapping.
+- Handles authentication, model catalog mapping, routing, atomic global/account RPM admission, streaming proxying, and error mapping.
 - Loads router snapshots at startup and periodically refreshes pools, account memberships, and active bindings from PostgreSQL.
 - Records traces, latency, token usage, sticky metrics, provider errors, and usage ledger entries.
 
@@ -182,20 +162,22 @@ flowchart TD
   Hot --> Affinity["Sticky affinity map"]
   Hot --> RateLimit["short-window rate counters"]
   Cold --> Accounts["account and credential metadata"]
-  Cold --> Policies["pools, client profiles, budgets, audit"]
+  Cold --> Policies["pools, client profiles, RPM settings, audit"]
 ```
 
-- PostgreSQL stores accounts, credential metadata and versions, pools, client profiles, durable bindings, provider attempts/reservations, budgets, audit events, recovery tasks, organization-sync requests, and usage ledger/rollup entries.
+- PostgreSQL stores accounts, credential metadata and versions, pools, client profiles, durable bindings, provider attempts, RPM settings, audit events, recovery tasks, organization-sync requests, and usage ledger/rollup entries.
 - PostgreSQL also stores `system_settings`, model catalog configuration, GitHub org data, metrics snapshots, and the durable Redis coordination epoch.
-- Redis protocol v2 stores budget reservations/finalization, concurrency leases, short-TTL affinity and binding mappings, rate-limit counters, distributed locks, invalidation events, and the active coordination manifest.
+- Redis protocol v2 stores concurrency leases, short-TTL affinity and binding mappings, RPM and probe rate-limit counters, distributed locks, invalidation events, and the active coordination manifest.
 - Gateway may lose its local Router snapshot, ordering counters, token cache, or bounded usage materialization queue without losing source-of-truth or cross-instance coordination state.
 - Plaintext credentials are never stored; sensitive content must be encrypted and masked.
+- Credential payloads use AES-256-GCM under the deployment master key. Client authentication uses key hashes; any revealable secret material is encrypted. Sticky/prompt-prefix inputs are stored only as hashes; bodies and credentials do not belong in logs.
 
 ## Key Boundaries
 
 - The data plane does not directly execute general GitHub operations.
+- Admin uses a configured bearer token, not JWT/OIDC/enterprise SSO. Control-plane writes and secret reveal require audit persistence. General policy engines, multi-region routing and tenant BI remain outside scope.
 - Routing decisions use proxy-side real-time state and do not depend on Copilot Metrics in the hot path.
-- Sticky session is a soft constraint; health, budget, risk, and seat validity always take priority.
+- Sticky session is a soft constraint; health, RPM limits, risk, and seat validity always take priority.
 - The runtime package supports single-machine Docker Compose plus a cluster entry point. Kubernetes provides single-replica production, dual-Gateway staging, and an explicitly disposable `test` overlay with in-cluster PostgreSQL/Redis. The Azure Bicep guide is limited to VNet/subnets, AKS, PostgreSQL, and Managed Redis; it is not a complete multi-replica production platform with ingress, monitoring, backup, evidence inventory, or destroy automation.
 - A release manifest binds one public app version, Git SHA, four runtime-role digests, and the migration schema. Compatibility evidence uses that app version; both VM and Kubernetes deploy the manifest digests directly.
 - The model catalog is global; `require_fresh` profiles additionally enforce account-specific model/API evidence from the immutable request snapshot, while `allow_unknown` profiles retain compatibility behavior.

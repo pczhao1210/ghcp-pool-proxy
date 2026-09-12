@@ -30,7 +30,7 @@ Both deployment entry points use the bundled `release-manifest.env` by default a
 Gateway and Admin bind to the VM loopback interface by default. Forward them over SSH from your workstation:
 
 ```bash
-ssh -N -L 8000:127.0.0.1:8000 -L 8001:127.0.0.1:8001 <user>@<server>
+ssh -N -L 8000:127.0.0.1:8000 -L 8001:127.0.0.1:8001 '<user>@<server>'
 ```
 
 Then open the Dashboard at `http://127.0.0.1:8001/` and send model requests to `http://127.0.0.1:8000/`. For a private reverse proxy on another host, set `GATEWAY_BIND_ADDR` and `ADMIN_BIND_ADDR` to the reviewed private interface and enforce TLS plus firewall restrictions. Do not publish Admin as plaintext on an untrusted network.
@@ -82,7 +82,7 @@ Before starting services, `deploy.sh` validates that the release manifest schema
 
 - `~/ghcp_proxy/config.yaml`: provider endpoints, timeouts, connection and queue sizing, maintenance fallbacks, and logging.
 - `~/ghcp_proxy/.env`: generated secrets, host paths, loopback bind addresses, ports, and database/Redis addresses.
-- PostgreSQL: Dashboard-managed budgets, feature flags, model catalog, URLs, keys, and retention overrides.
+- PostgreSQL: Dashboard-managed RPM limits, feature flags, model catalog, URLs, keys, and retention overrides.
 
 Keep `.env` private. Do not casually rotate `CREDENTIAL_MASTER_KEY` after credentials have been stored.
 

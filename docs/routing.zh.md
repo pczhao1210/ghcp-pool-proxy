@@ -12,7 +12,7 @@
 - [Sticky 亲和](#sticky-亲和)
 - [Sticky Overflow 与并发](#sticky-overflow-与并发)
 - [Risk Score 与账号状态](#risk-score-与账号状态)
-- [预算与限流](#预算与限流)
+- [限流与并发](#限流与并发)
 - [指标](#指标)
 - [调优建议](#调优建议)
 
@@ -23,17 +23,18 @@ flowchart TD
   A["请求进入 Gateway"] --> B["认证 API key / client profile"]
   B --> C["协议 parser -> CanonicalRequest"]
   C --> D["模型目录 exposed -> upstream"]
-  D --> E["全局 RPM / token / AI credit 检查"]
+  D --> E["校验 canonical 请求语义"]
   E --> F["使用 client profile pool_id"]
   F --> G{"pool allocation_mode"}
-  G -->|"user_binding"| H["standard user identifier -> DB/Redis binding"]
+  G -->|"user_binding / session_binding"| H["standard identifier -> DB/Redis binding"]
   G -->|"shared"| I["计算 affinity key / 查 sticky target"]
   H --> J["强制选择绑定账号"]
   I --> K["preferred sticky 或负载均衡选择"]
   J --> L["Redis 并发 lease"]
   K --> L
-  L --> M["账号级 RPM / token / AI credit 检查"]
-  M --> N["调用 Copilot provider"]
+  L --> M["记录 attempt 并原子执行全局及账号 RPM 准入"]
+  M -->|"准入成功且 journal 已确认"| N["调用 Copilot provider"]
+  M -->|"账号拒绝；shared 或本次新建 binding"| G
   N --> O["记录 usage / risk / sticky 指标"]
 ```
 
@@ -85,7 +86,7 @@ session_binding: client_profile_id + pool_id + lower(trim(session_id))
 - 首次绑定账号排序：低账号 `priority`、低 `risk_score`、高 pool membership `weight`、低账号 `id`。
 - 每次命中会刷新 `last_used_at` 和 `expires_at`；默认 `user_binding` 7 天不用后过期，`session_binding` 5 分钟不用后过期；pool 的 `binding_ttl_seconds` 可覆盖默认值。
 - 绑定池使用 pool 的 `binding_max_concurrency` 作为有效并发上限，默认值是 10，不修改账号原始 `max_concurrency`。
-- 解除方式只有过期或 Dashboard pool 展开详情中的手动 `Release`。
+- 已准入 binding 通过过期或 Dashboard pool 展开详情中的手动 `Release` 解除；本次新建 binding 若准入失败则回滚。
 - 绑定账号不可用、seat 不可用或达到并发上限时请求失败，不会自动换到其它账号。
 - 普通 `shared` pool 会避开 active binding 占用账号。
 
@@ -105,7 +106,7 @@ session_binding: client_profile_id + pool_id + lower(trim(session_id))
 
 候选集为空时会进入 Gateway 错误映射；对外状态码与内部路由原因的对应关系见 [operations.zh.md](operations.zh.md)。
 
-模型目录控制 Gateway 对外暴露的模型。Schema 19 保存逐账号 discovery/probe 证据，client profile 显式选择 `model_entitlement_policy=allow_unknown` 或 `require_fresh`。严格请求从最近一次完整 evidence version 捕获不可变 allowlist；普通、sticky、required-account、Redis 并发重选、预算重选，以及 user/session binding 创建与恢复都复用它。已有 binding 的账号不再合格时会 fail closed，不会静默创建第二条 binding。证据 expiry 在请求 plan 创建时判断。`allow_unknown` 是兼容默认值，不按证据过滤，因此这类 pool 仍应保持模型集合一致。
+模型目录控制 Gateway 对外暴露的模型。Schema 19 保存逐账号 discovery/probe 证据，client profile 显式选择 `model_entitlement_policy=allow_unknown` 或 `require_fresh`。严格请求从最近一次完整 evidence version 捕获不可变 allowlist；普通、sticky、required-account、Redis 并发重选、RPM 重选，以及 user/session binding 创建与恢复都复用它。已有 binding 的账号不再合格时会 fail closed，不会静默创建第二条 binding。证据 expiry 在请求 plan 创建时判断。`allow_unknown` 是兼容默认值，不按证据过滤，因此这类 pool 仍应保持模型集合一致。
 
 ## 负载均衡策略
 
@@ -121,13 +122,13 @@ session_binding: client_profile_id + pool_id + lower(trim(session_id))
 
 ## Sticky 亲和
 
-Sticky map 存在 Redis：
+Sticky map 按 pool、model 与哈希后的亲和输入隔离。当前 Redis protocol v2 的正向 key 为：
 
 ```text
-sticky:{pool_id}:{model}:{affinity_key_hash} -> account_id
+ghcp:v2:e<epoch>:{sticky:<affinity_hash>}:forward:<pool_id>:<model> -> account_id
 ```
 
-请求成功后会写入或刷新 sticky target。Redis 同时维护 `sticky_account:{account_id}` 反向索引，便于账号禁用时删除相关 sticky key。
+请求成功后写入或刷新 sticky target；账号级反向索引与过期索引用于失效和清理。这些是版本化的内部 key，不是运维 API；旧 `sticky:*` key 属于 protocol v1，不可混入 v2 恢复流程。
 
 Sticky policy（`sticky_mode`）：
 
@@ -161,7 +162,7 @@ Session key 优先级：
 
 ## Sticky Overflow 与并发
 
-并发有两层：Router 的进程内计数用于快速过滤和排序；Redis lease 是多 gateway 实例下的硬门槛。Redis 可用时，Gateway 会在选中账号后写入 `concurrency_leases:{account_id}` 租约；写入失败表示账号已达到跨实例并发上限。
+并发有两层：Router 的进程内计数用于快速过滤和排序；Redis lease 是多 gateway 实例下的硬门槛。Gateway 在选中账号后使用当前 protocol/epoch 的账号命名空间申请租约（v2 为 `ghcp:v2:e<epoch>:{acct:<account_id>}:concurrency`）。容量拒绝表示达到跨实例并发上限；Redis 错误则作为依赖故障 fail closed，不能等同于容量已满。
 
 Soft sticky 下，如果 sticky target 可用，Gateway 会检查“当前请求进入前已有并发”的负载比例：
 
@@ -199,15 +200,21 @@ Risk score 是账号级健康分，数值越高风险越高。候选过滤只接
 
 当前状态机支持 `active -> degraded` 和 `degraded -> quarantined`，不支持 `active -> quarantined` 直跳。调大单次失败分值时，要同时考虑阈值间距或更新状态机。
 
-## 预算与限流
+## 限流与并发
 
-Gateway 在路由前检查全局 RPM、全局 daily tokens 和全局 daily AI credits；选中账号后再检查账号级 RPM、tokens 和 AI credits。预算不通过时请求返回 429 或预算错误，不会继续尝试其它账号。
+Gateway 在选择账号并通过并发准入后，在 Redis 中原子检查并占用全局及账号级 RPM 窗口容量；账号拒绝不会占用全局容量。全局限流拒绝立即终止；账号级拒绝可在同一不可变 route plan 内尝试其它合格账号，并排除已拒绝账号，不跨 pool，也不重试已派发的上游调用。已有 user/session binding 在绑定账号上 fail closed；新建 binding 只有在未被并发请求接用时才允许回滚。候选耗尽时保留原限流错误；依赖故障返回 503。Provider attempt journal 继续用于派发所有权和 usage 持久化。
 
-Daily token 和 AI Credits 预算默认关闭。可在 Dashboard Config 页配置，或将 `BUDGET_MAX_DAILY_TOKENS_PER_ACCOUNT`、`BUDGET_MAX_DAILY_TOKENS_GLOBAL`、`BUDGET_MAX_DAILY_NANO_AIU_PER_ACCOUNT`、`BUDGET_MAX_DAILY_NANO_AIU_GLOBAL` 设置为大于 `0` 的值启用对应上限。RPM 保护默认开启：`BUDGET_MAX_RPM_PER_ACCOUNT=60`，100 账号聚合上限为 `BUDGET_MAX_RPM_GLOBAL=6000`；任一值设为 `0` 可关闭对应 RPM 检查。RPM 使用 Redis 原子滑动窗口；窗口满时直接返回 429，不在 Gateway 内等待，被该窗口拒绝的尝试不会继续占用该窗口额度。Gateway 会周期性刷新 Dashboard 保存的预算设置，环境变量只是启动默认值；数据库中已保存的值仍优先。
+代理不再提供费用或 Token 配额；费用与消费额度由 GitHub 后台管理。RPM 保护默认开启：`BUDGET_MAX_RPM_PER_ACCOUNT=60`，100 账号聚合上限为 `BUDGET_MAX_RPM_GLOBAL=6000`；任一值设为 `0` 可关闭对应 RPM 检查。RPM 使用 Redis 原子滑动窗口，窗口满时直接返回 429，不在 Gateway 内等待。Gateway 会周期性刷新 Dashboard 保存的 RPM 设置，环境变量只是启动默认值；数据库中已保存的 RPM 值仍优先。历史配额设置不再生效，也不在 Admin API 或 Dashboard 中展示。
 
-关闭 daily token 预算时，客户端显式输出上限会原样作为 reservation 数量保留，不会仅因超过请求未提供输出上限时使用的 `4096` fallback 而被拒绝。启用任一 daily token 预算后，`BUDGET_MAX_RESERVATION_INPUT_TOKENS` 与 `BUDGET_MAX_RESERVATION_OUTPUT_TOKENS` 是保守硬上界；输出上界必须不低于计划接纳的最大客户端 `max_tokens` 或 `max_output_tokens`。这样既保持 daily-budget fail-closed 记账，也允许只启用 RPM 的部署接纳请求更大输出窗口的 coding client。
+合法的客户端显式输出上限保持原值，包括 `max_tokens`、Chat `max_completion_tokens` 和 Responses `max_output_tokens`。省略输出上限时保留 provider 行为，不再添加配额派生的输出上限。模型上下文/输出限制、协议校验和 thinking `budget_tokens` 属于模型及请求语义，继续保留。
 
-Router 本身不读取预算账本；它只处理指定 pool、账号状态、seat、reserved 和并发。
+Token、缓存、reasoning tokens 和 token type/count 统计继续用于监控与对账。不再执行 Token 预留、结算、退款、配额补偿或 Redis 恢复时的日配额重建。Request journal、usage outbox/ledger 和聚合仍保留；删除配额并不代表取消所有逐请求数据库写入。
+
+Redis 数据集恢复或协议切换仍是 operator 控制的维护操作：重新接流前必须排空 writer 并满足 RPM/lease 安全窗口。协调器重建 binding 状态，但不会自动等待该静默窗口，也不再重建每日 Token 计数。
+
+派发所有权使用一分钟 PostgreSQL lease，活跃请求每 20 秒续租。有效 lease 可防止长流被过期 attempt 对账误终结；丢失所有权时取消上游调用并明确报错，不处罚账号。绑定接用标记与派发在同一事务提交。相较无绑定派发，绑定派发增加三次 PostgreSQL 往返；每个活跃 attempt 每 20 秒增加一次续租更新。Protocol-v2 亲和写入会清理过期反向索引项，并保留其余有效条目的 TTL。
+
+Router 本身不读取 usage 账本；它只处理指定 pool、账号状态、seat、reserved binding 和并发。
 
 ## 指标
 

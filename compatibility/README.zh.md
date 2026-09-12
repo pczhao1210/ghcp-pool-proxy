@@ -1,5 +1,7 @@
 # 兼容性矩阵
 
+本页 `make` 命令在源码 checkout 中执行；运行包不包含 Makefile 或 Go 源码。运行包可使用 Worker 镜像内的 collector，部署侧用法见[英文说明](README.md)。
+
 [matrix.json](matrix.json) 是静态客户端合同的唯一事实源。它把 runtime contract 与精确客户端版本分离：前者定义 profile、pool、模型、路由、能力和 typed wire contract，后者定义客户端家族、版本、安装来源、静态等级和证据身份。运行时只用 profile、模型和上游 API 查找合同；Codex 与 Claude Code 都不按精确客户端版本路由。版本条目只保留 fixed-CLI 发布证据的可审计身份。
 
 ## 当前边界
@@ -9,9 +11,11 @@
 - `count_tokens`、`compact`、WebSocket 和 Codex 动态工具回调都不在当前 HTTP 网关合同内。
 - `require_fresh` profile 会使用不可变请求快照，要求候选账号对解析后的模型/API 具有当前完整证据；`allow_unknown` 是显式兼容策略。
 
-协议保真、转换和 fail-closed 规则见 [协议文档](../docs/protocol.zh.md)，活动边界与新任务触发条件见 [兼容性路线图](../docs/plans/compatibility-roadmap.zh.md)。已关闭实施切片与历史证据见 [Phase 7 执行历史](../docs/history/phase-7-execution-log.zh.md)。
+协议保真、转换和 fail-closed 规则见 [协议文档](../docs/protocol.zh.md)，活动边界与新任务触发条件见 [兼容性路线图](../docs/plans/compatibility-roadmap.zh.md)。已完成实现与旧验证记录由 Git 历史保留，不能作为新 release 的有效证据。
 
 ## 发布证据
+
+Revision、candidate build 与目标 schema 读取 [matrix.json](matrix.json)，schema 必须匹配 [migrations/schema_version](../migrations/schema_version)。升级使用随包 runner 与受支持路径，不手写旧 schema marker 或绕过 checksum，见[发布与迁移](../docs/operations.zh.md#发布与迁移)。
 
 静态矩阵不会自行产生 `verified_native`。一个不可变 release 的有效等级只能由外置 attestation 派生，它必须绑定同一身份的：
 

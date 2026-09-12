@@ -14,7 +14,7 @@ This guide covers the delivered VM and Kubernetes deployment paths, shared-state
 - [Release and Migration](#release-and-migration)
 - [Daily Checks](#daily-checks)
 - [Gateway Error Mapping](#gateway-error-mapping)
-- [Usage, Cost, and Cache Observability](#usage-cost-and-cache-observability)
+- [Usage and Cache Observability](#usage-and-cache-observability)
 - [Operations Workflows](#operations-workflows)
 - [Alert Priority](#alert-priority)
 - [Troubleshooting](#troubleshooting)
@@ -53,7 +53,7 @@ Startup flow:
 - Stops when an existing persistent directory is missing its YAML, rather than silently restoring default configuration.
 - Validates the bundled non-sensitive release manifest against the bundled schema, derives and directly pulls the four runtime `repository@sha256:...` references from that manifest, and also pulls the PostgreSQL and Redis images.
 - Starts PostgreSQL and Redis, then waits for health checks.
-- Runs the dedicated manifest-backed migration image with a file-mounted DSN. Empty databases receive `001_init.sql`; recognized schema versions 1 through 9 reconcile through `010_legacy_schema_reconciliation.sql`; version 10 and later use their numbered migration path. Partial schemas and unmarked version-10-or-later schemas fail closed.
+- Runs the dedicated manifest-backed migration image with a file-mounted DSN. Empty databases receive `001_init.sql` followed by incremental migrations to the target schema; recognized schema versions 1 through 9 reconcile through `010_legacy_schema_reconciliation.sql`; version 10 and later use their numbered migration path. Partial schemas and unmarked version-10-or-later schemas fail closed.
 - Starts gateway, admin, and worker.
 - Starts a log collector that writes compose logs hourly to `~/ghcp_proxy/logs/ghcp-proxy-YYYYMMDD-HH.log` with 30-day retention by default.
 
@@ -76,7 +76,7 @@ GHCP_RESET_CONFIRM=reset deploy/deploy.sh --reset
 deploy/deploy.sh --start
 ```
 
-For local development, use `./start.sh --reset`; it resets Docker Compose volumes and rebuilds the database from the current `migrations/001_init.sql`.
+For local development, use `./start.sh --reset`; it resets Docker Compose volumes and rebuilds the database using the initial snapshot and subsequent manifest-backed migrations.
 
 For source-tree validation, `./start.sh --new` runs Go tests unless `--skip-tests` is set, rebuilds the app images, recreates gateway/admin/worker, and runs HTTP smoke checks. The smoke client profile has a concrete `pool_id`: with `PROVIDER=fake` it targets the seeded local smoke pool; with `PROVIDER=copilot` it targets the first active shared pool when one exists. The smoke payload includes stable `user` and `session` identifiers so binding-pool errors are easier to diagnose.
 
@@ -95,7 +95,7 @@ VM Docker persistence:
 
 The accounts table, Admin API, and dashboard do not impose a hard total-account limit, so 100 accounts do not require a wider database field or a raised batch limit. Account records themselves are small; size capacity by concurrent model requests and SSE streams rather than by registered accounts. New accounts default to concurrency `6`, which gives 100 accounts a theoretical 600 shared-account slots. Binding pools default to concurrency `10`, giving 100 users that each bind one account a theoretical 1000 binding slots. These are account-side ceilings, not recommended single-VM operating points.
 
-RPM defaults are `60` per account and `6000` globally, matching the sum of 100 account limits. The global budget accepts at most 6000 starts in a rolling minute, or about 100 starts/second if evenly distributed. A Redis Lua script atomically removes expired entries, counts, and admits a start; attempts rejected in a full window do not consume more window capacity. The gateway does not wait in a server-side queue: it returns 429 immediately and expects clients to retry with backoff and jitter, avoiding queued requests holding connections and memory. RPM limits starts but does not cap active streams, and client traffic still has no gateway-wide active-request lease. Daily token and AI Credits budgets remain disabled by default and can be enabled independently.
+RPM defaults are `60` per account and `6000` globally, matching the sum of 100 account limits. The global rate limit accepts at most 6000 starts in a rolling minute, or about 100 starts/second if evenly distributed. A Redis Lua script atomically removes expired entries, checks both windows, and admits a start; rejected attempts consume neither window's capacity. The gateway does not wait in a server-side queue: it returns 429 immediately and expects clients to retry with backoff and jitter, avoiding queued requests holding connections and memory. RPM limits starts but does not cap active streams, and client traffic still has no gateway-wide active-request lease. Monetary and Token quotas are removed; billing and consumption limits are managed in GitHub.
 
 The following sizes assume PostgreSQL, Redis, gateway, admin, and worker all run on one VM and the workload is interactive coding rather than sustained batch traffic. They are starting points for load testing, not unbenchmarked throughput guarantees.
 
@@ -115,7 +115,7 @@ Default capacity controls for 100 accounts:
 | Account / global RPM | `60` / `6000` | Allow 100 accounts to reach their individual RPM limits; the atomic sliding window rejects excess starts without a server-side wait queue |
 | PostgreSQL pool | `12` per process, at most `36` across gateway/admin/worker | Leave headroom under PostgreSQL's usual connection budget and reduce per-connection RAM pressure |
 | Token probes | `5` concurrent, `2` starts/second | Drain a 100-account startup backlog in roughly a minute without an external API spike |
-| Usage writer | queue `10000`, batch `500`, threshold `100`, interval `250ms` | Existing batching is already conservative; tune only from queue age, drops, and COPY latency |
+| Usage writer | queue `10000`, batch `500`, threshold `100`, interval `250ms` | Tune from queue age, rejected enqueue attempts, and materialization latency |
 | Logging | `info`, successful-request sample `0.01` | Keep errors while limiting CPU and disk amplification |
 
 Migration 018 changes only the database defaults. It does not rewrite existing account or pool concurrency. A Dashboard-saved `budget_max_rpm_global` also continues to override the new `6000` startup fallback, so existing deployments that saved `600` must change it explicitly.
@@ -124,23 +124,16 @@ On Azure, place PostgreSQL, Redis AOF, and application logs on a dedicated data 
 
 During a steady load test, target sustained disk IOPS below 60–70% of the quota, PostgreSQL commit latency p95 below `5 ms`, and no persistent disk-queue growth. If the workload misses those targets at 3000 IOPS, first verify that ledger writes are batched, rollups no longer rescan data, and successful request logs are sampled before increasing the disk tier. Production capacity must also leave room for snapshots, WAL, and backups rather than allocating the entire data disk to PostgreSQL.
 
-Use a sustained `6000 RPM`, or `100 RPS`, as the upper-bound disk model. Measurements on 2026-08-06 against PostgreSQL 16 and the current schema used representative successful records: one ledger heap row was about `360 B`; 100-row and 500-row batches generated `40000 B` and `196760 B` of WAL, or about `394–400 B/request`; one indexed user-binding TTL touch generated about `568 B` of WAL. The current user-binding hot path normally touches PostgreSQL once when a request enters and once when it finishes, while a long stream renews every 30 seconds as well.
+Capacity estimates must use the exact release schema and measured workload. Include provider-attempt/dispatch ownership, usage outbox/materialization, binding touches and renewals, rollups, checkpoints, and Redis AOF. A ledger-row-only estimate cannot bound total WAL or IOPS; journals and outbox still write after consumption quotas were removed. See [dispatch lease overhead](routing.en.md#rate-limits-and-concurrency).
 
-| Write source | Sustained `100 RPS` estimate | Notes |
-| --- | --- | --- |
-| Raw ledger heap | About `35 KiB/s`, `3.11 GB/day`, or `21.8 GB` over seven days | One row per completed request; incremental BRIN growth is small |
-| Ledger WAL | About `39 KiB/s` or `3.46 GB/day` | A threshold of 100 usually means about one COPY commit/second, not one transaction per request |
-| User-binding touch WAL | About `111 KiB/s` or `9.81 GB/day` | Assumes two touches per request, plus `active_streams / 30` renewals per second |
-| Combined PostgreSQL WAL | Usually about `150–170 KiB/s` or `13–15 GB/day` | Includes renewal headroom for 256 active streams; excludes checkpoint full-page images and vacuum/rollup bursts |
-
-WAL is normally recycled, so `13–15 GB/day` is not permanent daily growth. If WAL archiving is enabled on the same disk, reserve an additional `archive days × daily WAL`, or preferably place archives on separate storage. Group commit, page cache, checkpoints, and autovacuum determine physical I/O: budget roughly `200–600 IOPS` for steady traffic and about `1500 IOPS` for rollup, vacuum, checkpoint, and AOF-rewrite bursts. The colocated deployment therefore still recommends at least `3000 IOPS / 125 MB/s`, targeting sustained use below 60–70% of the quota. `128 GB` is the operational minimum; `256 GB` gives better room for WAL, Redis AOF, logs, snapshots, and recovery. If request duration saturates concurrency or the gateway's 256 upstream connections first, actual sustainable RPS and disk writes will be below this upper bound.
+WAL is normally recycled, while archived WAL requires separate retention capacity (`archive days × measured daily WAL`). Reserve space for Redis AOF, logs, snapshots, and recovery too. The sizing table is a load-test starting point, not a throughput guarantee; account concurrency, upstream connection limits, or request duration may saturate before disk bandwidth.
 
 Primary bottlenecks and scaling order:
 
-1. **Disk capacity and write latency**: the gateway sends usage through a bounded queue and batches `usage_ledger` writes with PostgreSQL `COPY`, but PostgreSQL still generates data pages and WAL. Redis uses AOF `everysec`, and both Docker JSON logs and the hourly log collector consume disk. By default the worker retains seven UTC-day raw partitions, 90 UTC-day hourly-rollup partitions, and the current month plus 13 complete prior months of monthly-partitioned daily rollups; pruning only drops whole partitions. A 20-GB disk still lacks headroom for WAL, snapshots, and recovery, so expand to at least 128–256 GiB and alert at 70% utilization. Stable operation inside the 3000-IOPS baseline is a load-test target for sustained 100 RPS, not an unbenchmarked throughput guarantee.
+1. **Disk capacity and write latency**: the gateway durably journals attempts and uses a bounded queue to accelerate batch materialization into `usage_ledger`; PostgreSQL generates data pages and WAL for both. Redis uses AOF `everysec`, and both Docker JSON logs and the hourly log collector consume disk. By default the worker retains seven UTC-day raw partitions, 90 UTC-day hourly-rollup partitions, and the current month plus 13 complete prior months of monthly-partitioned daily rollups; pruning only drops whole partitions. A 20-GB disk still lacks headroom for WAL, snapshots, and recovery, so expand to at least 128–256 GiB and alert at 70% utilization. Stable operation inside the 3000-IOPS baseline is a load-test target for sustained 100 RPS, not an unbenchmarked throughput guarantee.
 2. **RAM**: 4 GiB must hold the host, five containers, PostgreSQL cache, Redis data, connection buffers, and request bodies. Long conversations, concurrent streams, and dashboard aggregation raise peaks. Move to 16 GiB when resident memory stays above 75%, swap is used, or OOM events occur; do not use swap as normal traffic capacity.
 3. **CPU**: registered account count consumes almost no CPU. JSON protocol conversion, SSE event forwarding, logging, database queries, and background rollups grow with request and event rate. With two cores, gateway competes directly with PostgreSQL and worker. Move from four to eight cores, or separate the data services, when CPU stays above 70% or the run queue remains above the vCPU count.
-4. **Redis/PostgreSQL round trips and connections**: a model request performs several Redis routing, concurrency, and sticky/binding operations. Binding traffic also touches PostgreSQL to refresh or allocate bindings. Usage enters the gateway's bounded in-memory queue, flushes immediately when backlog reaches 100 records, is capped at 500 records per COPY, and otherwise waits at most 250 ms. Gateway, admin, and worker each default to at most 12 PostgreSQL connections, for a theoretical single-VM total of 36. When connection acquisition waits or database latency grows, inspect slow queries, binding traffic, queue drops, and storage latency before increasing the pool.
+4. **Redis/PostgreSQL round trips and connections**: a model request performs several Redis routing, concurrency, and sticky/binding operations, plus durable attempt/dispatch/finalization writes. Binding traffic also touches PostgreSQL to refresh or allocate bindings. The materialization queue flushes when backlog reaches 100 records, is capped at 500 records per batch, and otherwise schedules a partial batch every 250 ms; database stalls can extend actual residence time. Gateway, admin, and worker each default to at most 12 PostgreSQL connections, for a theoretical single-VM total of 36. When connection acquisition waits or database latency grows, inspect slow queries, binding traffic, queue drops, and storage latency before increasing the pool.
 5. **Long connections and network**: SSE often uses little CPU while holding sockets, memory, and account concurrency for a long time. The Copilot HTTP transport defaults to at most 256 connections per host, so one gateway process cannot realize either 600 shared slots or 1000 binding slots. On 4C8G, investigate sustained `ghcp_copilot_active_streams > 80`; treat about 128 as a conservative scale-out boundary rather than raising the 256 transport ceiling first. Separate gateway from PostgreSQL/Redis and then scale gateway horizontally for further growth.
 
 Use sustained 10–15 minute signals rather than one-minute spikes: CPU above 70%, resident memory above 75% or any swap, active streams above 80, PostgreSQL acquisition waits with pools near 12, Redis p95 above about `5 ms`, usage queue above 2000 or oldest age above one second, or any usage-record drop. These are investigation and load-test triggers, not independent proof that a larger VM is the only fix.
@@ -174,7 +167,7 @@ For VM startup changes, stop incoming traffic and use `deploy/deploy.sh stop && 
 
 Older generated YAML may quote `github.opencode_device_flow_enabled` or `health.enabled`. Preserve the intended setting but change these fields to unquoted `true`/`false` before restarting. Updating the deployment script does not rewrite existing configuration. Cold backup and restore procedures are available in the [Traditional Chinese VM runbook](runbooks/azure-vm-operations.zh-TW.md#5-備份還原與搬遷).
 
-Budgets, feature flags, model catalog, gateway public URL, client/GitHub fallback keys, and usage retention are stored in PostgreSQL and remain editable in Dashboard. For retention, a DB value overrides the YAML or environment startup fallback, which overrides the built-in default. Worker refreshes retention before each maintenance pass, currently every five minutes; no restart is required. Lowering a non-zero window can permanently drop older complete partitions, while `0` disables pruning for that tier.
+RPM limits, feature flags, model catalog, gateway public URL, client/GitHub fallback keys, and usage retention are stored in PostgreSQL and remain editable in Dashboard. For retention, a DB value overrides the YAML or environment startup fallback, which overrides the built-in default. Worker refreshes retention before each maintenance pass, currently every five minutes; no restart is required. Lowering a non-zero window can permanently drop older complete partitions, while `0` disables pruning for that tier.
 
 Dashboard Events opens in the focused `Changes` view, which excludes routine credential-expiry and auto-reactivation-start notifications before pagination. `All events` preserves access to the complete audit stream. The credential warning worker now records at most one audit event for each `credential_id + expires_at`; renewing a credential creates a new warning cycle. Existing duplicate rows are retained rather than deleted.
 
@@ -189,7 +182,7 @@ The recommended Copilot compatibility flags are `copilot_compat_anthropic_beta_e
 | `gateway.idle_timeout` | Keep-alive idle timeout, default `120s` |
 | `GATEWAY_BIND_ADDR` / `ADMIN_BIND_ADDR` | VM host interfaces for published Gateway/Admin ports; both default to `127.0.0.1`. Use SSH forwarding or a TLS-terminating private ingress; never expose plaintext Admin on an untrusted network. |
 | `WORKER_METRICS_ADDR` | Worker health and retention-metrics listen address, default `:8002`; VM Compose publishes it only on host `127.0.0.1` |
-| `WORKER_ROLES` | Comma-separated Worker loops: `all` (default), `credential-warning`, `health`, `metrics-sync`, `usage-rollup`, `provider-attempts`, `budget-recovery`, `binding-expiry`, or `capability-sync`. Both Compose baselines pass this variable through. Kubernetes runs `metrics-sync` in the dedicated `ghcp-org-sync-worker`; only the production Copilot overlay adds `capability-sync` to the general Worker, while fake-provider overlays omit it. `budget-recovery` requires Redis readiness; capability fencing uses PostgreSQL and does not require Redis. |
+| `WORKER_ROLES` | Comma-separated Worker loops: `all` (default), `credential-warning`, `health`, `metrics-sync`, `usage-rollup`, `provider-attempts`, `binding-expiry`, or `capability-sync`. Both Compose baselines pass this variable through. Kubernetes runs `metrics-sync` in the dedicated `ghcp-org-sync-worker`; only the production Copilot overlay adds `capability-sync` to the general Worker, while fake-provider overlays omit it. Capability fencing uses PostgreSQL and does not require Redis. |
 | `ORG_SYNC_ENABLED` | Enables GitHub organization metrics and seat sync. Defaults to `false`; when disabled, the Worker does not process sync work and the related Admin API routes return `404`. VM writes a missing value without replacing an existing `.env` value. Kind and Azure pass the same environment variable to their Kustomize runtime ConfigMap. |
 | `CAPABILITY_SYNC_MATRIX_PATH` | Versioned compatibility matrix used by `capability-sync`; source default `compatibility/matrix.json`, packaged Worker default `/srv/ghcp/compatibility/matrix.json` |
 | `CAPABILITY_SYNC_INTERVAL` / `CAPABILITY_SYNC_RUN_TIMEOUT` / `CAPABILITY_SYNC_LEASE_DURATION` | Capability collection cadence and fencing deadlines; defaults `1h`, `10m`, and `11m` |
@@ -212,11 +205,11 @@ The recommended Copilot compatibility flags are `copilot_compat_anthropic_beta_e
 | `maintenance.daily_retention_months` | Complete prior daily-rollup month fallback, default `13`, in addition to the current month; set to `0` to disable automatic pruning |
 | `maintenance.partition_ahead_days` | Number of ledger daily partitions the worker creates ahead, default `7` |
 | `usage_writer.queue_size` | Gateway in-memory usage queue capacity, default `10000` |
-| `usage_writer.batch_size` | Maximum records per COPY, default `500` |
+| `usage_writer.batch_size` | Maximum records per materialization batch, default `500` |
 | `usage_writer.flush_threshold` | Burst backlog that triggers an immediate batch, default `100`, capped at batch size |
 | `usage_writer.flush_interval` | Maximum wait below the threshold, default `250ms`; use `100ms` only as a low-latency load-test profile |
 | `usage_writer.enqueue_timeout` | Maximum enqueue wait when the queue is full, default `50ms` |
-| `usage_writer.write_timeout` | Timeout for one COPY attempt, default `5s` |
+| `usage_writer.write_timeout` | Timeout for one materialization batch attempt, default `5s` |
 | `logging.success_sample_rate` | Successful access-log sample rate, default `0.01`; errors are always logged |
 | `provider.type` | Upstream provider type, `copilot` by default for VM deployment |
 | `provider.base_url` / `provider.timeout` | Optional Copilot endpoint override and upstream timeout |
@@ -301,8 +294,12 @@ flowchart TD
 ```
 
 - Run database migrations before deploying services.
-- Prefer admin workflows for changing pool membership, client profiles, and budget thresholds.
-- In multi-instance deployments, Redis and PostgreSQL must be available before services start. If the initial Redis ping or a later command fails, readiness returns `503`; budget and distributed concurrency checks fail closed, while sticky affinity and binding caches fall back to ordinary routing or PostgreSQL. The retained Redis client resumes normal operation automatically after recovery.
+- This revision targets schema `21`: migration `020` separates in-progress capability evidence from published generations, and `021` adds request lifecycle ownership. Historical migrations and monetary columns are retained. Use the migration runner for both fresh databases and upgrades; running only the initial snapshot no longer creates the target schema. Drain old Gateway requests and stop old Workers before upgrading, then deploy the matching Gateway/Admin/Worker release together; mixed-version lifecycle and capability writers are not supported.
+- Before stopping old Workers, finish pending request/usage reconciliation and drain old Gateway requests. Remove `budget-recovery` from explicit `WORKER_ROLES` lists and obsolete daily-token/reservation environment settings before starting this release. Historical quota columns and settings remain inert; do not flush shared Redis or delete usage history. Account for the dispatch-renewal overhead documented in [routing](routing.en.md#rate-limits-and-concurrency) when sizing PostgreSQL.
+- Prefer admin workflows for changing pool membership, client profiles, and RPM thresholds.
+- Client creation and key rotation commit the authentication hash, retrievable encrypted key, and audit entry together. If encryption or persistence fails, the operation fails without partially rotating the key. An unchanged inactive pool permits client maintenance or disablement; creation, pool changes, and re-enabling still require an active pool. Pool changes serialize with binding creation and renewal and reject clients with live bindings.
+- Dashboard refreshes preserve unsaved configuration/model drafts and fence obsolete responses. Impact previews distinguish pool/client scope and destructive retention changes. A successful save means persisted configuration, not proof that every Gateway has loaded it; verify observations separately.
+- In multi-instance deployments, Redis and PostgreSQL must be available before services start. If the initial Redis ping or a later command fails, readiness returns `503`; RPM and distributed concurrency checks fail closed, while sticky affinity and binding caches fall back to ordinary routing or PostgreSQL. The retained Redis client resumes normal operation automatically after recovery.
 - The schema contract uses `backend_pools.allocation_mode` values `shared`, `user_binding`, and `session_binding`; user bindings use `user_id_*` columns, while session bindings use the separate `account_session_bindings` table.
 
 ## Daily Checks
@@ -311,9 +308,9 @@ flowchart TD
 | --- | --- |
 | `GET /healthz` | Liveness check |
 | `GET /readyz` | Readiness check |
-| `GET /version` | Public Gateway `version` and `build_time`; excludes commits, configuration, and credentials |
+| `GET /version` | Public Gateway `version`, `build_time`, and `git_revision`; no schema, configuration, or credentials |
 | `GET /metrics` | Gateway metrics check with `Authorization: Bearer <ADMIN_TOKEN>` |
-| Dashboard | Inspect account status, pool status, error events, usage, cost, cache hit rate, and sync status |
+| Dashboard | Inspect account status, pool status, error events, token usage, cache hit rate, and sync status |
 
 Every Gateway response carries `X-Request-ID`. The access log and `provider request dispatch` event use the same `request_id`; the latter also records `request_format`, `model`, `upstream_api`, `pool_id`, `account_id`, `client_profile_id`, `client_version`, `runtime_version`, `responses_lite`, and `stream`, but never the request body, credentials, Authorization, or configuration values. Confirm the running version, then search the VM hourly logs using the request ID observed by the client:
 
@@ -334,32 +331,39 @@ Clients receive standard AI gateway semantics through `external_status`, `extern
 | `400 missing_user_id` / `400 invalid_user_id` | User-binding pool lacks or receives an invalid `user_id` | `400 invalid_request_error` | `user identifier is required` / `user identifier is invalid` | Prefer OpenAI `user` or Anthropic `metadata.user_id` / `metadata.user` |
 | `400 missing_session_id` / `400 invalid_session_id` | Session-binding pool lacks or receives an invalid `session_id` | `400 invalid_request_error` | `session identifier is required` / `session identifier is invalid` | Prefer `metadata.session_id` / `metadata.session`, or header `X-GHCP-Session-ID` |
 | `503 user_binding_unavailable` / `503 session_binding_unavailable` | Binding dependency failure, such as PostgreSQL or cache access | `503 service_unavailable` | `service temporarily unavailable` | Check PostgreSQL, Redis, and binding table state |
-| `503 budget_unavailable` | Rate-limit or budget state is unreadable | `503 service_unavailable` | `gateway limit state unavailable` | Check budget checker, Redis/PostgreSQL, and configuration sync |
+| `503 rate_limit_unavailable` | Rate-limit state is unreadable | `503 service_unavailable` | `gateway limit state unavailable` | Check the RPM checker, Redis/PostgreSQL, and configuration sync |
 | `429 global_rate_limited` / `429 account_rate_limited` | Global or internal resource-level RPM limit hit | `429 rate_limited` | `rate limit exceeded; please retry later` | Resource scope is hidden from clients; logs retain global/account granularity |
-| `429 global_budget_exhausted` / `429 account_budget_exhausted` | Global or internal resource-level token / AI Credits daily budget exhausted | `429 budget_exhausted` | `quota exceeded` | Clients see standard quota exhaustion; logs retain budget scope |
 | `502 upstream_error` | Upstream model provider failure | `502 upstream_error` | `model provider error` | Internal logs and usage ledger keep the original failure classification |
 | `500 stream_error` | SSE writer or streaming response initialization failed | `500 stream_error` | `stream response unavailable` | Check response writing, proxying, and client connection state |
 | Unmapped internal code | Other errors passed through the mapping function | Same as internal | Same as internal | Default passthrough; review new error types for neutralization needs |
 
 Upstream Copilot 4xx responses are classified before account health is updated. Authentication, permission, rate-limit, quota, network, and 5xx failures can still affect risk. Invalid request and generic upstream 4xx classifications are recorded in metrics and usage, but they do not increase account risk because they usually come from request shape, model compatibility, or client parameters rather than account health. A model-entitlement rejection may arrive as `403 permission_denied`; the gateway records it against the selected account and does not fail over to another account. For streaming calls, an upstream SSE read error or premature EOF before a completion marker is treated as a failed request and must not be emitted as a successful `[DONE]` terminator. Client cancellation interrupts blocked stream event delivery, closes the upstream response, and releases local and Redis concurrency reservations. Chat accepts `[DONE]` or EOF after a validated non-empty final `finish_reason`. Responses requires `response.completed` or `response.incomplete`; `response.output_text.done`, `response.content_part.done`, and `response.output_item.done` never prove response-level completion on their own.
 
-If clients receive `budget_exhausted`, check the gateway log fields `internal_code`, `account_id`, and `pool_id`, then inspect Redis counters such as `budget:daily:account:<account_id>:<yyyymmdd>` and `budget:daily:global:<yyyymmdd>`. Daily token and AI Credits caps are only active when the Dashboard Config value or corresponding `BUDGET_MAX_DAILY_*` environment value is greater than `0`.
+For a local `rate_limited` response, check the gateway log fields `internal_code`, `account_id`, and `pool_id`, then inspect the configured global/account RPM limits and retry with backoff. Upstream GitHub quota failures are still classified, but the proxy has no local daily-token or monetary quota to raise.
 
-## Usage, Cost, and Cache Observability
+## Usage and Cache Observability
 
-After a request completes, the gateway puts proxy-side usage into a bounded queue and writes up to 500 records or 250 ms at a time to the daily-partitioned `usage_ledger` with PostgreSQL `COPY`. With the real Copilot provider, it parses upstream `usage` and `copilot_usage` fields and records input tokens, cached input tokens, cache write tokens, output tokens, reasoning tokens, `nano_aiu`, estimated AI Credits, and estimated USD.
+After a request completes, its provider-attempt finalization durably records the usage materialization outbox. The gateway's bounded queue accelerates materialization of those specific attempts in batches (up to 500 records, with a 250 ms partial-batch interval); it is not the source of truth. The shared materializer inserts ledger rows and completes the claimed outbox batch in one PostgreSQL transaction. Worker compensation also uses this materializer to recover attempts missed by the queue. This path uses set-based SQL, not PostgreSQL `COPY`. With the real Copilot provider, it parses upstream token usage and records input tokens, cached input tokens, cache write tokens, output tokens, and reasoning tokens.
+
+Billing and consumption limits belong to GitHub. The proxy no longer enforces monetary or Token quotas, reserves or settles quota, estimates charges, or displays monetary usage. Historical quota database columns remain untouched for data preservation but are not read or updated by the current runtime. Remove obsolete quota environment variables from deployment configuration. Token usage statistics and client usage output remain available. Runtime configuration read failures return an explicit error rather than displaying default limits as successfully observed values.
+
+Worker materialization runs separately every five seconds, stopping after ten batches of 500 or a two-second work budget, whichever comes first. This bounds catch-up work without promising a measured throughput. Rollup, retention, and aggregate backlog metrics remain on the five-minute maintenance cadence. The dashboard exposes `/admin/usage/materialization` backlog, error/conflict counts, oldest pending age, and last successful materialization separately from token totals. A delayed materialization does not mean no requests occurred.
+
+Pool diagnostics use authenticated `GET /admin/pools/{id}/diagnostics`, optionally with paired `model=<upstream model id>&upstream_api=<api>` parameters. They observe account/seat/membership state, active binding occupancy, model evidence, live Redis leases, and RPM counters. Redis inspection is read-only, pipelined, limited to 200 accounts, and has a two-second timeout; the whole endpoint has a five-second timeout. It never calls Copilot or reserves capacity. Missing Redis state is reported as unavailable, not zero load. RPM exhaustion is evaluated only against valid database overrides; absent limits and Gateway startup defaults are unknown. These observations are not an atomic Gateway snapshot or an admission guarantee: bindings may serve their owner, model evidence is mandatory only for `require_fresh`, and configuration propagation is not verified.
 
 The dashboard Metrics tab shows these key indicators over the selected window:
 
 | Metric | Operational use |
 | --- | --- |
-| AI Credits / Estimated USD | Approximate Copilot usage-based billing consumption for the window |
+| Requests / Input / Output | Measures traffic and token consumption for the window |
 | Cache Hit Rate | Shows whether sticky/cache affinity is producing cache reads |
-| Cached Input / Cache Write | Separates cache read savings from cache write cost |
-| Reasoning Tokens | Identifies cost sources from reasoning models or high-reasoning requests |
-| Token Details | Preserves upstream token type, count, and batch cost in ledger `token_details` |
+| Cached Input / Cache Write | Separates cache-read tokens from cache-write tokens |
+| Reasoning Tokens | Identifies reasoning-model token consumption |
+| Token Details | Preserves upstream token type and count without monetary metadata |
 
-Prometheus text metrics also include cached/cache read tokens, cache write tokens, reasoning tokens, nano AIU, AI Credits micro, estimated USD micros, and cache hit ratio permille. If cache hit rate stays low, check client profile sticky policy, affinity strategy, session headers, and rebind/overflow metrics.
+Prometheus text metrics also include cached/cache read tokens, cache write tokens, reasoning tokens, and cache hit ratio permille. If cache hit rate stays low, check client profile sticky policy, affinity strategy, session headers, and rebind/overflow metrics.
+
+Dashboard account, pool, and client saves preserve edits made while a prior save is in flight. The generated Codex startup script uses one-shot `-c` overrides; it does not replace the user's existing Codex configuration.
 
 When validating the 3000-IOPS target, also watch the gateway usage-write queue:
 
@@ -367,9 +371,9 @@ When validating the 3000-IOPS target, also watch the gateway usage-write queue:
 | --- | --- |
 | `ghcp_usage_queue_depth` / `ghcp_usage_queue_capacity` | Depth must not trend upward or remain near the `10000` capacity |
 | `ghcp_usage_queue_rejected_total{reason="full"}` | Must remain `0` in a steady load test; growth means database throughput is behind request throughput |
-| `ghcp_usage_records_dropped_total` | Must remain `0` for every reason; includes enqueue failures and records lost when shutdown draining times out |
-| `ghcp_usage_batches_total{status="error"}` | Must remain `0`; growth indicates COPY timeout or database write failure |
-| `ghcp_usage_batch_duration_count` / `ghcp_usage_batch_duration_microseconds_total` / `ghcp_usage_batch_duration_microseconds_max` | Tracks COPY count, average, and worst case; correlate sustained growth with PostgreSQL commit latency and disk queue |
+| `ghcp_usage_records_dropped_total` | Fast-path queue rejection/drop count; should remain `0`. Investigate enqueue/shutdown failures and outbox materialization; a queue drop alone does not prove durable usage loss |
+| `ghcp_usage_batches_total{status="error"}` | Must remain `0`; growth indicates materialization timeout or database write failure |
+| `ghcp_usage_batch_duration_count` / `ghcp_usage_batch_duration_microseconds_total` / `ghcp_usage_batch_duration_microseconds_max` | Tracks materialization batch count, average, and worst case; correlate sustained growth with PostgreSQL commit latency and disk queue |
 | `ghcp_usage_queue_oldest_age_milliseconds` / `ghcp_usage_queue_residence_microseconds_max` | Must not keep growing across multiple flush intervals |
 | `ghcp_usage_batch_retries_total` / `ghcp_usage_batch_consecutive_failures` | Retries should not grow in steady state and consecutive failures should be `0` |
 | `ghcp_usage_batch_last_success_timestamp` | Must keep advancing so a shallow but stalled queue is visible |
@@ -401,7 +405,7 @@ Query granularity:
 | `daily` | Reads UTC-month-partitioned `usage_rollup_daily`, retaining the current month and 13 complete prior months by default for long-term trends and reconciliation |
 | `auto` | Uses raw within one hour, hourly within 90 days, and daily beyond 90 days, so the default 24-hour dashboard does not scan a full day of raw ledger data |
 
-Admin APIs support absolute date ranges: `/admin/usage/summary?from=2026-06-01&to=2026-06-23&granularity=auto`. Date-only `to` values use half-open range semantics and are advanced to the next UTC midnight, so `to=2026-06-23` includes the full June 23 day. The Usage Rollup Worker runs every five minutes and processes data up to `now()-2m` to avoid edge jitter from freshly written requests. Raw pruning uses `min(now-retention, rollup watermark)` as its safe boundary, while hourly and daily retention only drops complete UTC day/month partitions. Schema `19` has no auxiliary legacy ledger table or compatibility view; an upgrade refuses to continue until any legacy ledger has been emptied by the prior retention window.
+Admin APIs support absolute date ranges: `/admin/usage/summary?from=2026-06-01&to=2026-06-23&granularity=auto`. Date-only `to` values use half-open range semantics and are advanced to the next UTC midnight, so `to=2026-06-23` includes the full June 23 day. The Usage Rollup Worker runs every five minutes and processes data up to `now()-2m` to avoid edge jitter from freshly written requests. Raw pruning uses `min(now-retention, rollup watermark)` as its safe boundary, while hourly and daily retention only drops complete UTC day/month partitions. Since schema `19`, there is no auxiliary legacy ledger table or compatibility view; an upgrade refuses to continue until any legacy ledger has been emptied by the prior retention window.
 
 Retention can be changed under Dashboard Config without restarting services. The UI asks for confirmation when a new non-zero value shortens the current window because the next maintenance pass can make that deletion irreversible.
 
@@ -433,12 +437,12 @@ State meanings:
 | --- | --- |
 | `pending` | Waiting for validation after account creation |
 | `active` | Credential is valid and account can be routed |
-| `degraded` | Short failures or elevated risk; deweighted or limited |
+| `degraded` | Removed from routing until successful upstream re-admission or explicit recovery |
 | `recovery` | Recovery task in progress |
 | `quarantined` | Routing paused until recovery or credential reimport |
 | `revoked` | Fully offboarded, no automatic recovery |
 
-Token acquisition alone does not prove that the account can run a model. A successful token probe only lowers risk and may make a degraded account eligible for re-admission; only a successful upstream model probe changes it back to `active`. Probe requests use dedicated Worker paths and do not consume client usage, budget, RPM, sticky affinity, or bindings. PostgreSQL claims and health-version fencing reject stale completions, and Redis enforces global concurrency and start-rate limits across Worker instances. Limiter deferrals update only the next due time, avoiding per-second attempt and audit writes.
+Token acquisition alone does not prove that the account can run a model. A successful token probe only lowers risk and may make a degraded account eligible for re-admission; only a successful upstream model probe changes it back to `active`. Probe requests use dedicated Worker paths and do not consume client usage, RPM, sticky affinity, or bindings. PostgreSQL claims and health-version fencing reject stale completions, and Redis enforces global concurrency and start-rate limits across Worker instances. Limiter deferrals update only the next due time, avoiding per-second attempt and audit writes.
 
 Onboarding
 
@@ -514,7 +518,7 @@ Grouping
 
 1. Create a pool and choose its allocation mode and load-balancing strategy.
 2. Add or move accounts from the Pool page and verify max concurrency, weights, and binding state. Release active bindings before moving accounts.
-3. Assign each client to one concrete pool. Sticky remains a within-pool preference and cannot override health, budget, or seat validity.
+3. Assign each client to one concrete pool. Sticky remains a within-pool preference and cannot override health, RPM limits, or seat validity.
 
 Offboarding
 
@@ -552,7 +556,7 @@ flowchart TD
 
 GitHub Copilot upstream endpoint selection is mixed, not globally Responses by default. The server normalizes an explicit `upstream_api`; when it is omitted for a non-release entry, the single server catalog contract infers it from `vendor`, `upstream`, `name`, and `exposed`. Admin GET returns the normalized catalog plus `upstream_api_explicit`, and Dashboard consumes that DTO without maintaining its own vendor or API inference rules.
 
-The catalog is global. For `require_fresh` client profiles, Router and binding paths additionally require fresh per-account model evidence; `allow_unknown` profiles retain the legacy permissive policy. Release validation requires exact matrix/profile/pool references and fresh evidence for every active or binding-reserved account.
+The catalog is global. For `require_fresh` client profiles, Router and binding paths additionally require fresh per-account model evidence; `allow_unknown` profiles retain the permissive policy. When collecting optional target-environment evidence, the collector requires exact matrix/profile/pool references and fresh evidence for every active or binding-reserved account. This does not make real-account collection mandatory for the credential-free release gate; see [compatibility evidence](../compatibility/README.md).
 
 ```mermaid
 flowchart LR
@@ -596,7 +600,7 @@ flowchart TD
   B -->|"no"| D["handle sync, metric drift, config issues"]
   C --> E{"credential or seat invalid?"}
   E -->|"yes"| F["recover or remove account"]
-  E -->|"no"| G["check routing, concurrency, and budget"]
+  E -->|"no"| G["check routing, concurrency, and RPM"]
 ```
 
 | Priority | Description |
@@ -607,11 +611,25 @@ flowchart TD
 
 ## Troubleshooting
 
+### Layered Protocol Diagnosis
+
+| Symptom | Check first |
+| --- | --- |
+| Path-specific `400` | Parser/direction policy, required types, and the exact source/target route |
+| No exposed model or eligible account | Catalog, client profile, fixed pool, then the `require_fresh` account allowlist |
+| Fake upstream receives nothing | Request validation and provider support gates before changing routing |
+| Upstream `200`, downstream `502` | Typed envelope, item identity, status and terminal validation |
+| Partial SSE followed by failure | Source event state machine versus downstream projection; never replay a partially delivered request or fabricate completion |
+| Correct text, unexpected usage/health | Delivery outcome and usage source (`upstream`, `estimated`, `missing`), then journal/outbox materialization |
+| Fixed CLI passes but release is blocked | Matrix, build, schema, manifest, report freshness and release-specific attestation |
+
+Trace one minimal case through client/version → source format → exposed/upstream model → target API → profile/pool → canonical data → upstream events → downstream delivery. Compare adjacent layers, not an open-ended audit of every protocol. Keep only sanitized identifiers and metadata in shared diagnostics; [manual validation](runbooks/manual-validation.zh.md) defines the raw-report boundary.
+
 ### Account Cannot Be Routed
 
 1. Check whether the account is still `active`.
 2. Check whether concurrency has reached the limit.
-3. Check budget, risk score, and seat status.
+3. Check RPM limits, risk score, and seat status.
 4. Check whether the sticky target needs rebind.
 
 ### Low Sticky Hit Rate
@@ -649,15 +667,8 @@ flowchart TD
 
 ## Rollback Principles
 
-```mermaid
-flowchart TD
-  A["issue detected"] --> B{"can config be reverted?"}
-  B -->|"yes"| C["client profile"]
-  B -->|"no"| D["roll back service version"]
-  C --> E["verify metrics recovery"]
-  D --> E
-```
-
-- Prefer configuration rollback before binary rollback.
-- After rollback, verify request success rate, routing distribution, and account status.
+- Prefer a scoped configuration rollback and verify its refresh/restart requirements.
+- For binary rollback, select the complete prior release and its immutable image digests. Check schema compatibility first: an older image is not automatically safe against a newer database, and the migration runner is not a general downgrade tool.
+- Drain requests and stop incompatible writers before switching versions. If database restoration is required, restore a consistent backup and its matching configuration/master key rather than copying live data; see [cold backup and restore](runbooks/azure-vm-operations.zh-TW.md).
+- Verify build identity, schema, readiness, request success rate, routing distribution, and account status after recovery. Preserve an audit trail of the operator action.
 - Every recovery or removal operation should leave an audit trail.

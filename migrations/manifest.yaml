@@ -155,3 +155,31 @@ migrations:
     repair_policy: fail-closed
     preconditions: [schema-version-18]
     postconditions: [provider-attempt-runtime, credential-version-cas, org-sync-requests, seat-generation, metrics-maintenance-lease, legacy-ledger-removed, sticky-prefix-rejected, account-model-capabilities, account-model-capability-refresh-requests, capability-evidence-counter, capability-complete-version, model-entitlement-policy, client-profile-runtime-fields-only, usage-source-contract, usage-materialization-outbox, schema-version-19]
+  - id: 20
+    path: 020_capability_generations.sql
+    sha256: d1ba9eb57b3a0d937a7b26f96ce8000fc7ba52bc999cb9d99386d1f1ffe2d902
+    phase: expand
+    transaction: per-migration
+    from_schema: 19
+    to_schema: 20
+    consumers: [gateway, admin, worker]
+    min_protocol: 1
+    max_protocol: 2
+    retryable: true
+    repair_policy: fail-closed
+    preconditions: [schema-version-19]
+    postconditions: [capability-staging, atomic-capability-publication, schema-version-20]
+  - id: 21
+    path: 021_request_lifecycle.sql
+    sha256: b3a9069c3422aeaef998bce6891c8ca4c25147080a32bac7b7c79797c8376595
+    phase: expand
+    transaction: per-migration
+    from_schema: 20
+    to_schema: 21
+    consumers: [gateway, admin, worker]
+    min_protocol: 1
+    max_protocol: 2
+    retryable: true
+    repair_policy: fail-closed
+    preconditions: [schema-version-20]
+    postconditions: [binding-admission-ownership, renewable-dispatch-lease, provider-attempt-ledger-default, schema-version-21]

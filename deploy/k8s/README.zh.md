@@ -1,6 +1,6 @@
-# Kubernetes 单副本基线
+# Kubernetes 部署基线
 
-本目录已完成[集群化改造方案](../../docs/plans/cluster-deployment.zh.md)的第 2 阶段单副本等价基线、第 3 阶段 staging Gateway 高可用、第 4 阶段专用组织同步 Worker、第 5 阶段 Redis protocol v2 运行时契约，以及第 6 阶段 schema-19/release-set 身份契约。production overlay 保持一个 Gateway、一个 Admin、一个 general Worker 和一个组织同步 Worker；staging overlay 仅将 Gateway 提升为双副本，并启用滚动更新、PDB 和 hostname topology spread。
+本目录维护当前 Kubernetes 部署基线，剩余生产验收由[集群部署计划](../../docs/plans/cluster-deployment.zh.md)约束。production overlay 保持一个 Gateway、一个 Admin、一个 general Worker 和一个组织同步 Worker；staging overlay 仅将 Gateway 提升为双副本，并启用滚动更新、PDB 和 hostname topology spread。
 
 [English](README.en.md) | 中文
 
@@ -36,7 +36,7 @@ RELEASE_MANIFEST=/secure/path/release-manifest.env \
   deploy/k8s/apply.sh test
 ```
 
-如需完全一次性的本地 Kind 运行（在本地构建并加载四个应用镜像），执行：
+如需完全一次性的本地 Kind 运行（在本地构建并加载四个应用镜像），在源码 checkout 中执行：
 
 ```bash
 make k8s-test
@@ -53,7 +53,7 @@ make k8s-test
 - production 或 staging 的应用 namespace 可访问的外部 PostgreSQL 与 Redis；`test` overlay 会在 namespace 内提供一次性数据服务。
 - 从同一个 Git revision 构建的四个镜像：`gateway`、`admin`、`worker`、`migration`。
 
-从干净的同一个 Git commit 构建并发布四个 Dockerfile target，形成一个 release set：
+从干净的源码 checkout 构建并发布四个 Dockerfile target，形成同一 Git commit 的 release set；运行包不含 `start.sh` 或 Dockerfile：
 
 ```bash
 IMAGE_REPOSITORY="$REGISTRY/ghcp-pool-proxy" ./start.sh --push
@@ -175,11 +175,11 @@ deploy/k8s/apply.sh "$ENVIRONMENT"
 
 必要时设置 `KUBE_CONTEXT`、`MIGRATION_TIMEOUT` 或 `ROLLOUT_TIMEOUT`。不能把 migration Job 和应用 Deployment 作为无顺序的一组资源同时应用。
 
-默认每个进程最多使用 12 个 PostgreSQL 连接。production 第 2 阶段最多需要 36 个应用连接；staging 双 Gateway 最多需要 48 个应用连接。两者都需再加 migration 与运维余量，并至少保留 20% 连接容量。
+默认每个进程最多使用 12 个 PostgreSQL 连接。计入专用组织同步 Worker 后，production 最多需要 48 个应用连接；staging 双 Gateway 最多需要 60 个应用连接。两者都需再加 migration 与运维余量，并至少保留 20% 连接容量。
 
 ## 验证
 
-在连接集群前，先运行本地清单门禁：
+在连接集群前，先从源码 checkout 运行本地清单门禁：
 
 ```bash
 make k8s-validate
@@ -189,9 +189,9 @@ make k8s-validate
 
 双 hostname 的 staging 拓扑固定使用 `maxUnavailable: 1` 和 `maxSurge: 0`。增加 surge Pod 会形成 `2:1` 的 hostname 分布，违反严格的 `maxSkew: 1` spread 规则并卡住 rollout；PDB 仍会在替代 Pod 调度到被腾出的 hostname 前保留一个 ready Gateway。migration lock timeout 使用 Go duration 格式的 `5m`，`5min` 无效。
 
-阶段 3 已在隔离的三节点 Kind 集群中配合外部 PostgreSQL 和 Redis 演练：目标 Gateway 终止时其活跃 SSE 收到 `[DONE]`，显式 Gateway rollout restart 完成，标准节点 drain 通过 PDB 驱逐一个 Gateway 后 Service 仍可完成 SSE，解除 cordon 后两个 Gateway 重新跨 hostname 分布。阶段 4 在同一拓扑的空数据库上完成验证：合并 migration 创建 schema `19`，四个 Deployment 全部 ready，GitHub token volume 只出现在 `ghcp-org-sync-worker`，Admin queue 请求会合并、可查询状态且拒绝请求级 token。每个已批准的目标 staging 环境仍必须重复适用检查；这份本地证据不代表云环境验收。
+每个已批准的目标 staging 环境都应验证活跃 SSE drain、显式 Gateway rollout、遵守 PDB 的节点驱逐，以及恢复双 hostname 分布；同时核对迁移到发布目标版本、四个 Deployment 就绪、组织 token 的独占挂载及同步任务的 fencing/幂等。历史本地结果不等于目标环境验收。
 
-阶段 5 已通过 `make test-redis-cluster` 在一次性的三 primary + 三 replica Redis Cluster 验证 v2 Store contract；覆盖 Cluster slot coverage、按 primary inventory、budget reservation/finalization、account binding/concurrency、sticky cleanup、预算 slot primary 暂停后的 fail-closed/recovery，以及 `{budget}` 500/1000 RPS load。最终本机运行的 p95 分别为 `0.537 ms` 与 `0.689 ms`，门槛为 `50 ms`。`make k8s-test`（也保留为 `make test-phase5-single-node`）会创建一次性单节点 Kind，并部署含集群内 PostgreSQL、Redis 与中心测试 Secret 的 `test` overlay，验证 migration、四个 Deployment ready、`/readyz` 和 fake provider 三协议 smoke；脚本结束会删除集群。集群 Secret 必须使用同一 revision 或可选 Key Vault CSI source，不能按 Pod/节点分别维护本地环境变量。
+`make test-redis-cluster` 使用一次性的三 primary/三 replica Cluster 验证 v2 Store，包括 slot inventory、RPM、并发/binding、sticky 清理与 fail-closed 恢复。保留的 `{budget}` hash tag 用于 RPM，不代表已删除的日消费配额。所选服务仍需重跑适用的容量/failover 检查，旧本地 p95 不构成生产承诺；`make k8s-test` 覆盖上文的 disposable 单节点路径并清理测试集群。
 
 ```bash
 kubectl -n "$NAMESPACE" get pods,services

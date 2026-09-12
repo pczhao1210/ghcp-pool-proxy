@@ -40,11 +40,9 @@ flowchart LR
 | 1 | 显式 `upstream_api` | `responses` / `chat_completions` / `anthropic_messages` / 兼容别名，优先级最高 |
 | 2 | 显式或缓存 `vendor` | `OpenAI` / `Azure OpenAI` 归一化为 OpenAI，走上游 Responses；Anthropic 走上游 Messages；Google、Microsoft、xAI 走上游 Chat Completions |
 | 3 | 从 `upstream` / `name` / `exposed` 推断 vendor | `gpt*`、`gpt-*` 和 OpenAI o-series 归为 OpenAI；`gemini*` 归为 Google；`claude*`、`opus*`、`haiku*`、`sonnet*` 归为 Anthropic；`MAI*` 归为 Microsoft；`grok*` / `xai*` 归为 xAI |
-| 5 | 未能推断 | 保持空值，由 provider 按下游入口决定：`/v1/responses` 走 Responses，其它入口走 Chat Completions |
+| 4 | 未能推断 | 保持空值，由 provider 按下游入口决定：`/v1/responses` 走 Responses，其它入口走 Chat Completions |
 
-当前缓存的 Copilot 模型名形态包括 `GPT-5.4`、`GPT-5 mini`、`Gemini 3.1 Pro`、`Claude Opus/Sonnet/Haiku` 和 `MAI-Code-1-Flash`，所以推断会同时看真实上游 ID 和展示名，而不是只看 exposed alias。
-
-模型解析是 Gateway 全局行为，不校验 Router 选中账号是否具备该模型权限；pool 必须使用模型权限相同的账号。详见[候选账号过滤](routing.zh.md#候选账号过滤)。
+推断同时检查真实上游 ID、展示名和 exposed alias；目录映射本身不授予账号模型访问权限。`require_fresh` 还要求逐账号的模型/API 新鲜证据；`allow_unknown` 保留宽松路由，需要运维保持池内模型权限一致，见[候选账号过滤](routing.zh.md#候选账号过滤)。
 
 ### Claude Code 自定义模型名
 
@@ -101,7 +99,7 @@ Claude Code 的 `model`、`ANTHROPIC_MODEL`，以及需要 Opus 默认值时的 
 
 ## 同协议语义与兼容开关
 
-“同协议”指 typed 语义保真，不是字节透传。Gateway 仍会解析和校验 body、映射模型、选择账号、执行预算/并发规则、生成认证与安全 header、归一化 usage，并验证流式终态。
+“同协议”指 typed 语义保真，不是字节透传。Gateway 仍会解析和校验 body、映射模型、选择账号、执行 RPM/并发规则、生成认证与安全 header、归一化 usage，并验证流式终态。
 
 | 路径 | 同协议路径保留 | 明确归一化 |
 | --- | --- | --- |
@@ -114,7 +112,7 @@ Gateway 会保留并转发 `previous_response_id`，但 Copilot 可能拒绝有�
 
 | Feature Flag | 开启后的作用 |
 | --- | --- |
-| `copilot_compat_anthropic_beta_enabled` | 只发送已验证的 fine-grained tool streaming 与 interleaved thinking beta token |
+| `copilot_compat_anthropic_beta_enabled` | 应用已验证的 Copilot beta allowlist，包含 thinking、effort 与 tool streaming 等；完整列表与方向策略共同维护 |
 | `copilot_compat_thinking_tool_choice_enabled` | 原生 Messages 同时开启 thinking 与强制 tool choice 时，把 tool choice 改为 `auto` |
 | `copilot_compat_cache_control_enabled` | 保留 ephemeral cache breakpoint，同时移除不支持的子字段 |
 | `copilot_compat_vision_header_enabled` | typed 请求内容含图片时增加 `Copilot-Vision-Request: true` |
@@ -125,44 +123,30 @@ Gateway 会保留并转发 `previous_response_id`，但 Copilot 可能拒绝有�
 
 模型目录解析完成后，所有非原生路径必须匹配下面六个显式转换策略之一。方向策略与 Copilot Anthropic beta allowlist 统一由 `internal/protocol/request_policy.go` 管理；各 parser 的字段列表仍作为对应 envelope 的 wire schema 留在解析器内。公共 text、image、function tool、usage 和可映射终态继续投影。普通客户端以成功响应优先：已识别请求 envelope 中的未知可选字段，以及无法映射到目标协议的已知参数，会在 provider dispatch 前删除。JSON Schema、tool input/output、metadata 等开放业务对象不做递归过滤。无法安全投影的 content discriminator、role、必填字段与类型、tool lifecycle、identity 和终态语义仍会拒绝。
 
-| 方向 | 明确兼容的投影 | Fail-closed 示例 | 明确允许的 shape 归一化 |
-| --- | --- | --- | --- |
-| Chat → Responses | message、image、function tool/result、reasoning text | `message.name` 和无法保真的 typed history 扩展 | 合成 Responses item ID 与 lifecycle |
-| Chat → Messages | message、image、function tool/result、公共 stop reason | `message.name`、reasoning content/delta、非文本 system/developer 内容 | 删除目标无法表达的 Chat 参数；合成 Anthropic block 与 lifecycle；纯文本 system/developer message 转为顶层 `system` |
-| Responses → Chat | message/text/image、function call/output item | `previous_response_id`、结构化 instructions、reasoning/custom/tool-search/refusal item、message phase、tool namespace | 删除目标无法表达的 Responses 参数；省略 Responses item/lifecycle identity |
-| Responses → Messages | message/text/image、function call/output item，以及带 Gateway 专用前缀的 signed Anthropic thinking bridge item | 上述 Responses-only 语义，以及 Responses Lite/additional tools、无法识别的 reasoning item 和 refusal delta | 省略 Responses item/lifecycle identity；识别出的 bridge state 会恢复到匹配的 assistant tool-use turn 之前 |
-| Messages → Chat | text/image、普通文本 tool use/result | thinking/redacted block、signature、`is_error`、非文本 tool result、原生 cache/beta block 语义、来源 stop sequence 和非公共终态 | 删除目标无法表达的 Messages 参数；省略 Anthropic block/lifecycle identity |
-| Messages → Responses | text/image、普通文本 tool use/result | thinking/redacted block、signature、`is_error`、非文本 tool result、原生 cache/beta block 语义、来源 stop sequence 和非公共终态 | 删除目标无法表达的 Messages 参数；省略 Anthropic block/lifecycle identity |
+| 方向 | 主要投影与身份边界 |
+| --- | --- |
+| Chat → Responses | message、image、function tool/result 与 reasoning text；合成 Responses item ID 和 lifecycle |
+| Chat → Messages | message、image 与 function tool/result；纯文本 system/developer 转为顶层 `system`，合成 Anthropic block/lifecycle |
+| Responses → Chat | message/text/image 与 function call/output；不保留 Responses item/lifecycle identity |
+| Responses → Messages | 公共内容/工具，以及下述显式授权的 signed-thinking bridge；无关 Responses reasoning 不能视为 Anthropic thinking |
+| Messages → Chat | 公共 text/image/tool 内容；不保留 Anthropic block/lifecycle identity |
+| Messages → Responses | 公共 text/image/tool 内容；原生 signed thinking 不会获得反向路由的 bridge 授权 |
 
-Request validator 在路由、预算 reservation 和 provider dispatch 前执行，不兼容请求返回 `400 invalid_request_error`。非流式 response validator 在 typed 上游解析后、客户端序列化前执行；不兼容时返回 `502`，且不记录 durable success。Stream validator 在每个 canonical event 进入下游 SSE writer 前执行；不兼容时写入对应入口的 stream error shape，并把 provider attempt 保留为 `outcome_unknown`。
+请求归一化与响应校验是两份不同的合同。[入口协议字段](#入口协议字段)列出的可选请求 thinking/cache 元数据可以删除，但响应中无法表达的 block 或终态仍 fail closed。尤其是 Chat 上游服务 Messages 时会省略 unsigned reasoning，而不是伪造 Anthropic thinking block。
+
+Request validator 在路由、RPM 准入和 provider dispatch 前执行，不兼容请求返回 `400 invalid_request_error`。非流式 response validator 在 typed 上游解析后、客户端序列化前执行；不兼容时返回 `502`，且不记录 durable success。Stream validator 在每个 canonical event 进入下游 SSE writer 前执行；不兼容时写入对应入口的 stream error shape，并把 provider attempt 保留为 `outcome_unknown`。
 
 Parser 和语义门禁错误会包含转换方向、JSON path 和稳定 reason。未知可选 envelope 字段会原地删除，并把路径聚合到不参与序列化的 canonical request，避免经 raw map 到达上游；未知 union discriminator、role、缺失必填字段和核心字段类型错误仍会拒绝。仅当至少丢弃一个字段或 beta token 时，Gateway 才复用普通成功 access log 的 `logging.success_sample_rate` / `GATEWAY_SUCCESS_LOG_SAMPLE_RATE`，并按同一个服务端 request ID 得出相同的稳定采样决定。命中的请求只输出一条 `protocol_request_status` WARN，状态为 `normalized`，包含 source、target、route、聚合计数和最多 16 个去重后的路径，每条最长 160 rune；敏感路径片段替换为遮蔽标记，且不记录字段值、beta token、请求正文或凭据。没有丢弃项的请求不会进入该采样路径。
 
 ## 推理参数策略
 
-模型目录完成解析后，Gateway 按精确 `(upstream_model, upstream_api)` 查询不可变的内嵌转换 profile。[GitHub supported models 页面](https://docs.github.com/en/copilot/reference/ai-models/supported-models) 是当前 Copilot 支持名单、发布状态和官方 configurable reasoning 声明的事实源。动态 Copilot `/models` 与 `model_catalog_json` 仍决定账号实际可用性及精确 upstream ID/API；[客户端兼容矩阵](../compatibility/matrix.json) 仍决定客户端/版本合同。内嵌[模型转换矩阵](../internal/modelcatalog/conversion_matrix.json) 不会发布模型，也不会授予客户端能力。
+模型目录完成解析后，Gateway 按精确 `(upstream_model, upstream_api)` 查询不可变的内嵌转换 profile。[GitHub supported models 页面](https://docs.github.com/en/copilot/reference/ai-models/supported-models) 是当前 Copilot 支持名单、发布状态和官方 configurable reasoning 声明的事实源。动态 Copilot `/models` 与 `model_catalog_json` 仍决定账号实际可用性及精确 upstream ID/API；[客户端兼容矩阵](../compatibility/matrix.json) 仍决定客户端/版本合同。内嵌[源码中的模型转换矩阵](https://github.com/pczhao1210/ghcp-pool-proxy-codebase/blob/main/internal/modelcatalog/conversion_matrix.json) 不会发布模型，也不会授予客户端能力。
 
 请求侧生成控制只在该精确 profile 声明已验证目标 wire 参数和合法档位时归一。Messages -> OpenAI 中显式 `output_config.effort` 优先；`adaptive` 请求 `xhigh`，manual budget 小于 4,000 / 小于 16,000 / 其它分别请求 `low` / `medium` / `high`。请求档位合法时原样保留；否则提升到不低于请求的最近合法档，超过模型最高档时取最高档。因此 GPT-5.5 的 `max` 降为 `xhigh`，GPT-5.6 的 `max` 保持不变。`thinking:disabled` 不注入 reasoning。Responses profile 写入 `reasoning.effort`，Chat profile 可写入 `reasoning_effort`；没有精确 profile 时两者都不注入。源 `thinking` 与 `output_config` 在 OpenAI 序列化前仍会删除并记录诊断。
 
 adaptive-thinking bridge 只有在下游入口为 `/v1/responses`、模型目录目标为 Anthropic Messages、且精确 profile 声明 `adaptive_by_default` 时才启用；当前 Sonnet 5 与临时采用 reference 配置的 Opus 5 满足条件。原生 `/v1/messages` 与 Messages -> Responses 绝不会进入该逻辑。获授权的首轮会投影 `thinking.type=adaptive`，显式 Responses effort 按模型声明档位钳位，并删除 Anthropic thinking 不接受的 `temperature`/`top_p`。工具结果续轮只有在恢复了匹配的 signed thinking 历史后才继续 adaptive；缺少历史时由 route-local policy 发送 `thinking.type=disabled`。原生 `disabled` 只有在精确 Messages profile 声明后才会被接受。
 
-内嵌目录当前包含以下 11 个 Anthropic 条目。“仅目录”表示 GitHub 已列出该模型，但仓库没有精确 Copilot runtime binding，因此不会建立 active conversion profile，也不会获得路由资格。
-
-| 模型 | 仓库状态 | 当前 thinking 声明 |
-| --- | --- | --- |
-| Claude Fable 5 | 仅目录 | 无 active profile；Anthropic 文档中的 always-on adaptive 仅作参考 |
-| Claude Haiku 4.5 | 仅目录 | 无 active profile；extended thinking 仅作参考 |
-| Claude Opus 4.5 | 仅目录 | 无 active profile；extended thinking 仅作参考 |
-| Claude Opus 4.6 | reference profile | `adaptive`、已弃用的 `enabled`、`disabled`；budget tokens；`low/medium/high/max` |
-| Claude Opus 4.7 | reference profile | `adaptive`、`disabled`；`low/medium/high/xhigh/max` |
-| Claude Opus 4.8 | direct-probe-bound profile | `adaptive`、`disabled`；`low/medium/high/xhigh/max` |
-| Claude Opus 4.8 fast | 仅目录 | 没有精确 fast-mode binding 或 active profile |
-| Claude Opus 5 | reference profile | 暂时与 Sonnet 5 完全一致：默认 adaptive、`disabled`、完整五档 effort |
-| Claude Sonnet 4.5 | 仅目录 | 无 active profile；extended thinking 仅作参考 |
-| Claude Sonnet 4.6 | direct-probe-bound profile | `adaptive`、已弃用的 `enabled`、`disabled`；budget tokens；`low/medium/high/max` |
-| Claude Sonnet 5 | reference profile | 默认 adaptive、`disabled`；`low/medium/high/xhigh/max` |
-
-六个 active profile 都原样接受 `display` 的 `omitted` 与 `summarized`，不再做值改写。matrix 已移除早期临时使用的 `summarized -> omitted`、`low -> medium` 与 `high -> xhigh` 映射。Opus 5 仍无法通过 Copilot 实模探测，当前按要求保持与 Sonnet 5 完全一致；Claude 直连 API 中 Opus 5 对 `thinking:disabled` 与 `xhigh/max` 组合的独有限制无法由现有独立字段 schema 表达，也不作为 Copilot runtime evidence 声明。
+精确模型清单、thinking/display/effort 合法值与证据来源以部署版本对应的转换矩阵为准，不在文档重复维护。仅目录成员既不建立 active conversion profile，也不授予路由资格；reference profile 不等于 Copilot 实测证据。特别是 Opus 5 当前沿用 Sonnet 5 的 reference 配置，直连 API 的组合限制无法由独立字段 schema 表达，不应宣称为已验证的 Copilot 行为。
 
 上述映射保留的是生成深度意图，不是协议身份。`display:"summarized"` 不会转换为 Responses summary 参数，因为已验证 Gateway 合同明确为 `supports_reasoning_summary_parameter:false`。其它方向仍保持协议原生，除非另有能力门禁；Gateway 不按模型名猜测 Chat provider 方言。
 
@@ -275,7 +259,7 @@ temperature, top_p, top_k, stop, thinking, output_config, context_management, me
 
 其中 `stop_sequences` 会重命名为 `stop`。`thinking` 与 `output_config` 在原生 Messages 保持原样；目标为 OpenAI 时，仅当精确模型 profile 声明 `reasoning.effort` 或 `reasoning_effort` 才投影生成深度意图，随后删除源字段；没有 profile 的目标只删除，不注入 provider 方言。`context_management` 在两个 OpenAI 目标都会删除。`tool_choice.disable_parallel_tool_use:true` 映射为 OpenAI `parallel_tool_calls:false`；反向转换时，显式 OpenAI `false` 在存在工具时映射为 Anthropic `tool_choice.disable_parallel_tool_use:true`。原生 Messages 流式响应会把最终 `message_delta` 上 object 类型的 `context_management` 保留在相同位置；非 object 值或其它事件上的同名字段仍视为上游协议错误。Anthropic `metadata` 仍是上游 body 参数；绑定池也会读取 `metadata.user_id` / `metadata.user` 作为 `user_id`，读取 `metadata.session_id` / `metadata.session` 作为 `session_id`。
 
-Typed parser 识别 `thinking.display` 的 `omitted` 与 `summarized`。`summarized` 仅作为 Cherry Studio 兼容 hint：保留到目标方向确定后，由 Chat/Responses 策略删除完整 Anthropic-only `thinking` 对象，并把 `$.thinking` 记录为 normalized。原生 Copilot Messages 会按精确模型 profile 校验 thinking type、budget、display 与 effort；没有 profile 时保留仅允许 `display:"omitted"` 的保守 fallback。`summarized` 仍在 provider semantic boundary 拒绝，其它 display 值仍属于 parser 错误。
+Typed parser 识别 `thinking.display` 的 `omitted` 与 `summarized`。Chat/Responses 目标由方向策略删除完整 Anthropic-only `thinking` 对象，并把 `$.thinking` 记录为 normalized；原生 Copilot Messages 则按精确模型 profile 校验 thinking type、budget、display 与 effort。仅在没有 profile 时采用只允许 `display:"omitted"` 的保守 fallback，此时 `summarized` 在 semantic boundary 被拒绝。其它 display 值仍属于 parser 错误。
 
 原生保真范围包括 `text`、`image`、`tool_use`、`tool_result`、tool-result `is_error`、带 signature 的 `thinking`、`redacted_thinking`、`cache_control` 和 `context_management`。跨协议投影普通 tool use/result、图片和文本；thinking/redacted-thinking 历史、`is_error` 与 Anthropic cache metadata 会带 path 诊断删除，因为 OpenAI 投影本来就不携带它们。带图片的 tool-result content 在取得已验证的多模态 function-output 合同前继续 fail closed。
 
@@ -369,19 +353,17 @@ Provider 从 `SystemBlocks` 和 `SourceMessages` 重建有序原生 block，并�
 | OpenAI Responses | `response` | `response.created`、`response.output_text.delta`、`response.completed` 等事件 |
 | Anthropic Messages | Anthropic message shape | `message_start`、`content_block_delta`、`message_delta`、`message_stop` 等事件 |
 
-Usage 会统一为 input/output/cached/reasoning tokens、AI credits 和成本估算。Canonical `InputTokens` 采用 inclusive 口径，即 fresh input + cache read + cache write；因此 Chat/Responses 输出 inclusive 总量与 cached detail，而 Anthropic 输出会从 `input_tokens` 扣除两个 cache 子桶，并分别写入 `cache_read_input_tokens` / `cache_creation_input_tokens`。九条路由均满足 `fresh + cache_read + cache_creation == canonical input`。内部来源明确为 `upstream`、`estimated` 或 `missing`，并同时持久化到 provider-attempt journal 与 usage ledger。上游缺失 usage 时，客户端 JSON 会省略该字段，不再伪造零值对象；上游显式返回的全零对象仍会保留。来源为 `missing` 时保留最大预算 reservation，不会按实际零消耗结算。Responses 流式 usage 会同时包含 OpenAI 风格的 `input_tokens_details.cached_tokens`、`output_tokens_details.reasoning_tokens`，以及网关扩展的 cost/cache 字段。
+Usage 会统一为 input/output/cached/reasoning tokens，仅用于统计，不再用于 Token 配额控制；金额、价格与费用估算不再输出或用于准入。Canonical `InputTokens` 采用 inclusive 口径，即 fresh input + cache read + cache write；因此 Chat/Responses 输出 inclusive 总量与 cached detail，而 Anthropic 输出会从 `input_tokens` 扣除两个 cache 子桶，并分别写入 `cache_read_input_tokens` / `cache_creation_input_tokens`。九条路由均满足 `fresh + cache_read + cache_creation == canonical input`。内部来源明确为 `upstream`、`estimated` 或 `missing`，并同时持久化到 provider-attempt journal 与 usage ledger。上游缺失 usage 时，客户端 JSON 会省略该字段，不再伪造零值对象；上游显式返回的全零对象仍会保留。Responses 流式 usage 会同时包含 OpenAI 风格的 `input_tokens_details.cached_tokens`、`output_tokens_details.reasoning_tokens`，以及网关扩展的 cache 字段。
 
 流式完成语义是显式的：Chat 只有在先收到已校验的非空最终 `finish_reason` 后才接受 `[DONE]`，EOF 也只能在已有同一终态证据时完成；Responses 上游必须出现 `response.completed` 或 `response.incomplete`，output/content/item done 事件都不能作为 response 级终态证据；原生 Messages 只有收到 `message_stop` 才成功。畸形 Chat SSE JSON 会立即终止；Messages 在接受 `message_stop` 前会校验每个 content block index 的 start/delta/stop 类型与生命周期。同协议 Responses 保留上游 response ID 与 output/content/summary index。GitHub Copilot 可能在同一 `output_index` 的每帧轮换 `item_id`；收到显式 `response.output_item.added` 后，Gateway 以该 index 和 item kind 为准，保留首帧 item ID，并把后续 frame ID 归为别名，避免每个 token 被拆成独立 output item。真实的隐式多 item 与 kind 冲突仍保持分离或 fail closed。所有下游 Responses JSON event 都会获得从 0 单调递增的 `sequence_number`；标准 done/completed 终态快照仍携带完整文本，但不会被重新播放成 text delta。同协议 Messages 保留 block index、thinking signature、tool ID、stop reason、`stop_sequence` 和 usage。Chat、Responses、Messages 非流 body 都必须只含一个 JSON 值，随后为 EOF。Responses incomplete 会返回客户端，并按 `incomplete` 而非 `success` 记账。failed event、读错误、畸形 frame、尾随 JSON 和提前 EOF 都会形成协议失败，不会伪造成功终态。
 
 Responses refusal item 保持为原生 Responses 语义。非流式 refusal 如果路由到 Chat 或 Messages，会在序列化前拒绝；流式 refusal event 会成为上游协议失败而不是 text delta，因此不会被伪装成普通跨协议输出。
 
-跨协议终态只在语义等价时归一化：`end_turn`/`stop_sequence` 转为 Chat `stop`，`tool_use` 转为 `tool_calls`，`max_tokens`/`length` 转为 Responses `incomplete: max_output_tokens` 或 Chat `length`。其它来源协议专属终态 fail closed。
+跨协议终态只在语义等价时归一化：`end_turn`/`stop_sequence` 转为 Chat `stop`，`tool_use` 转为 `tool_calls`，`max_tokens`/`length` 转为 Responses `incomplete: max_output_tokens` 或 Chat `length`。已输出部分工具调用不能覆盖 `length`。其它来源协议专属终态 fail closed。
 
-本地 gateway 运行后，可用下面的脚本复现 MCP/tool 流式差异：
+原生 Responses 分别保留 response 与输出项的状态，包括 incomplete 输出项。只存在于终态快照的 reasoning 项，即使摘要为空也保留其 ID 和加密续接状态。将输出回放为原生 Responses 输入时保留 message `phase`；目标协议无法表达的 phase 会被拒绝，而不是静默删除。
 
-```bash
-python3 scripts/probe_stream_mcp.py --models gpt-5.5 gemini-3.5-flash claude-sonnet-4.6 --timeout 90 --dump-raw-dir /tmp/ghcp-mcp-probe
-```
+真实网关探针与原始 frame 的隐私边界见[人工验证](runbooks/manual-validation.zh.md)，不把一次本地调试结果当作新的客户端合同。
 
 ## 丢失与失真注意事项
 
